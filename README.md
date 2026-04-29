@@ -10,9 +10,19 @@ Minimal black-and-white lightOS style Android chat client built for small Androi
 - Persistent `MEMORY.md` user memory with in-app edit/wipe controls
 - Project-based instructions injected privately into chats in that project
 - Local chat/project history stored on device
-- STT/TTS voice flows with custom endpoint/OpenRouter support
-- Android assistant/voice-command overlay support (works on LP3)
+- STT/TTS voice flows with endpoint/OpenRouter support
+- Android assistant/voice-command overlay support
 - Pure black/white UI designed around compact screens
+
+## Screenshots
+
+| Assistant | Chats |
+| --- | --- |
+| ![Assistant](screenshots/assistant.png) | ![Chats](screenshots/chats.png) |
+
+| Memory | Settings |
+| --- | --- |
+| ![Memory](screenshots/memory.png) | ![Settings](screenshots/settings.png) |
 
 ## Install
 
