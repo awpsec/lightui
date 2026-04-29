@@ -1,0 +1,16 @@
+build/
+release/*.idsig
+*.apk.idsig
+*.keystore
+*.jks
+local.properties
+.gradle/
+.idea/
+.vscode/
+*.iml
+*.log
+*.tmp
+*.bak
+*.swp
+Thumbs.db
+.DS_Store
