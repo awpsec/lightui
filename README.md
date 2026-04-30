@@ -97,3 +97,7 @@ release/lightui-release.apk
 ## Notes
 
 This is a compact native Android Java project with no Gradle wrapper. The build script calls Android SDK tools directly: `aapt2`, `javac`, `d8`, `zipalign`, and `apksigner`.
+
+## License
+
+lightui is released under the GNU General Public License v3.0. See `LICENSE`.
