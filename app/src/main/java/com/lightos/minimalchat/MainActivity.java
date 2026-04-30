@@ -692,8 +692,6 @@ public class MainActivity extends Activity {
         continuousToggle.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { boolean next = !prefs.getBoolean("voiceLoop", true); prefs.edit().putBoolean("voiceLoop", next).apply(); continuousToggle.checked = next; continuousToggle.invalidate(); } });
         continuous.addView(continuousToggle, new LinearLayout.LayoutParams(dp(48), dp(28)));
         settings.addView(continuous);
-        settings.addView(text("macrodroid action: com.minimalchat.ASK voice=true", 10, Color.rgb(120,120,120)), new LinearLayout.LayoutParams(-1, dp(34)));
-
         settings.addView(sectionHeader("assistant answer"));
         settings.addView(settingChoice("model", voiceAnswerModelLabel(), new View.OnClickListener() { @Override public void onClick(View v) { chooseVoiceAnswerModel(); } }));
         settings.addView(text(voicePipelineLabel(), 10, Color.rgb(120,120,120)), new LinearLayout.LayoutParams(-1, dp(28)));
@@ -1812,17 +1810,22 @@ public class MainActivity extends Activity {
             CharSequence text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
             Uri u = intent.getParcelableExtra(Intent.EXTRA_STREAM);
             if (u != null) attachUri(u);
-            if (text != null) input.setText(text);
+            if (text != null) input.setText(limitIncomingText(text.toString()));
         } else if ("com.minimalchat.ASK".equals(action) || "com.lightos.minimalchat.ASK".equals(action)) {
             pane = 1;
             if (!hookVoiceMode) renderPane();
             String prompt = intent.getStringExtra("prompt");
-            if (prompt != null && input != null) input.setText(prompt);
-            if (intent.getBooleanExtra("voice", hookVoiceMode)) startVoice(true);
-            if (prompt != null && intent.getBooleanExtra("send", false)) send();
+            if (prompt != null && input != null) input.setText(limitIncomingText(prompt));
         } else if (hookVoiceMode) {
             startVoice(true);
         }
+    }
+
+    private String limitIncomingText(String text) {
+        String s = text == null ? "" : text;
+        if (s.length() <= 20000) return s;
+        toast("shared text truncated");
+        return s.substring(0, 20000);
     }
 
     private void showToolsMenu() {
@@ -1859,7 +1862,6 @@ public class MainActivity extends Activity {
 
     private boolean send() {
         saveApiKey();
-        attachClipboardImageIfPresent();
         String model = activeAnswerModel();
         String source = modelSource(model);
         String key = source.equals("openrouter") ? savedApiKey() : "";
@@ -4492,7 +4494,20 @@ public class MainActivity extends Activity {
     }
     private String clipboardText() { try { ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE); if (cm == null || !cm.hasPrimaryClip()) return ""; ClipData clip = cm.getPrimaryClip(); if (clip == null || clip.getItemCount() == 0) return ""; CharSequence text = clip.getItemAt(0).coerceToText(this); return text == null ? "" : text.toString().trim(); } catch (Exception e) { return ""; } }
     private void copyText(String s) { ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE); if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("message", s)); }
-    private void attachUri(Uri uri) { try { InputStream in = getContentResolver().openInputStream(uri); byte[] b = bytes(in); in.close(); imageBase64 = Base64.encodeToString(b, Base64.NO_WRAP); imageMime = getContentResolver().getType(uri); if (imageMime == null) imageMime = "image/jpeg"; } catch (Exception e) { toast("attach failed"); } }
+    private void attachUri(Uri uri) {
+        try {
+            String type = getContentResolver().getType(uri);
+            if (type == null || !type.toLowerCase(Locale.US).startsWith("image/")) { toast("image only"); return; }
+            InputStream in = getContentResolver().openInputStream(uri);
+            if (in == null) throw new RuntimeException("unreadable image");
+            byte[] b;
+            try { b = bytesLimited(in, 8 * 1024 * 1024); }
+            finally { try { in.close(); } catch (Exception ignored) { } }
+            imageBase64 = Base64.encodeToString(b, Base64.NO_WRAP);
+            imageMime = type;
+        } catch (TooLargeException e) { toast("image too large"); }
+        catch (Exception e) { toast("attach failed"); }
+    }
 
     private void loadState() {
         if (!prefs.getBoolean("modelSelected", false)) prefs.edit().remove("model").apply();
@@ -4630,6 +4645,8 @@ public class MainActivity extends Activity {
     private String join(ArrayList<String> xs) { StringBuilder b = new StringBuilder(); for (String x : xs) { String clean = x == null ? "" : x.trim(); if (clean.length() > 0) b.append(clean).append('\n'); } return b.toString(); }
     private String readAll(InputStream in) throws Exception { if (in == null) return ""; return new String(bytes(in), StandardCharsets.UTF_8); }
     private byte[] bytes(InputStream in) throws Exception { ByteArrayOutputStream out = new ByteArrayOutputStream(); byte[] buf = new byte[8192]; int n; while ((n = in.read(buf)) >= 0) out.write(buf, 0, n); return out.toByteArray(); }
+    private byte[] bytesLimited(InputStream in, int max) throws Exception { ByteArrayOutputStream out = new ByteArrayOutputStream(); byte[] buf = new byte[8192]; int n, total = 0; while ((n = in.read(buf)) >= 0) { total += n; if (total > max) throw new TooLargeException(); out.write(buf, 0, n); } return out.toByteArray(); }
+    private static class TooLargeException extends Exception { }
     private int dp(int v) { return Math.max(1, Math.round(v * uiScale())); }
     private float uiScale() { return getResources().getDisplayMetrics().widthPixels / BASE_WIDTH_DP; }
     private int fontOffset() { return prefs == null ? -1 : prefs.getInt("fontOffset", -1); }
