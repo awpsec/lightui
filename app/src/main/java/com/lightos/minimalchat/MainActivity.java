@@ -586,12 +586,12 @@ public class MainActivity extends Activity {
 
     private View settingsLink(final String title, final String page) {
         LinearLayout h = row();
-        h.setPadding(0, dp(5), 0, dp(5));
+        h.setPadding(0, dp(6), 0, dp(6));
         TextView name = text(title, 16, Color.WHITE);
         TextView arrow = text(">", 14, Color.LTGRAY);
         arrow.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
-        h.addView(name, new LinearLayout.LayoutParams(0, dp(32), 1));
-        h.addView(arrow, new LinearLayout.LayoutParams(dp(34), dp(32)));
+        h.addView(name, new LinearLayout.LayoutParams(0, dp(33), 1));
+        h.addView(arrow, new LinearLayout.LayoutParams(dp(34), dp(33)));
         h.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { if (settingsScrollView != null) savedSettingsScrollY = settingsScrollView.getScrollY(); settingsPage = page; showSettingsPane(); } });
         return h;
     }
@@ -2671,13 +2671,19 @@ public class MainActivity extends Activity {
         final Dialog d = panel("models");
         LinearLayout box = panelBox();
         box.addView(panelTitle("models"));
+        ScrollView scroller = new ScrollView(this);
+        scroller.setVerticalScrollBarEnabled(false);
+        LinearLayout list = new LinearLayout(this);
+        list.setOrientation(LinearLayout.VERTICAL);
+        scroller.addView(list);
         for (int i = 0; i < myModels.size(); i++) {
             final String m = myModels.get(i);
             TextView item = panelItem(shortModel(m), "");
             if (m.equals(selectedModel())) item.setText(shortModel(m) + " *");
             item.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); setModel(m); } });
-            box.addView(item);
+            list.addView(item);
         }
+        box.addView(scroller, new LinearLayout.LayoutParams(-1, 0, 1));
         TextView cancel = panelAction("cancel");
         cancel.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); } });
         box.addView(cancel, new LinearLayout.LayoutParams(-1, dp(48)));
