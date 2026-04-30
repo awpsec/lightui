@@ -97,6 +97,7 @@ public class MainActivity extends Activity {
     private static final int MESSAGE_PAGE = 30;
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
+    private static final String APP_VERSION = "1.0.2";
     private SharedPreferences prefs;
     private FrameLayout screen;
     private LinearLayout root, messageList, folderList, chatList;
@@ -145,10 +146,10 @@ public class MainActivity extends Activity {
     private final HashSet<String> selectedChats = new HashSet<String>();
     private final Handler ui = new Handler(Looper.getMainLooper());
     private String currentChatId = "", selectedFolder = "Inbox", expandedFolder = "", imageBase64 = "", imageMime = "image/jpeg", pendingVoiceText = "", replyQuote = "", voiceThinkingWord = "thinking", settingsPage = "";
-    private int pane = 1, messageStart = 0, messageEnd = 0, savedChatScrollY = 0, savedSettingsScrollY = 0, emptyPromptRun = 0, voiceThinkingRun = 0, recorderSpeechFrames = 0, voiceSession = 0;
+    private int pane = 1, messageStart = 0, messageEnd = 0, savedChatScrollY = 0, savedSettingsScrollY = 0, emptyPromptRun = 0, voiceThinkingRun = 0, voiceListenRun = 0, recorderSpeechFrames = 0, voiceSession = 0;
     private long recordingStartedAt = 0, quietSince = 0;
     private float downX, downY;
-    private boolean messageWindowReady = false, renderingMessages = false, savedChatScrollKnown = false, restoreScrollOnce = false, forceAutoScrollBottom = false, userAtChatBottom = true, voiceMode = false, voiceFullMode = false, voiceThinking = false, ttsReady = false, hookVoiceMode = false, recordingFallback = false, wavRecording = false, wavSubmitAfterStop = false, webSearchChat = false;
+    private boolean messageWindowReady = false, renderingMessages = false, savedChatScrollKnown = false, restoreScrollOnce = false, forceAutoScrollBottom = false, userAtChatBottom = true, voiceMode = false, voiceFullMode = false, voiceThinking = false, voiceAwaitingSpeechResult = false, ttsReady = false, hookVoiceMode = false, recordingFallback = false, wavRecording = false, wavSubmitAfterStop = false, webSearchChat = false;
 
     @Override public void onCreate(Bundle b) {
         super.onCreate(b);
@@ -201,7 +202,11 @@ public class MainActivity extends Activity {
         }
         if (e.getAction() == MotionEvent.ACTION_UP) {
             float dx = e.getX() - downX, dy = e.getY() - downY;
-            if (voiceMode && voiceFullMode && dx > dp(90) && Math.abs(dx) > Math.abs(dy) * 1.5f) { stopVoiceMode(); return true; }
+            if (voiceMode && voiceFullMode) {
+                if (dx > dp(90) && Math.abs(dx) > Math.abs(dy) * 1.5f) stopVoiceMode();
+                else if (Math.abs(dx) > dp(72) && Math.abs(dx) > Math.abs(dy) * 1.2f) return true;
+                else if (voiceAwaitingSpeechResult && isMiddleVoiceTap(e) && Math.abs(dx) < dp(24) && Math.abs(dy) < dp(24)) { finishListeningNow(); return true; }
+            }
             if (dy > dp(90) && Math.abs(dy) > Math.abs(dx) * 1.4f && clearFocusedTextField()) return true;
             if (Math.abs(dx) > dp(72) && Math.abs(dx) > Math.abs(dy) * 1.2f && Math.abs(dy) < dp(220)) {
                 if (dx > 0 && pane == 2 && settingsPage.length() > 0) { settingsPage = ""; showSettingsPane(); return true; }
@@ -210,6 +215,12 @@ public class MainActivity extends Activity {
             }
         }
         return super.dispatchTouchEvent(e);
+    }
+
+    private boolean isMiddleVoiceTap(MotionEvent e) {
+        float y = e.getY();
+        int h = screen == null ? getResources().getDisplayMetrics().heightPixels : screen.getHeight();
+        return y > h * 0.25f && y < h * 0.78f;
     }
 
     @Override public boolean dispatchKeyEvent(KeyEvent e) {
@@ -323,7 +334,9 @@ public class MainActivity extends Activity {
         rightHeader.setGravity(Gravity.CENTER_VERTICAL);
         webSearchIcon = new GlobeButton(this);
         webSearchIcon.active = webSearchChat;
-        webSearchIcon.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { webSearchChat = false; saveCurrentChat(); toast("web search off"); if (webSearchIcon != null) { webSearchIcon.active = false; webSearchIcon.invalidate(); } } });
+        webSearchIcon.setTranslationY(dp(2));
+        webSearchIcon.setClickable(webSearchChat);
+        webSearchIcon.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { if (!webSearchChat) return; webSearchChat = false; saveCurrentChat(); toast("web search off"); if (webSearchIcon != null) { webSearchIcon.active = false; webSearchIcon.setClickable(false); webSearchIcon.invalidate(); } } });
         rightHeader.addView(webSearchIcon, new LinearLayout.LayoutParams(dp(32), dp(28)));
         rightHeader.addView(space(1), new LinearLayout.LayoutParams(0, dp(28), 1));
         contextText.setPadding(0, 0, dp(8), 0);
@@ -469,9 +482,52 @@ public class MainActivity extends Activity {
         settings.addView(settingsLink("memory", "memory"));
         settings.addView(separator());
         settings.addView(settingsLink("models", "models"));
-        settings.addView(separator());
-        settings.addView(space(10));
+        addVersionFooter(settings);
     }
+
+    private void addVersionFooter(LinearLayout settings) {
+        maybeCheckLatestVersion();
+        TextView v = text(versionFooterText(), 11, Color.rgb(130,130,130));
+        v.setGravity(Gravity.CENTER_VERTICAL);
+        settings.addView(v, new LinearLayout.LayoutParams(-1, dp(22)));
+    }
+
+    private String versionFooterText() {
+        String latest = prefs == null ? "" : prefs.getString("latestGitHubVersion", "");
+        boolean outdated = latest.length() > 0 && compareVersions(latest, APP_VERSION) > 0;
+        return "version " + APP_VERSION + (outdated ? " - outdated!" : "");
+    }
+
+    private void maybeCheckLatestVersion() {
+        if (prefs == null) return;
+        long now = System.currentTimeMillis();
+        if (now - prefs.getLong("latestVersionCheckedAt", 0) < 6L * 60L * 60L * 1000L) return;
+        prefs.edit().putLong("latestVersionCheckedAt", now).apply();
+        new Thread(new Runnable() { @Override public void run() {
+            try {
+                HttpURLConnection c = (HttpURLConnection) new URL("https://api.github.com/repos/awpsec/lightui/releases/latest").openConnection();
+                c.setConnectTimeout(10000); c.setReadTimeout(10000); c.setRequestProperty("Accept", "application/vnd.github+json"); c.setRequestProperty("User-Agent", "lightui-android");
+                if (c.getResponseCode() >= 400) return;
+                final String tag = new JSONObject(readAll(c.getInputStream())).optString("tag_name", "").replaceFirst("^[vV]", "").trim();
+                if (tag.length() > 0) {
+                    prefs.edit().putString("latestGitHubVersion", tag).apply();
+                    runOnUiThread(new Runnable() { @Override public void run() { if (pane == 2 && settingsPage.length() == 0) showSettingsPane(); } });
+                }
+            } catch (Exception ignored) { }
+        } }).start();
+    }
+
+    private int compareVersions(String a, String b) {
+        String[] as = (a == null ? "" : a).replaceFirst("^[vV]", "").split("\\.");
+        String[] bs = (b == null ? "" : b).replaceFirst("^[vV]", "").split("\\.");
+        for (int i = 0; i < Math.max(as.length, bs.length); i++) {
+            int av = i < as.length ? parseVersionPart(as[i]) : 0, bv = i < bs.length ? parseVersionPart(bs[i]) : 0;
+            if (av != bv) return av > bv ? 1 : -1;
+        }
+        return 0;
+    }
+
+    private int parseVersionPart(String s) { try { return Integer.parseInt((s == null ? "" : s).replaceAll("[^0-9].*$", "")); } catch (Exception e) { return 0; } }
 
     private void addMemorySettings(LinearLayout settings) {
         LinearLayout memory = row();
@@ -530,12 +586,12 @@ public class MainActivity extends Activity {
 
     private View settingsLink(final String title, final String page) {
         LinearLayout h = row();
-        h.setPadding(0, dp(8), 0, dp(8));
+        h.setPadding(0, dp(5), 0, dp(5));
         TextView name = text(title, 16, Color.WHITE);
         TextView arrow = text(">", 14, Color.LTGRAY);
         arrow.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
-        h.addView(name, new LinearLayout.LayoutParams(0, dp(34), 1));
-        h.addView(arrow, new LinearLayout.LayoutParams(dp(34), dp(34)));
+        h.addView(name, new LinearLayout.LayoutParams(0, dp(32), 1));
+        h.addView(arrow, new LinearLayout.LayoutParams(dp(34), dp(32)));
         h.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { if (settingsScrollView != null) savedSettingsScrollY = settingsScrollView.getScrollY(); settingsPage = page; showSettingsPane(); } });
         return h;
     }
@@ -1842,7 +1898,7 @@ public class MainActivity extends Activity {
         final TextView web = text(toolLabel("web search", webSearchChat), 16, Color.WHITE);
         web.setGravity(Gravity.CENTER_VERTICAL);
         web.setPadding(0, dp(10), 0, dp(10));
-        web.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { webSearchChat = !webSearchChat; saveCurrentChat(); web.setText(toolLabel("web search", webSearchChat)); if (webSearchIcon != null) { webSearchIcon.active = webSearchChat; webSearchIcon.invalidate(); } toast(webSearchChat ? "web search on" : "web search off"); } });
+        web.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { webSearchChat = !webSearchChat; saveCurrentChat(); web.setText(toolLabel("web search", webSearchChat)); if (webSearchIcon != null) { webSearchIcon.active = webSearchChat; webSearchIcon.setClickable(webSearchChat); webSearchIcon.invalidate(); } toast(webSearchChat ? "web search on" : "web search off"); } });
         box.addView(web, new LinearLayout.LayoutParams(-1, dp(44)));
         FrameLayout.LayoutParams boxLp = new FrameLayout.LayoutParams(-1, -2, Gravity.TOP);
         boxLp.setMargins(dp(26), dp(58), dp(26), 0);
@@ -2147,8 +2203,8 @@ public class MainActivity extends Activity {
                 if (words >= 10 && firstGood < 0) firstGood = boundary;
                 if (words >= 18 && secondGood < 0) secondGood = boundary;
                 if (words >= 28 && thirdGood < 0) thirdGood = boundary;
-                if (sentences >= (fastTtsOutput() ? 1 : 3) && words >= (fastTtsOutput() ? 7 : 14)) return boundary;
-                if (words >= (fastTtsOutput() ? 24 : 42)) return boundary;
+                if (sentences >= 3 && words >= (fastTtsOutput() ? 18 : 14)) return boundary;
+                if (words >= 42) return boundary;
             }
         }
         if (s.length() > 0 && isSpeechWordChar(s, s.length() - 1)) words++;
@@ -2907,12 +2963,14 @@ public class MainActivity extends Activity {
 
     private void beginListening() {
         if (voiceReply != null) voiceReply.setVisibility(View.GONE);
+        voiceAwaitingSpeechResult = true;
         vibrateListenStarted();
         if (voiceFullMode) renderVoiceConversation();
         startVoiceThinking("listening...");
+        scheduleVoiceListenTimeout();
         String provider = voiceInputProvider();
         if ("openrouter".equals(provider) || "endpoint".equals(provider)) { beginFallbackRecording(); return; }
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) { if ("auto".equals(provider)) beginFallbackRecording(); else updateVoiceStatus("no speech recognizer"); return; }
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) { if ("auto".equals(provider)) beginFallbackRecording(); else { voiceAwaitingSpeechResult = false; stopVoiceThinking(); updateVoiceStatus("no speech recognizer"); if (voiceFullMode && voiceReply != null) voiceReply.setVisibility(View.VISIBLE); } return; }
         if (speechRecognizer != null) { speechRecognizer.destroy(); speechRecognizer = null; }
         speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this);
         speechRecognizer.setRecognitionListener(new RecognitionListener() {
@@ -2934,7 +2992,35 @@ public class MainActivity extends Activity {
         speechRecognizer.startListening(i);
     }
 
+    private void scheduleVoiceListenTimeout() {
+        final int session = voiceSession;
+        final int run = ++voiceListenRun;
+        ui.postDelayed(new Runnable() { @Override public void run() {
+            if (!voiceSessionActive(session) || run != voiceListenRun || !voiceAwaitingSpeechResult) return;
+            if (recordingFallback) { stopRecorder(true); return; }
+            if (speechRecognizer != null) {
+                updateVoiceStatus("thinking");
+                try { speechRecognizer.stopListening(); } catch (Exception ignored) { }
+                ui.postDelayed(new Runnable() { @Override public void run() { if (voiceSessionActive(session) && run == voiceListenRun && voiceAwaitingSpeechResult) handleVoiceMiss(); } }, 1800);
+            } else handleVoiceMiss();
+        } }, 12000);
+    }
+
+    private void finishListeningNow() {
+        if (!voiceMode || !voiceFullMode || !voiceAwaitingSpeechResult) return;
+        vibrateInputEnded();
+        updateVoiceStatus("thinking");
+        fadeVoiceWaves();
+        if (recordingFallback) { stopRecorder(true); return; }
+        if (speechRecognizer != null) {
+            try { speechRecognizer.stopListening(); } catch (Exception ignored) { }
+            final int session = voiceSession, run = voiceListenRun;
+            ui.postDelayed(new Runnable() { @Override public void run() { if (voiceSessionActive(session) && run == voiceListenRun && voiceAwaitingSpeechResult) handleVoiceMiss(); } }, 1800);
+        }
+    }
+
     private void handleVoiceResults(Bundle results) {
+        voiceAwaitingSpeechResult = false;
         ArrayList<String> r = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
         if (r == null || r.size() == 0) { handleVoiceMiss(); return; }
         String text = r.get(0).trim();
@@ -2947,6 +3033,7 @@ public class MainActivity extends Activity {
     }
 
     private void handleVoiceMiss() {
+        voiceAwaitingSpeechResult = false;
         stopVoiceThinking();
         setVoiceLevel(0f);
         if (voiceFullMode) {
@@ -2957,6 +3044,7 @@ public class MainActivity extends Activity {
     }
 
     private void submitVoiceText(String text) {
+        voiceAwaitingSpeechResult = false;
         String clean = cleanVoiceTranscript(text);
         if (clean.length() == 0) { handleVoiceMiss(); return; }
         if (isModelRefusal(clean)) { pauseVoiceAfterProviderFailure("model refused", "model refused\n" + clean); return; }
@@ -2980,7 +3068,7 @@ public class MainActivity extends Activity {
     }
 
     private void beginFallbackRecording() {
-        if (!"openrouter".equals(voiceInputProvider()) && voiceTranscriptionEndpoint().length() == 0) { updateVoiceStatus("add voice endpoint"); return; }
+        if (!"openrouter".equals(voiceInputProvider()) && voiceTranscriptionEndpoint().length() == 0) { voiceAwaitingSpeechResult = false; stopVoiceThinking(); updateVoiceStatus("add voice endpoint"); return; }
         if (shouldUseSingleMultimodalVoice() || shouldUseOpenRouterChatAudioTranscription()) { beginWavRecording(); return; }
         try {
             stopRecorder(false);
@@ -3005,6 +3093,8 @@ public class MainActivity extends Activity {
             animateRecorderLevel();
         } catch (Exception e) {
             recordingFallback = false;
+            voiceAwaitingSpeechResult = false;
+            stopVoiceThinking();
             updateVoiceStatus("record failed");
         }
     }
@@ -3016,6 +3106,7 @@ public class MainActivity extends Activity {
             setVoiceLevel(level);
             if (level > 0.13f) recorderSpeechFrames++;
             long now = System.currentTimeMillis();
+            if (now - recordingStartedAt > 12000) { stopRecorder(true); return; }
             if (now - recordingStartedAt > 1400) {
                 if (level < 0.08f) {
                     if (quietSince == 0) quietSince = now;
@@ -3050,6 +3141,8 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             wavRecording = false;
             recordingFallback = false;
+            voiceAwaitingSpeechResult = false;
+            stopVoiceThinking();
             updateVoiceStatus("record failed");
         }
     }
@@ -3073,6 +3166,7 @@ public class MainActivity extends Activity {
                 final float level = Math.max(0.05f, Math.min(1f, max / 14000f));
                 if (level > 0.13f) recorderSpeechFrames++;
                 long now = System.currentTimeMillis();
+                if (now - recordingStartedAt > 12000) ui.post(new Runnable() { @Override public void run() { stopRecorder(true); } });
                 if (now - recordingStartedAt > 1400) {
                     if (level < 0.08f) {
                         if (quietSince == 0) quietSince = now;
@@ -3115,6 +3209,7 @@ public class MainActivity extends Activity {
     private void writeLeShort(RandomAccessFile out, int v) throws Exception { out.write(v & 0xff); out.write((v >> 8) & 0xff); }
 
     private void stopRecorder(boolean transcribe) {
+        if (transcribe) voiceAwaitingSpeechResult = false;
         if (audioRecord != null) {
             wavSubmitAfterStop = transcribe;
             wavRecording = false;
@@ -3574,6 +3669,7 @@ public class MainActivity extends Activity {
     private void stopVoiceMode() {
         if (hookVoiceMode) saveCurrentChat();
         voiceSession++;
+        voiceAwaitingSpeechResult = false;
         voiceMode = false;
         voiceFullMode = false;
         abandonVoiceAudioFocus();
