@@ -1,6 +1,6 @@
 # lightui
 
-Minimal black-and-white Android chat client built for small Android devices and the Light Phone III. It talks to OpenRouter or OpenAI-compatible endpoints, supports voice, web search, persistent memory, projects, and project-specific instructions.
+Minimal black-and-white Android chat client built for small Android devices (specifically the Light Phone III). It talks to OpenRouter or OpenAI-compatible endpoints, supports voice, web search, persistent memory, projects, and project-specific instructions.
 
 ## Features
 
@@ -12,7 +12,7 @@ Minimal black-and-white Android chat client built for small Android devices and 
 - Local chat/project history stored on device
 - STT/TTS voice flows with endpoint/OpenRouter support
 - Android assistant/voice-command overlay support
-- Pure black/white UI designed around compact screens
+- Pure black/white UI designed around the lightOS style
 
 ## Screenshots
 
