@@ -147,7 +147,7 @@ public class MainActivity extends Activity {
     private final ArrayList<String> lastSearchSources = new ArrayList<String>();
     private final HashSet<String> selectedChats = new HashSet<String>();
     private final Handler ui = new Handler(Looper.getMainLooper());
-    private String currentChatId = "", selectedFolder = "Inbox", expandedFolder = "", imageBase64 = "", imageMime = "image/jpeg", pendingVoiceText = "", replyQuote = "", voiceThinkingWord = "thinking", settingsPage = "";
+    private String currentChatId = "", selectedFolder = "Inbox", projectView = "", expandedFolder = "", imageBase64 = "", imageMime = "image/jpeg", pendingVoiceText = "", replyQuote = "", voiceThinkingWord = "thinking", settingsPage = "";
     private int pane = 1, messageStart = 0, messageEnd = 0, savedChatScrollY = 0, savedSettingsScrollY = 0, emptyPromptRun = 0, voiceThinkingRun = 0, voiceListenRun = 0, recorderSpeechFrames = 0, voiceSession = 0;
     private long recordingStartedAt = 0, quietSince = 0;
     private float downX, downY;
@@ -211,6 +211,7 @@ public class MainActivity extends Activity {
             }
             if (dy > dp(90) && Math.abs(dy) > Math.abs(dx) * 1.4f && clearFocusedTextField()) return true;
             if (Math.abs(dx) > dp(72) && Math.abs(dx) > Math.abs(dy) * 1.2f && Math.abs(dy) < dp(220)) {
+                if (dx > 0 && pane == 0 && projectView.length() > 0) { projectView = ""; showChatsPane(); return true; }
                 if (dx > 0 && pane == 2 && settingsPage.length() > 0) { settingsPage = ""; showSettingsPane(); return true; }
                 if (dx < 0 && pane < 2) { pane++; if (pane == 2) settingsPage = ""; renderPane(); return true; }
                 if (dx > 0 && pane > 0) { pane--; renderPane(); return true; }
@@ -231,6 +232,7 @@ public class MainActivity extends Activity {
             if (code == KeyEvent.KEYCODE_HOME || code == KeyEvent.KEYCODE_BACK || code == KeyEvent.KEYCODE_ESCAPE || code == KeyEvent.KEYCODE_MOVE_HOME) {
                 if (voiceMode && voiceFullMode) stopVoiceMode();
                 else if (projectEditorOpen) showChatsPane();
+                else if (pane == 0 && projectView.length() > 0) { projectView = ""; showChatsPane(); }
                 else if (pane == 2 && settingsPage.length() > 0) { settingsPage = ""; showSettingsPane(); }
                 else goHome();
                 return true;
@@ -307,6 +309,7 @@ public class MainActivity extends Activity {
         projectEditorOpen = false;
         pane = 1;
         clearPaneViews();
+        root.setOnClickListener(null);
         root.setPadding(dp(26), dp(14), dp(26), dp(10));
         restoreScrollOnce = savedChatScrollKnown;
         LinearLayout header = row();
@@ -413,6 +416,7 @@ public class MainActivity extends Activity {
         pane = 2;
         captureChatScroll();
         clearPaneViews();
+        root.setOnClickListener(null);
         root.setPadding(dp(26), dp(14), dp(26), dp(10));
         apiKey = null;
         endpointInput = null;
@@ -1374,15 +1378,24 @@ public class MainActivity extends Activity {
         restoreScrollOnce = false;
         captureChatScroll();
         clearPaneViews();
+        root.setOnClickListener(null);
         root.setPadding(dp(16), dp(8), dp(16), dp(8));
         LinearLayout top = row();
         top.setGravity(Gravity.CENTER_VERTICAL);
         TextView title = text("chats", 21, Color.WHITE);
-        ImageButton add = iconButton(R.drawable.ic_folder_plus, new View.OnClickListener() { @Override public void onClick(View v) { addFolder(); } }, 6);
+        title.setGravity(Gravity.CENTER_VERTICAL);
+        title.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { if (projectView.length() > 0) { projectView = ""; showChatsPane(); } } });
+        top.addView(title, new LinearLayout.LayoutParams(-2, dp(38)));
+        if (projectView.length() > 0) {
+            TextView sub = text("  " + projectView, 13, Color.rgb(150,150,150));
+            sub.setGravity(Gravity.CENTER_VERTICAL);
+            sub.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { projectView = ""; showChatsPane(); } });
+            top.addView(sub, new LinearLayout.LayoutParams(0, dp(38), 1));
+        } else top.addView(space(1), new LinearLayout.LayoutParams(0, dp(38), 1));
         ImageButton fresh = iconButton(R.drawable.ic_chat_plus, new View.OnClickListener() { @Override public void onClick(View v) { newChat(); pane = 1; renderPane(); } }, 6);
-        top.addView(title, new LinearLayout.LayoutParams(0, dp(38), 1));
         top.addView(fresh, new LinearLayout.LayoutParams(dp(42), dp(34)));
-        top.addView(add, new LinearLayout.LayoutParams(dp(42), dp(34)));
+        if (projectView.length() > 0) top.addView(iconButton(R.drawable.ic_pencil, new View.OnClickListener() { @Override public void onClick(View v) { editFolder(projectView); } }, 8), new LinearLayout.LayoutParams(dp(42), dp(34)));
+        else top.addView(iconButton(R.drawable.ic_folder_plus, new View.OnClickListener() { @Override public void onClick(View v) { addFolder(); } }, 6), new LinearLayout.LayoutParams(dp(42), dp(34)));
         root.addView(top, new LinearLayout.LayoutParams(-1, dp(40)));
         ScrollView s = new ScrollView(this);
         s.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
@@ -1397,12 +1410,18 @@ public class MainActivity extends Activity {
     private void renderChatList() {
         chatList.removeAllViews();
         chatList.setPadding(0, dp(3), 0, dp(14));
+        if (projectView.length() > 0) {
+            boolean hasProjectChats = false;
+            for (final Chat c : chats) if (projectView.equals(c.folder)) { hasProjectChats = true; chatList.addView(chatCard(c, false)); }
+            if (!hasProjectChats) chatList.addView(emptyLine("no chats yet"));
+            updateBulkButton();
+            return;
+        }
         chatList.addView(sectionHeader("projects  " + realFolderCount()));
         boolean hasFolders = false;
         for (final String f : folders) if (!"Inbox".equals(f)) {
             hasFolders = true;
             chatList.addView(folderCard(f));
-            if (f.equals(expandedFolder)) for (final Chat c : chats) if (f.equals(c.folder)) chatList.addView(chatCard(c, true));
         }
         if (!hasFolders) chatList.addView(emptyLine("no projects"));
         chatList.addView(space(10));
@@ -1417,9 +1436,7 @@ public class MainActivity extends Activity {
         LinearLayout card = row();
         card.setPadding(dp(10), 0, dp(6), 0);
         card.setBackground(cardBorder());
-        card.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { expandedFolder = folder.equals(expandedFolder) ? "" : folder; renderChatList(); } });
-        TextView arrow = cardText(folder.equals(expandedFolder) ? "v" : ">", 13, Color.LTGRAY);
-        arrow.setGravity(Gravity.CENTER);
+        card.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { projectView = folder; showChatsPane(); } });
         TextView name = cardText(folder, 14, Color.WHITE);
         name.setGravity(Gravity.CENTER_VERTICAL);
         TextView count = cardText(folderCount(folder) + " chats", 11, Color.LTGRAY);
@@ -1427,7 +1444,6 @@ public class MainActivity extends Activity {
         TextView dots = cardText("...", 13, Color.LTGRAY);
         dots.setGravity(Gravity.CENTER);
         dots.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { folderActions(folder); } });
-        card.addView(arrow, new LinearLayout.LayoutParams(dp(22), dp(40)));
         card.addView(name, new LinearLayout.LayoutParams(0, dp(40), 1));
         card.addView(count, new LinearLayout.LayoutParams(dp(68), dp(40)));
         card.addView(dots, new LinearLayout.LayoutParams(dp(30), dp(40)));
@@ -4385,6 +4401,7 @@ public class MainActivity extends Activity {
                     folderInstructions.remove(folder);
                     for (Chat c : chats) if (folder.equals(c.folder)) c.folder = next;
                     if (folder.equals(selectedFolder)) selectedFolder = next;
+                    if (folder.equals(projectView)) projectView = next;
                     if (folder.equals(expandedFolder)) expandedFolder = next;
                     if (oldInstruction.length() > 0) folderInstructions.put(next, oldInstruction);
                 }
@@ -4469,6 +4486,7 @@ public class MainActivity extends Activity {
             folderInstructions.remove(folder);
             for (Chat c : chats) if (folder.equals(c.folder)) c.folder = "Inbox";
             if (folder.equals(selectedFolder)) selectedFolder = "Inbox";
+            if (folder.equals(projectView)) projectView = "";
             if (folder.equals(expandedFolder)) expandedFolder = "";
             saveState(); d.dismiss(); showChatsPane();
         } });
@@ -4612,8 +4630,8 @@ public class MainActivity extends Activity {
         showPanel(d, box);
     }
 
-    private void newChat() { saveCurrentChat(); currentChatId = ""; messages.clear(); webSearchChat = false; savedChatScrollKnown = false; forceAutoScrollBottom = false; resetMessageWindowToLatest(); if (messageList != null) renderMessages(); }
-    private void loadChat(Chat c) { currentChatId = c.id; selectedFolder = c.folder; messages.clear(); messages.addAll(c.messages); webSearchChat = c.webSearch; if (c.model.length() > 0) prefs.edit().putString("model", c.model).putBoolean("modelSelected", true).apply(); savedChatScrollKnown = false; forceAutoScrollBottom = true; resetMessageWindowToLatest(); }
+    private void newChat() { saveCurrentChat(); currentChatId = ""; messages.clear(); selectedFolder = projectView.length() > 0 ? projectView : "Inbox"; webSearchChat = false; savedChatScrollKnown = false; forceAutoScrollBottom = false; resetMessageWindowToLatest(); if (messageList != null) renderMessages(); }
+    private void loadChat(Chat c) { currentChatId = c.id; selectedFolder = c.folder; if (!"Inbox".equals(c.folder)) projectView = c.folder; messages.clear(); messages.addAll(c.messages); webSearchChat = c.webSearch; if (c.model.length() > 0) prefs.edit().putString("model", c.model).putBoolean("modelSelected", true).apply(); savedChatScrollKnown = false; forceAutoScrollBottom = true; resetMessageWindowToLatest(); }
     private void saveCurrentChat() { if (messages.size() == 0) return; if (currentChatId.length() == 0) currentChatId = String.valueOf(System.currentTimeMillis()); Chat t = null; for (Chat c : chats) if (c.id.equals(currentChatId)) t = c; if (t == null) { t = new Chat(); t.id = currentChatId; chats.add(0, t); } t.folder = selectedFolder; t.title = firstUserText(); t.webSearch = webSearchChat; t.model = chatModelForSave(); t.messages.clear(); t.messages.addAll(messages); saveState(); }
     private String chatModelForSave() { for (int i = messages.size() - 1; i >= 0; i--) if (messages.get(i).role.equals("assistant") && messages.get(i).model.length() > 0) return expandShortModel(messages.get(i).model); return activeAnswerModel(); }
     private String expandShortModel(String label) { for (String m : models) if (shortModel(m).equals(label) || m.equals(label)) return m; return label; }
