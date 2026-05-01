@@ -20,6 +20,7 @@ import android.graphics.Color;
 import android.graphics.LinearGradient;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.graphics.Rect;
 import android.graphics.Shader;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
@@ -54,6 +55,7 @@ import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewTreeObserver;
 import android.view.Window;
 import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
@@ -149,7 +151,7 @@ public class MainActivity extends Activity {
     private int pane = 1, messageStart = 0, messageEnd = 0, savedChatScrollY = 0, savedSettingsScrollY = 0, emptyPromptRun = 0, voiceThinkingRun = 0, voiceListenRun = 0, recorderSpeechFrames = 0, voiceSession = 0;
     private long recordingStartedAt = 0, quietSince = 0;
     private float downX, downY;
-    private boolean messageWindowReady = false, renderingMessages = false, savedChatScrollKnown = false, restoreScrollOnce = false, forceAutoScrollBottom = false, userAtChatBottom = true, voiceMode = false, voiceFullMode = false, voiceThinking = false, voiceAwaitingSpeechResult = false, ttsReady = false, hookVoiceMode = false, recordingFallback = false, wavRecording = false, wavSubmitAfterStop = false, webSearchChat = false;
+    private boolean messageWindowReady = false, renderingMessages = false, savedChatScrollKnown = false, restoreScrollOnce = false, forceAutoScrollBottom = false, userAtChatBottom = true, voiceMode = false, voiceFullMode = false, voiceThinking = false, voiceAwaitingSpeechResult = false, ttsReady = false, hookVoiceMode = false, projectEditorOpen = false, recordingFallback = false, wavRecording = false, wavSubmitAfterStop = false, webSearchChat = false;
 
     @Override public void onCreate(Bundle b) {
         super.onCreate(b);
@@ -228,6 +230,7 @@ public class MainActivity extends Activity {
             int code = e.getKeyCode();
             if (code == KeyEvent.KEYCODE_HOME || code == KeyEvent.KEYCODE_BACK || code == KeyEvent.KEYCODE_ESCAPE || code == KeyEvent.KEYCODE_MOVE_HOME) {
                 if (voiceMode && voiceFullMode) stopVoiceMode();
+                else if (projectEditorOpen) showChatsPane();
                 else if (pane == 2 && settingsPage.length() > 0) { settingsPage = ""; showSettingsPane(); }
                 else goHome();
                 return true;
@@ -301,6 +304,7 @@ public class MainActivity extends Activity {
     }
 
     private void showChatPane() {
+        projectEditorOpen = false;
         pane = 1;
         clearPaneViews();
         root.setPadding(dp(26), dp(14), dp(26), dp(10));
@@ -404,6 +408,7 @@ public class MainActivity extends Activity {
     }
 
     private void showSettingsPane() {
+        projectEditorOpen = false;
         if (pane == 2 && settingsPage.length() == 0 && settingsScrollView != null) savedSettingsScrollY = settingsScrollView.getScrollY();
         pane = 2;
         captureChatScroll();
@@ -1360,6 +1365,7 @@ public class MainActivity extends Activity {
     }
 
     private void showChatsPane() {
+        projectEditorOpen = false;
         saveCurrentChat();
         reloadChatsFromPrefs();
         pane = 0;
@@ -4316,32 +4322,7 @@ public class MainActivity extends Activity {
     }
 
     private void addFolder() {
-        final Dialog d = panel("new project");
-        FrameLayout overlay = new FrameLayout(this);
-        overlay.setBackgroundColor(Color.argb(210, 0, 0, 0));
-        overlay.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { hideKeyboardFrom(v); } });
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(28), dp(28), dp(28), dp(18));
-        box.setBackgroundColor(Color.TRANSPARENT);
-        box.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { hideKeyboardFrom(v); } });
-        box.addView(panelTitle("new project"));
-        box.addView(fieldLabel("name"));
-        final EditText name = panelEdit("project name");
-        box.addView(name, new LinearLayout.LayoutParams(-1, dp(52)));
-        box.addView(space(8));
-        box.addView(fieldLabel("instructions"));
-        final EditText instructions = panelMemo("(optional)");
-        box.addView(instructions, new LinearLayout.LayoutParams(-1, 0, 1));
-        LinearLayout actions = row();
-        TextView cancel = panelAction("cancel");
-        TextView create = panelAction("create");
-        cancel.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); } });
-        create.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { String folder = name.getText().toString().trim(); if (folder.length() > 0 && !folders.contains(folder)) { folders.add(folder); selectedFolder = folder; putFolderInstruction(folder, instructions.getText().toString()); saveState(); d.dismiss(); showChatsPane(); } } });
-        actions.addView(cancel, new LinearLayout.LayoutParams(0, dp(52), 1));
-        actions.addView(create, new LinearLayout.LayoutParams(0, dp(52), 1));
-        box.addView(actions);
-        showProjectOverlay(d, overlay, box);
+        showProjectEditor("", true);
     }
 
     private void folderActions(final String folder) {
@@ -4363,33 +4344,42 @@ public class MainActivity extends Activity {
     }
 
     private void editFolder(final String folder) {
-        final Dialog d = panel("project instructions");
-        FrameLayout overlay = new FrameLayout(this);
-        overlay.setBackgroundColor(Color.argb(210, 0, 0, 0));
-        overlay.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { hideKeyboardFrom(v); } });
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(28), dp(28), dp(28), dp(18));
-        box.setBackgroundColor(Color.TRANSPARENT);
-        box.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { hideKeyboardFrom(v); } });
-        box.addView(panelTitle("project instructions"));
-        box.addView(fieldLabel("name"));
+        showProjectEditor(folder, false);
+    }
+
+    private void showProjectEditor(final String folder, final boolean creating) {
+        projectEditorOpen = true;
+        pane = 0;
+        hideKeyboard();
+        clearPaneViews();
+        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN);
+        root.setPadding(dp(26), dp(18), dp(26), dp(10));
+        root.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { clearFocusedTextField(); } });
+        TextView title = text(creating ? "new project" : "project instructions", 23, Color.WHITE);
+        title.setGravity(Gravity.CENTER_VERTICAL);
+        root.addView(title, new LinearLayout.LayoutParams(-1, dp(42)));
+        root.addView(fieldLabel("name"));
         final EditText name = panelEdit("project name");
         name.setText(folder);
-        box.addView(name, new LinearLayout.LayoutParams(-1, dp(52)));
-        box.addView(space(8));
-        box.addView(fieldLabel("instructions"));
+        root.addView(name, new LinearLayout.LayoutParams(-1, dp(44)));
+        root.addView(space(4));
+        root.addView(fieldLabel("instructions"));
         final EditText instructions = panelMemo("(optional)");
-        instructions.setText(folderInstruction(folder));
-        box.addView(instructions, new LinearLayout.LayoutParams(-1, 0, 1));
+        instructions.setText(creating ? "" : folderInstruction(folder));
+        instructions.setMinLines(6);
+        root.addView(instructions, new LinearLayout.LayoutParams(-1, dp(80)));
+        root.addView(space(8));
         LinearLayout actions = row();
         TextView cancel = panelAction("cancel");
-        TextView save = panelAction("save");
-        cancel.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); } });
+        TextView save = panelAction(creating ? "create" : "save");
+        cancel.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { hideKeyboardFrom(v); showChatsPane(); } });
         save.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
             String next = name.getText().toString().trim();
-            if (next.length() > 0 && (next.equals(folder) || !folders.contains(next))) {
-                if (!next.equals(folder)) {
+            if (next.length() > 0 && (creating || next.equals(folder) || !folders.contains(next))) {
+                if (creating) {
+                    folders.add(next);
+                    selectedFolder = next;
+                } else if (!next.equals(folder)) {
                     folders.remove(folder); folders.add(next);
                     String oldInstruction = folderInstruction(folder);
                     folderInstructions.remove(folder);
@@ -4399,28 +4389,69 @@ public class MainActivity extends Activity {
                     if (oldInstruction.length() > 0) folderInstructions.put(next, oldInstruction);
                 }
                 putFolderInstruction(next, instructions.getText().toString());
-                saveState(); d.dismiss(); showChatsPane();
+                saveState(); hideKeyboardFrom(v); showChatsPane();
             }
         } });
         actions.addView(cancel, new LinearLayout.LayoutParams(0, dp(52), 1));
         actions.addView(save, new LinearLayout.LayoutParams(0, dp(52), 1));
-        box.addView(actions);
-        showProjectOverlay(d, overlay, box);
+        root.addView(actions);
     }
 
     private void showProjectOverlay(Dialog d, FrameLayout overlay, LinearLayout box) {
         FrameLayout.LayoutParams boxLp = new FrameLayout.LayoutParams(-1, -1, Gravity.TOP);
         boxLp.setMargins(dp(26), dp(58), dp(26), dp(26));
         overlay.addView(box, boxLp);
+        attachKeyboardAwareProjectOverlay(overlay, box);
         enablePanelSwipeDismiss(d, overlay);
         d.setContentView(overlay);
         d.show();
         Window w = d.getWindow();
         if (w != null) {
             w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            w.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
             w.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
             enablePanelSwipeDismiss(d, w.getDecorView());
         }
+    }
+
+    private void attachKeyboardAwareProjectOverlay(final FrameLayout overlay, final LinearLayout box) {
+        overlay.getViewTreeObserver().addOnGlobalLayoutListener(new ViewTreeObserver.OnGlobalLayoutListener() {
+            @Override public void onGlobalLayout() {
+                Rect visible = new Rect();
+                overlay.getWindowVisibleDisplayFrame(visible);
+                int keyboard = Math.max(0, overlay.getRootView().getHeight() - visible.bottom);
+                FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) box.getLayoutParams();
+                int bottom = dp(26) + (keyboard > dp(90) ? keyboard : 0);
+                if (lp.bottomMargin != bottom) {
+                    lp.setMargins(dp(26), dp(58), dp(26), bottom);
+                    box.setLayoutParams(lp);
+                }
+            }
+        });
+    }
+
+    private void attachProjectKeyboardBehavior(final FrameLayout overlay, final LinearLayout box, final EditText name, final EditText instructions) {
+        final Runnable nameMode = new Runnable() { @Override public void run() { box.animate().translationY(-dp(80)).setDuration(90).start(); } };
+        final Runnable instructionsMode = new Runnable() { @Override public void run() { box.animate().translationY(-dp(245)).setDuration(90).start(); } };
+        View.OnClickListener clear = new View.OnClickListener() { @Override public void onClick(View v) {
+            hideKeyboardFrom(v);
+            name.clearFocus();
+            instructions.clearFocus();
+            box.animate().translationY(0).setDuration(120).start();
+        } };
+        overlay.setOnClickListener(clear);
+        box.setOnClickListener(clear);
+        name.setOnTouchListener(new View.OnTouchListener() { @Override public boolean onTouch(View v, MotionEvent e) { if (e.getAction() == MotionEvent.ACTION_DOWN) nameMode.run(); return false; } });
+        instructions.setOnTouchListener(new View.OnTouchListener() { @Override public boolean onTouch(View v, MotionEvent e) { if (e.getAction() == MotionEvent.ACTION_DOWN) instructionsMode.run(); return false; } });
+        instructions.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { instructionsMode.run(); } });
+        name.setOnFocusChangeListener(new View.OnFocusChangeListener() { @Override public void onFocusChange(View v, boolean hasFocus) {
+            if (hasFocus) nameMode.run();
+            else if (!instructions.hasFocus()) box.animate().translationY(0).setDuration(120).start();
+        } });
+        instructions.setOnFocusChangeListener(new View.OnFocusChangeListener() { @Override public void onFocusChange(View v, boolean hasFocus) {
+            if (hasFocus) instructionsMode.run();
+            else if (!name.hasFocus()) box.animate().translationY(0).setDuration(120).start();
+        } });
     }
 
     private void confirmDeleteFolder(final String folder) {
