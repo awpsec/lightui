@@ -141,6 +141,7 @@ public class MainActivity extends Activity {
     private final HashSet<String> reasoningModels = new HashSet<String>();
     private final HashSet<String> speedModels = new HashSet<String>();
     private final HashSet<String> discoveringVoiceEndpoints = new HashSet<String>();
+    private final HashSet<String> titleRequests = new HashSet<String>();
     private final ArrayList<String> folders = new ArrayList<String>();
     private final ArrayList<Msg> messages = new ArrayList<Msg>();
     private final ArrayList<Chat> chats = new ArrayList<Chat>();
@@ -315,6 +316,8 @@ public class MainActivity extends Activity {
         LinearLayout header = row();
         modelText = text(modelLabel() + " >", 13, Color.WHITE);
         modelText.setGravity(Gravity.CENTER_VERTICAL);
+        modelText.setSingleLine(true);
+        modelText.setEllipsize(android.text.TextUtils.TruncateAt.END);
         modelText.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { chooseModel(); } });
         meter = new ContextMeter(this); meter.percent = contextPercent();
         meter.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { showContext(); } });
@@ -1632,12 +1635,15 @@ public class MainActivity extends Activity {
             messageList.addView(body, new LinearLayout.LayoutParams(-1, -2));
             if (hasMemoryRow) {
                 final Msg memoryMessage = m;
-                TextView saved = text("memory saved" + (m.memoryExpanded ? " -------------" : ""), 11, Color.rgb(135,135,135));
+                boolean removedMemory = m.memorySavedText.startsWith("__REMOVED__\n");
+                String label = removedMemory ? "memory removed" : "memory saved";
+                TextView saved = text(label + (m.memoryExpanded ? " -------------" : ""), 11, Color.rgb(135,135,135));
                 saved.setGravity(Gravity.CENTER_VERTICAL);
                 saved.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { memoryMessage.memoryExpanded = !memoryMessage.memoryExpanded; renderMessages(); } });
                 messageList.addView(saved, new LinearLayout.LayoutParams(-1, dp(24)));
-                if (m.memoryExpanded && m.memorySavedText.length() > 0) {
-                    TextView memoryText = text(m.memorySavedText, 12, Color.rgb(160,160,160));
+                String memoryDetails = removedMemory ? m.memorySavedText.substring("__REMOVED__\n".length()) : m.memorySavedText;
+                if (m.memoryExpanded && memoryDetails.length() > 0) {
+                    TextView memoryText = text(memoryDetails, 12, Color.rgb(160,160,160));
                     memoryText.setLineSpacing(dp(1), 1.0f);
                     memoryText.setPadding(0, 0, 0, dp(8));
                     messageList.addView(memoryText, new LinearLayout.LayoutParams(-1, -2));
@@ -1946,6 +1952,7 @@ public class MainActivity extends Activity {
         String text = input == null ? pendingVoiceText.trim() : input.getText().toString().trim();
         if (handleMemoryRecall(text)) return true;
         String pendingUserMemoryNote = pendingUserMemoryNote(text);
+        String pendingUserMemoryRemoval = pendingUserMemoryRemoval(text);
         if (model.length() == 0) { toast("select a model first"); return false; }
         if (source.equals("openrouter") && key.length() == 0) { toast("add openrouter key"); return false; }
         if (source.equals("custom") && modelEndpoint(model).length() == 0) { toast("add endpoint"); return false; }
@@ -1970,11 +1977,12 @@ public class MainActivity extends Activity {
         final String sendSource = source;
         final String sendModel = model;
         final String sendPendingUserMemoryNote = pendingUserMemoryNote;
-        new Thread(new Runnable() { @Override public void run() { callOpenRouter(sendKey, sendSource, sendModel, assistant, userText, sendPendingUserMemoryNote); } }).start();
+        final String sendPendingUserMemoryRemoval = pendingUserMemoryRemoval;
+        new Thread(new Runnable() { @Override public void run() { callOpenRouter(sendKey, sendSource, sendModel, assistant, userText, sendPendingUserMemoryNote, sendPendingUserMemoryRemoval); } }).start();
         return true;
     }
 
-    private void callOpenRouter(String key, String source, String model, final Msg assistant, String userText, String pendingUserMemoryNote) {
+    private void callOpenRouter(String key, String source, String model, final Msg assistant, String userText, String pendingUserMemoryNote, String pendingUserMemoryRemoval) {
         long start = System.nanoTime(), headersAt = start;
         try {
             JSONObject body = new JSONObject(); body.put("model", model);
@@ -1987,7 +1995,7 @@ public class MainActivity extends Activity {
             if (folderInstruction.length() > 0) arr.put(new JSONObject().put("role", "system").put("content", folderInstruction));
             String userMemory = buildUserMemoryContext();
             if (userMemory.length() > 0) arr.put(new JSONObject().put("role", "system").put("content", userMemory));
-            if (memoryEnabled()) arr.put(new JSONObject().put("role", "system").put("content", "Memory tool: to save a durable user preference/fact, emit only <tool_call><function=save_memory><parameter=note>short note</parameter></function></tool_call>. Save only stable, useful, non-secret memories unless explicitly requested."));
+            if (memoryEnabled()) arr.put(new JSONObject().put("role", "system").put("content", "Private memory tools: answer the user normally first. If a durable user preference/fact should be saved, append <tool_call><function=save_memory><parameter=note>short user-scoped note</parameter></function></tool_call> at the very end. If the user asks to forget/remove memory, append <tool_call><function=remove_memory><parameter=note>memory to remove</parameter></function></tool_call> at the very end. Never output a memory tool call by itself. Save only stable, useful, non-secret memories unless explicitly requested."));
             if (assistant.slowVoice) arr.put(new JSONObject().put("role", "system").put("content", "This is a spoken two-way voice conversation. Reply in plain text only. Do not use markdown, headings, bullets, tables, code blocks, or formatting symbols. Keep the response natural for text-to-speech."));
             for (Msg m : messages) {
                 if (LOADING.equals(m.stats)) continue;
@@ -2043,14 +2051,19 @@ public class MainActivity extends Activity {
                 finalAnswer = followupAfterWebSearch(key, source, model, toolQuery, result);
             }
             String memoryNote = memoryToolNote(finalAnswer);
-            if (memoryNote.length() > 0 || finalAnswer.toLowerCase(Locale.US).contains("save_memory")) {
+            ArrayList<String> removeNotes = memoryRemoveToolNotes(finalAnswer);
+            boolean hasRemoveTool = removeNotes.size() > 0 || finalAnswer.toLowerCase(Locale.US).contains("remove_memory");
+            if (memoryNote.length() > 0 || hasRemoveTool || finalAnswer.toLowerCase(Locale.US).contains("save_memory")) {
                 if (pendingUserMemoryNote.length() == 0 && memoryEnabled() && memoryNote.length() > 0) {
                     String savedMemory = appendMemory(memoryNote, "model");
                     if (savedMemory.length() > 0) { assistant.memorySaved = true; assistant.memorySavedText = savedMemory; }
                 }
-                finalAnswer = stripToolCalls(finalAnswer);
-                if (finalAnswer.trim().length() == 0) finalAnswer = "noted.";
+                if (memoryEnabled()) for (String removeNote : removeNotes) appendRemovedMemory(assistant, removeMemory(removeNote));
+                finalAnswer = cleanAfterToolStrip(stripToolCalls(finalAnswer));
+                if (finalAnswer.trim().length() == 0) finalAnswer = followupAfterMemoryTool(key, source, model, userText);
+                if (finalAnswer.trim().length() == 0) finalAnswer = hasRemoveTool ? "I removed that from memory." : "I saved that to memory.";
             }
+            if (pendingUserMemoryRemoval.length() > 0) appendRemovedMemory(assistant, removeMemory(pendingUserMemoryRemoval));
             if (pendingUserMemoryNote.length() > 0) {
                 String savedMemory = appendMemory(pendingUserMemoryNote, "user");
                 if (savedMemory.length() > 0) { assistant.memorySaved = true; assistant.memorySavedText = savedMemory; }
@@ -2058,7 +2071,7 @@ public class MainActivity extends Activity {
             final String finishedAnswer = finalAnswer;
             int completionTokens = estimateTokens(finishedAnswer) + (reasoning.length() == 0 ? 0 : estimateTokens(reasoning.toString()));
             final String stats = String.format(Locale.US, "%.1f tok/s", completionTokens / Math.max(0.001, (end - start) / 1e9));
-            runOnUiThread(new Runnable() { @Override public void run() { finishStreamingAssistant(assistant, finishedAnswer, reasoning.toString(), stats); } });
+            runOnUiThread(new Runnable() { @Override public void run() { finishStreamingAssistant(assistant, finishedAnswer, reasoning.toString(), stats, key, source, model); } });
 /*            String raw = readAll(code >= 400 ? c.getErrorStream() : c.getInputStream()); long end = System.nanoTime();
             if (code >= 400) throw new RuntimeException(raw);
             JSONObject resp = new JSONObject(raw);
@@ -2104,15 +2117,37 @@ public class MainActivity extends Activity {
         if (gotReasoning) { assistant.reasoning = reasoning; assistant.reasoningCapable = true; assistant.text = ""; }
         assistant.stats = gotReasoning && partial.length() == 0 ? LOADING : "";
         if (gotReasoning && partial.length() == 0) { forceAutoScrollBottom = userAtChatBottom; renderMessages(); saveCurrentChat(); return; }
-        assistant.text = partial.length() == 0 ? "" : cleanSearchArtifacts(partial);
+        String visiblePartial = visibleStreamingAnswer(partial);
+        assistant.text = visiblePartial.length() == 0 ? "" : cleanSearchArtifacts(visiblePartial);
         forceAutoScrollBottom = userAtChatBottom;
         if (assistant.slowVoice && voiceMode && voiceFullMode) { updateVoiceStatus("responding"); if (assistant.ttsStarted || !prefs.getBoolean("voiceSpeak", true)) renderVoiceConversation(); }
-        maybeSpeakStreamingChunk(assistant, partial, false);
+        maybeSpeakStreamingChunk(assistant, visiblePartial, false);
         renderMessages();
         saveCurrentChat();
     }
 
-    private void finishStreamingAssistant(Msg assistant, String finalAnswer, String reasoning, String stats) {
+    private String visibleStreamingAnswer(String text) {
+        String s = text == null ? "" : text;
+        String cleaned = stripToolCalls(s);
+        String lower = cleaned.toLowerCase(Locale.US);
+        int cut = -1;
+        String[] markers = new String[]{"<tool_call", "<function", "save_memory", "remove_memory"};
+        for (String marker : markers) {
+            int at = lower.indexOf(marker);
+            if (at >= 0) cut = cut < 0 ? at : Math.min(cut, at);
+        }
+        if (cut < 0) {
+            int start = Math.max(0, lower.length() - 32);
+            for (int i = start; i < lower.length(); i++) {
+                String tail = lower.substring(i);
+                if (tail.length() > 0 && ("<tool_call".startsWith(tail) || "<function".startsWith(tail))) { cut = i; break; }
+            }
+        }
+        if (cut >= 0) cleaned = cleaned.substring(0, cut);
+        return cleanAfterToolStrip(cleaned);
+    }
+
+    private void finishStreamingAssistant(Msg assistant, String finalAnswer, String reasoning, String stats, String key, String source, String model) {
         stopVoiceThinking();
         assistant.stats = stats;
         assistant.streamDone = true;
@@ -2131,6 +2166,7 @@ public class MainActivity extends Activity {
         forceAutoScrollBottom = userAtChatBottom;
         renderMessages();
         saveCurrentChat();
+        maybeGenerateChatTitle(key, source, model);
         if (assistant.slowVoice) { maybeSpeakStreamingChunk(assistant, assistant.text, true); maybeFinishVoiceAfterTts(assistant); }
     }
 
@@ -2389,6 +2425,131 @@ public class MainActivity extends Activity {
         return out.length() == 0 ? raw.trim() : out;
     }
 
+    private String followupAfterMemoryTool(String key, String source, String model, String userText) {
+        try {
+            JSONObject body = new JSONObject();
+            body.put("model", model);
+            body.put("stream", false);
+            JSONArray arr = new JSONArray();
+            arr.put(new JSONObject().put("role", "system").put("content", "Your previous response contained only a private memory tool call. Do not output any tool calls. Answer the user's message naturally and briefly."));
+            arr.put(new JSONObject().put("role", "user").put("content", userText == null ? "" : userText));
+            body.put("messages", arr);
+            HttpURLConnection c = (HttpURLConnection) new URL(chatCompletionsUrl(source, model)).openConnection();
+            c.setRequestMethod("POST"); c.setConnectTimeout(20000); c.setReadTimeout(45000); c.setDoOutput(true);
+            if (key.length() > 0) c.setRequestProperty("Authorization", "Bearer " + key);
+            c.setRequestProperty("Content-Type", "application/json");
+            if (source.equals("openrouter")) { c.setRequestProperty("HTTP-Referer", "https://minimal.chat/android"); c.setRequestProperty("X-Title", "memory followup"); }
+            OutputStream os = c.getOutputStream(); os.write(body.toString().getBytes(StandardCharsets.UTF_8)); os.close();
+            int code = c.getResponseCode();
+            if (code >= 400) return "";
+            return stripToolCalls(extractMessageText(new JSONObject(readAll(c.getInputStream()))));
+        } catch (Exception ignored) { return ""; }
+    }
+
+    private void maybeGenerateChatTitle(final String key, final String source, final String model) {
+        if (currentChatId.length() == 0 || key == null || model == null || model.length() == 0) return;
+        final String chatId = currentChatId;
+        Chat chat = chatById(chatId);
+        if (chat == null || !shouldGenerateTitle(chat)) return;
+        final ArrayList<Msg> snapshot = new ArrayList<Msg>(chat.messages);
+        if (titleRequests.contains(chatId)) return;
+        titleRequests.add(chatId);
+        String local = localChatTitle(snapshot);
+        if (local.length() > 0) {
+            chat.title = local;
+            chat.titleGenerated = true;
+            saveState();
+            if (pane == 0 && chatList != null) renderChatList();
+        }
+        new Thread(new Runnable() { @Override public void run() {
+            String title = "";
+            try {
+                title = generateChatTitle(key, source, model, snapshot);
+            } catch (Exception ignored) { }
+            final String finalTitle = title;
+            if (finalTitle.length() == 0) return;
+            runOnUiThread(new Runnable() { @Override public void run() {
+                Chat c = chatById(chatId);
+                if (c == null) return;
+                c.title = finalTitle;
+                c.titleGenerated = true;
+                saveState();
+                if (pane == 0 && chatList != null) renderChatList();
+            } });
+        } }).start();
+    }
+
+    private boolean shouldGenerateTitle(Chat c) {
+        int users = 0, assistants = 0;
+        for (Msg m : c.messages) { if ("user".equals(m.role) && m.text.length() > 0) users++; else if ("assistant".equals(m.role) && m.text.length() > 0 && !LOADING.equals(m.stats)) assistants++; }
+        return !c.titleGenerated && users > 0 && assistants > 0;
+    }
+
+    private String generateChatTitle(String key, String source, String model, ArrayList<Msg> titleMessages) throws Exception {
+        JSONObject body = new JSONObject();
+        body.put("model", model);
+        body.put("stream", false);
+        JSONArray arr = new JSONArray();
+        arr.put(new JSONObject().put("role", "system").put("content", "Name this chat in 2-5 words. Return only the title. No quotes, punctuation, emoji, or extra text."));
+        StringBuilder transcript = new StringBuilder();
+        int included = 0;
+        for (Msg m : titleMessages) {
+            if (included >= 6 || LOADING.equals(m.stats)) continue;
+            if (m.text.length() == 0 || "[voice input]".equals(m.text)) continue;
+            transcript.append(m.role).append(": ").append(m.text.replace('\n', ' ')).append('\n');
+            included++;
+        }
+        arr.put(new JSONObject().put("role", "user").put("content", transcript.toString()));
+        body.put("messages", arr);
+        HttpURLConnection c = (HttpURLConnection) new URL(chatCompletionsUrl(source, model)).openConnection();
+        c.setRequestMethod("POST");
+        c.setConnectTimeout(20000);
+        c.setReadTimeout(45000);
+        c.setDoOutput(true);
+        if (key.length() > 0) c.setRequestProperty("Authorization", "Bearer " + key);
+        c.setRequestProperty("Content-Type", "application/json");
+        if (source.equals("openrouter")) { c.setRequestProperty("HTTP-Referer", "https://minimal.chat/android"); c.setRequestProperty("X-Title", "chat title"); }
+        OutputStream os = c.getOutputStream(); os.write(body.toString().getBytes(StandardCharsets.UTF_8)); os.close();
+        int code = c.getResponseCode();
+        String raw = readAll(code >= 400 ? c.getErrorStream() : c.getInputStream());
+        if (code >= 400) throw new RuntimeException(raw);
+        return cleanChatTitle(extractMessageText(new JSONObject(raw)));
+    }
+
+    private String localChatTitle(ArrayList<Msg> titleMessages) {
+        for (Msg m : titleMessages) if ("user".equals(m.role) && m.text.length() > 0) return topicTitle(m.text);
+        return "Image chat";
+    }
+
+    private String topicTitle(String text) {
+        String s = cleanSearchArtifacts(text == null ? "" : text).replaceAll("(?i)^(hey|hi|hello|yo)[,\\s]+", "").replaceAll("[^A-Za-z0-9' ]+", " ").replaceAll("\\s+", " ").trim();
+        String[] skip = new String[]{"what","whats","what's","how","why","explain","describe","can","could","would","should","you","please","tell","show","give","me","about","with","from","into","the","a","an","is","are","was","were","do","does","did","for","to","in","of","and","or","my","i","im","i'm","it","its","it's","one","sentence","brief","briefly"};
+        ArrayList<String> picked = new ArrayList<String>();
+        for (String raw : s.split("\\s+")) {
+            String w = raw.trim();
+            if (w.length() == 0) continue;
+            String lower = w.toLowerCase(Locale.US);
+            boolean ignore = false;
+            for (String k : skip) if (lower.equals(k)) { ignore = true; break; }
+            if (!ignore) picked.add(titleWord(w));
+            if (picked.size() >= 5) break;
+        }
+        if (picked.size() == 0) for (String raw : s.split("\\s+")) { if (raw.length() > 0) picked.add(titleWord(raw)); if (picked.size() >= 4) break; }
+        String out = join(picked).replace('\n', ' ').trim();
+        return out.length() == 0 ? "New chat" : cleanChatTitle(out);
+    }
+
+    private String titleWord(String w) { return w.length() <= 1 ? w.toUpperCase(Locale.US) : w.substring(0,1).toUpperCase(Locale.US) + w.substring(1).toLowerCase(Locale.US); }
+
+    private String cleanChatTitle(String title) {
+        String s = cleanSearchArtifacts(title == null ? "" : title).replace('\n', ' ').replace("\"", "").replace("'", "").trim();
+        s = s.replaceFirst("(?i)^title:\\s*", "").replaceAll("[.!?]+$", "").trim();
+        if (s.length() > 38) s = s.substring(0, 38).trim();
+        return s;
+    }
+
+    private Chat chatById(String id) { for (Chat c : chats) if (c.id.equals(id)) return c; return null; }
+
     private ArrayList<String> extractSearchSources(String result) {
         ArrayList<String> out = new ArrayList<String>();
         if (result == null) return out;
@@ -2484,9 +2645,28 @@ public class MainActivity extends Activity {
 
     private String pendingUserMemoryNote(String text) {
         if (!memoryEnabled()) return "";
+        if (isMemoryRemovalRequest(text)) return "";
         String note = explicitMemoryNote(text);
         if (note.length() == 0) note = heuristicMemoryNote(text);
         return note;
+    }
+
+    private String pendingUserMemoryRemoval(String text) {
+        if (!memoryEnabled() || !isMemoryRemovalRequest(text)) return "";
+        String s = text == null ? "" : text.trim();
+        String lower = s.toLowerCase(Locale.US);
+        if ((lower.contains("clear") || lower.contains("delete") || lower.contains("remove") || lower.contains("forget")) && (lower.contains("all memory") || lower.contains("all memories") || lower.contains("both memories") || lower.contains("everything from memory") || lower.contains("memory.md"))) return "__ALL__";
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("(?is)\\b(?:forget|remove|delete|clear)\\b(?:\\s+(?:this|that|it|from|out of|in|my|your|memory))*\\s+(?:that\\s+)?(.+?)\\s*(?:from|out of|in)?\\s*(?:memory)?\\s*[?.!]*$").matcher(s);
+        if (m.find()) {
+            String note = m.group(1).trim().replaceFirst("(?i)^(memory\\s+)?(?:about|of)\\s+", "");
+            if (note.length() > 0) return note;
+        }
+        return s.replaceFirst("(?is).*?\\b(?:forget|remove|delete|clear)\\b", "").replaceAll("(?i)\\b(from|out of|in)?\\s*memory\\b", "").trim();
+    }
+
+    private boolean isMemoryRemovalRequest(String text) {
+        String s = text == null ? "" : text.toLowerCase(Locale.US);
+        return (s.contains("memory") || s.contains("remember")) && (s.contains("forget") || s.contains("remove") || s.contains("delete") || s.contains("clear"));
     }
 
     private String explicitMemoryNote(String text) {
@@ -2612,11 +2792,101 @@ public class MainActivity extends Activity {
         return "";
     }
 
+    private ArrayList<String> memoryRemoveToolNotes(String text) {
+        ArrayList<String> out = new ArrayList<String>();
+        String s = text == null ? "" : text;
+        String lower = s.toLowerCase(Locale.US);
+        if (!lower.contains("remove_memory")) return out;
+        java.util.regex.Matcher fn = java.util.regex.Pattern.compile("(?is)<function\\s*=\\s*remove_memory[^>]*>(.*?)</function>").matcher(s);
+        while (fn.find()) {
+            String note = memoryRemoveToolNoteFromBlock(fn.group(1));
+            if (note.length() > 0 && !out.contains(note)) out.add(note);
+        }
+        if (out.size() > 0) return out;
+        String note = memoryRemoveToolNoteFromBlock(s);
+        if (note.length() > 0) out.add(note);
+        return out;
+    }
+
+    private String memoryRemoveToolNoteFromBlock(String s) {
+        String lower = s == null ? "" : s.toLowerCase(Locale.US);
+        java.util.regex.Matcher param = java.util.regex.Pattern.compile("(?is)<parameter(?:\\s+name\\s*=\\s*[\"']?(?:note|item|memory)[\"']?|\\s*=\\s*(?:note|item|memory))[^>]*>(.*?)</parameter>").matcher(s);
+        if (param.find()) return cleanMemoryToolNote(param.group(1));
+        String[] markers = new String[]{"<parameter=note>", "note:", "note=", "\"note\":"};
+        for (String marker : markers) {
+            int start = lower.indexOf(marker.toLowerCase(Locale.US));
+            if (start < 0) continue;
+            start += marker.length();
+            int end = s.indexOf("</parameter>", start);
+            if (end < 0) end = s.indexOf("</function>", start);
+            if (end < 0) end = s.length();
+            String note = cleanMemoryToolNote(s.substring(start, end));
+            if (note.length() > 0) return note;
+        }
+        return "";
+    }
+
+    private void appendRemovedMemory(Msg assistant, String removed) {
+        if (removed == null || removed.trim().length() == 0) return;
+        assistant.memorySaved = true;
+        if (!assistant.memorySavedText.startsWith("__REMOVED__\n")) assistant.memorySavedText = "__REMOVED__\n";
+        assistant.memorySavedText = assistant.memorySavedText.length() == "__REMOVED__\n".length() ? assistant.memorySavedText + removed.trim() : assistant.memorySavedText + "\n" + removed.trim();
+    }
+
+    private String removeMemory(String note) {
+        if ("__ALL__".equals(note)) {
+            String removedAll = memoryEntriesText(memoryMd());
+            writeMemoryMd("");
+            return removedAll.length() > 0 ? removedAll : "all";
+        }
+        String query = memoryDedupeKey(canonicalMemoryNote(note, "user"));
+        if (query.length() == 0) return "";
+        String mem = normalizeMemoryMd(memoryMd());
+        StringBuilder kept = new StringBuilder("# MEMORY.md\n\n");
+        StringBuilder removed = new StringBuilder();
+        int n = 1;
+        for (String line : mem.replaceFirst("(?is)^#\\s*MEMORY\\.md\\s*", "").trim().split("\\n")) {
+            String entry = line.trim();
+            if (entry.length() == 0) continue;
+            entry = entry.replaceFirst("^(?:[-*]|[0-9]+[.)])\\s+", "").trim();
+            String key = memoryDedupeKey(entry);
+            if (key.contains(query) || query.contains(key) || memoryTokenOverlap(key, query) >= 0.55f) removed.append(entry).append('\n');
+            else kept.append(n++).append(". ").append(entry).append('\n');
+        }
+        if (removed.length() > 0) writeMemoryMd(n == 1 ? "" : kept.toString());
+        return removed.toString().trim();
+    }
+
+    private String memoryEntriesText(String markdown) {
+        String mem = normalizeMemoryMd(markdown);
+        StringBuilder out = new StringBuilder();
+        for (String line : mem.replaceFirst("(?is)^#\\s*MEMORY\\.md\\s*", "").trim().split("\\n")) {
+            String entry = line.trim();
+            if (entry.length() == 0) continue;
+            entry = entry.replaceFirst("^(?:[-*]|[0-9]+[.)])\\s+", "").trim();
+            if (entry.length() > 0) out.append(entry).append('\n');
+        }
+        return out.toString().trim();
+    }
+
+    private float memoryTokenOverlap(String entryKey, String queryKey) {
+        String[] q = queryKey == null ? new String[0] : queryKey.split("\\s+");
+        if (q.length == 0) return 0f;
+        int useful = 0, hits = 0;
+        for (String token : q) {
+            if (token.length() < 3 || "user".equals(token) || "users".equals(token) || "memory".equals(token)) continue;
+            useful++;
+            if ((entryKey == null ? "" : entryKey).contains(token)) hits++;
+        }
+        return useful == 0 ? 0f : hits / (float) useful;
+    }
+
     private String cleanMemoryToolNote(String note) {
         return (note == null ? "" : note).replace("&quot;", "\"").replace("&apos;", "'").replace("\"", "").replace("'", "").trim();
     }
 
-    private String stripToolCalls(String text) { return (text == null ? "" : text).replaceAll("(?is)<tool_call>.*?</tool_call>", "").trim(); }
+    private String stripToolCalls(String text) { return (text == null ? "" : text).replaceAll("(?is)<tool_call>.*?</tool_call>", "").replaceAll("(?is)<function\\s*=\\s*(?:save_memory|remove_memory)[^>]*>.*?</function>", "").trim(); }
+    private String cleanAfterToolStrip(String text) { return (text == null ? "" : text).replaceAll("(?is)(?:i(?:'|’)ll|i will|i(?:'|’)m going to|i am going to|i(?:'|’)ve|i have)\\s+(?:save|saved|remove|removed|delete|deleted|forget|forgot)[^.!?\n]{0,100}[:,-]?\\s*$", "").replaceAll("[\\s:,-]+$", "").trim(); }
 
     private String searchQuery(String text) {
         String trimmed = text == null ? "" : text.trim();
@@ -2702,6 +2972,8 @@ public class MainActivity extends Activity {
             final String m = myModels.get(i);
             TextView item = panelItem(shortModel(m), "");
             if (m.equals(selectedModel())) item.setText(shortModel(m) + " *");
+            item.setSingleLine(true);
+            item.setEllipsize(android.text.TextUtils.TruncateAt.END);
             item.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); setModel(m); } });
             list.addView(item);
         }
@@ -4606,7 +4878,7 @@ public class MainActivity extends Activity {
         TextView cancel = panelAction("cancel");
         TextView save = panelAction("save");
         cancel.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); } });
-        save.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { c.title = e.getText().toString().trim(); saveState(); d.dismiss(); showChatsPane(); } });
+        save.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { c.title = e.getText().toString().trim(); c.titleGenerated = true; saveState(); d.dismiss(); showChatsPane(); } });
         actions.addView(cancel, new LinearLayout.LayoutParams(0, dp(52), 1));
         actions.addView(save, new LinearLayout.LayoutParams(0, dp(52), 1));
         box.addView(actions);
@@ -4632,7 +4904,7 @@ public class MainActivity extends Activity {
 
     private void newChat() { saveCurrentChat(); currentChatId = ""; messages.clear(); selectedFolder = projectView.length() > 0 ? projectView : "Inbox"; webSearchChat = false; savedChatScrollKnown = false; forceAutoScrollBottom = false; resetMessageWindowToLatest(); if (messageList != null) renderMessages(); }
     private void loadChat(Chat c) { currentChatId = c.id; selectedFolder = c.folder; if (!"Inbox".equals(c.folder)) projectView = c.folder; messages.clear(); messages.addAll(c.messages); webSearchChat = c.webSearch; if (c.model.length() > 0) prefs.edit().putString("model", c.model).putBoolean("modelSelected", true).apply(); savedChatScrollKnown = false; forceAutoScrollBottom = true; resetMessageWindowToLatest(); }
-    private void saveCurrentChat() { if (messages.size() == 0) return; if (currentChatId.length() == 0) currentChatId = String.valueOf(System.currentTimeMillis()); Chat t = null; for (Chat c : chats) if (c.id.equals(currentChatId)) t = c; if (t == null) { t = new Chat(); t.id = currentChatId; chats.add(0, t); } t.folder = selectedFolder; t.title = firstUserText(); t.webSearch = webSearchChat; t.model = chatModelForSave(); t.messages.clear(); t.messages.addAll(messages); saveState(); }
+    private void saveCurrentChat() { if (messages.size() == 0) return; if (currentChatId.length() == 0) currentChatId = String.valueOf(System.currentTimeMillis()); Chat t = null; for (Chat c : chats) if (c.id.equals(currentChatId)) t = c; if (t == null) { t = new Chat(); t.id = currentChatId; chats.add(0, t); } t.folder = selectedFolder; if (t.title.length() == 0) t.title = firstUserText(); t.webSearch = webSearchChat; t.model = chatModelForSave(); t.messages.clear(); t.messages.addAll(messages); saveState(); }
     private String chatModelForSave() { for (int i = messages.size() - 1; i >= 0; i--) if (messages.get(i).role.equals("assistant") && messages.get(i).model.length() > 0) return expandShortModel(messages.get(i).model); return activeAnswerModel(); }
     private String expandShortModel(String label) { for (String m : models) if (shortModel(m).equals(label) || m.equals(label)) return m; return label; }
 
@@ -4935,7 +5207,8 @@ public class MainActivity extends Activity {
         v.setGravity(Gravity.CENTER_VERTICAL);
         v.setPadding(dp(26), 0, dp(18), 0);
         v.setMinHeight(dp(64));
-        v.setSingleLine(false);
+        v.setSingleLine(true);
+        v.setEllipsize(android.text.TextUtils.TruncateAt.END);
         v.setBackground(grayBorder());
         return v;
     }
@@ -4975,5 +5248,5 @@ public class MainActivity extends Activity {
     public class JumpTextView extends TextView { String word = "thinking"; int step = 0; Runnable tick = new Runnable() { @Override public void run() { animateJump(); } }; public JumpTextView(Context c) { super(c); setIncludeFontPadding(true); setGravity(Gravity.CENTER_VERTICAL); } @Override protected void onAttachedToWindow() { super.onAttachedToWindow(); animateJump(); } @Override protected void onDetachedFromWindow() { removeCallbacks(tick); super.onDetachedFromWindow(); } private void animateJump() { String w = word == null || word.length() == 0 ? "thinking" : word; SpannableString span = new SpannableString(w); int cycle = w.length() + 4, pos = step++ % cycle, peak = Math.min(pos, w.length() - 1); for (int i = 0; i < w.length(); i++) { int dist = Math.abs(i - peak); float size = pos >= w.length() ? 1.0f : dist == 0 ? 1.14f : dist == 1 ? 1.06f : 1.0f; span.setSpan(new RelativeSizeSpan(size), i, i + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE); } setText(span); postDelayed(tick, pos >= w.length() ? 260 : 135); } }
     public static class ContextMeter extends View { Paint p = new Paint(Paint.ANTI_ALIAS_FLAG); float percent = 0; public ContextMeter(Context c) { super(c); } @Override protected void onDraw(Canvas c) { int w=getWidth(), h=getHeight(), r=Math.min(w,h)/2-2; p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(2); p.setColor(Color.WHITE); c.drawCircle(w/2f,h/2f,r,p); p.setStyle(Paint.Style.FILL); c.drawArc(w/2f-r,h/2f-r,w/2f+r,h/2f+r,-90,percent*3.6f,true,p); p.setColor(Color.BLACK); c.drawCircle(w/2f,h/2f,Math.max(1,r-5),p); } }
     public static class Msg { String role, text, imageBase64, imageMime, stats, model, replyQuote, reasoning = "", memorySavedText = ""; boolean slowVoice = false, reasoningCapable = false, thinkingExpanded = false, searchExpanded = false, memorySaved = false, memoryExpanded = false, ttsRequested = false, ttsStarted = false, ttsPlaying = false, ttsStartDelayDone = false, streamDone = false; int spokenChars = 0, ttsPlaybackFailures = 0, voiceSessionId = 0; long startedAt = System.currentTimeMillis(), thoughtMs = 0; ArrayList<String> ttsQueue = new ArrayList<String>(); ArrayList<String> searchSources = new ArrayList<String>(); Msg(String r, String t, String i, String m, String s) { this(r,t,i,m,s,"",""); } Msg(String r, String t, String i, String m, String s, String modelName) { this(r,t,i,m,s,modelName,""); } Msg(String r, String t, String i, String m, String s, String modelName, String reply) { role=r; text=t==null?"":t; imageBase64=i==null?"":i; imageMime=m==null?"":m; stats=s==null?"":s; model=modelName==null?"":modelName; replyQuote=reply==null?"":reply; } JSONObject toJson() throws Exception { JSONArray src = new JSONArray(); for (String s : searchSources) src.put(s); return new JSONObject().put("role",role).put("text",text).put("image",imageBase64).put("mime",imageMime).put("stats",stats).put("model",model).put("replyQuote",replyQuote).put("reasoning",reasoning).put("thoughtMs",thoughtMs).put("memorySaved",memorySaved).put("memorySavedText",memorySavedText).put("searchSources",src); } static Msg fromJson(JSONObject o) { Msg m = new Msg(o.optString("role"),o.optString("text"),o.optString("image"),o.optString("mime"),o.optString("stats"),o.optString("model"),o.optString("replyQuote")); m.reasoning = o.optString("reasoning", ""); m.thoughtMs = o.optLong("thoughtMs", 0); m.memorySaved = o.optBoolean("memorySaved", false); m.memorySavedText = o.optString("memorySavedText", ""); JSONArray src = o.optJSONArray("searchSources"); if (src != null) for (int i = 0; i < src.length(); i++) { String s = src.optString(i, ""); if (s.length() > 0) m.searchSources.add(s); } m.streamDone = !LOADING.equals(m.stats); return m; } }
-    public static class Chat { String id="", title="", folder="Inbox", model=""; boolean webSearch=false; ArrayList<Msg> messages=new ArrayList<Msg>(); JSONObject toJson() throws Exception { JSONArray a=new JSONArray(); for(Msg m:messages)a.put(m.toJson()); return new JSONObject().put("id",id).put("title",title).put("folder",folder).put("model",model).put("webSearch",webSearch).put("messages",a); } static Chat fromJson(JSONObject o) { Chat c=new Chat(); c.id=o.optString("id"); c.title=o.optString("title"); c.folder=o.optString("folder","Inbox"); c.model=o.optString("model", ""); c.webSearch=o.optBoolean("webSearch", false); JSONArray a=o.optJSONArray("messages"); if(a!=null) for(int i=0;i<a.length();i++) c.messages.add(Msg.fromJson(a.optJSONObject(i))); return c; } }
+    public static class Chat { String id="", title="", folder="Inbox", model=""; boolean webSearch=false, titleGenerated=false; ArrayList<Msg> messages=new ArrayList<Msg>(); JSONObject toJson() throws Exception { JSONArray a=new JSONArray(); for(Msg m:messages)a.put(m.toJson()); return new JSONObject().put("id",id).put("title",title).put("titleGenerated",titleGenerated).put("folder",folder).put("model",model).put("webSearch",webSearch).put("messages",a); } static Chat fromJson(JSONObject o) { Chat c=new Chat(); c.id=o.optString("id"); c.title=o.optString("title"); c.titleGenerated=o.optBoolean("titleGenerated", false); c.folder=o.optString("folder","Inbox"); c.model=o.optString("model", ""); c.webSearch=o.optBoolean("webSearch", false); JSONArray a=o.optJSONArray("messages"); if(a!=null) for(int i=0;i<a.length();i++) c.messages.add(Msg.fromJson(a.optJSONObject(i))); return c; } }
 }
