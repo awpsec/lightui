@@ -53,6 +53,7 @@ import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
+import android.view.TouchDelegate;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
@@ -1574,6 +1575,24 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void toggleThinking(Msg m) {
+        if (m == null || m.reasoning.length() == 0) return;
+        m.thinkingExpanded = !m.thinkingExpanded;
+        renderMessages();
+    }
+
+    private void expandTouchArea(final View v, final int extra) {
+        final View parent = (View) v.getParent();
+        if (parent == null || extra <= 0) return;
+        parent.post(new Runnable() { @Override public void run() {
+            Rect r = new Rect();
+            v.getHitRect(r);
+            r.top -= extra;
+            r.bottom += extra;
+            parent.setTouchDelegate(new TouchDelegate(r, v));
+        } });
+    }
+
     private void renderMessages() {
         if (messageList == null) return;
         if (!messageWindowReady) resetMessageWindowToLatest();
@@ -1602,20 +1621,22 @@ public class MainActivity extends Activity {
                 final Msg thinkingMessage = m;
                 LinearLayout thinkRow = row();
                 TextView thinking;
-                if (!m.streamDone && m.reasoning.length() == 0) { JumpTextView jump = new JumpTextView(this); jump.word = "thinking"; thinking = jump; }
-                else if (!m.streamDone) thinking = text("thinking", 11, Color.rgb(135,135,135));
+                if (!m.streamDone && m.text.length() == 0) { JumpTextView jump = new JumpTextView(this); jump.word = "thinking"; thinking = jump; }
+                else if (!m.streamDone) thinking = text("thought for " + thoughtDuration(m.thoughtMs > 0 ? m.thoughtMs : Math.max(1, System.currentTimeMillis() - m.startedAt)), 11, Color.rgb(135,135,135));
                 else thinking = text("thought for " + thoughtDuration(m.thoughtMs), 11, Color.rgb(135,135,135));
                 thinking.setTextColor(Color.rgb(135,135,135)); thinking.setGravity(Gravity.CENTER_VERTICAL); setTextPx(thinking, 11); thinking.setPadding(0, 0, 0, 0);
-                thinking.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { thinkingMessage.thinkingExpanded = !thinkingMessage.thinkingExpanded; renderMessages(); } });
-                thinking.setMinHeight(dp(44));
-                thinkRow.setMinimumHeight(dp(44));
-                thinkRow.addView(thinking, new LinearLayout.LayoutParams(-1, dp(44)));
-                thinkRow.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { thinkingMessage.thinkingExpanded = !thinkingMessage.thinkingExpanded; renderMessages(); } });
-                messageList.addView(thinkRow, new LinearLayout.LayoutParams(-1, dp(44)));
+                thinking.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { toggleThinking(thinkingMessage); } });
+                thinking.setMinHeight(dp(34));
+                thinkRow.setMinimumHeight(dp(34));
+                thinkRow.addView(thinking, new LinearLayout.LayoutParams(-1, dp(34)));
+                thinkRow.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { toggleThinking(thinkingMessage); } });
+                messageList.addView(thinkRow, new LinearLayout.LayoutParams(-1, dp(34)));
+                expandTouchArea(thinkRow, dp(13));
                 if (m.thinkingExpanded && m.reasoning.length() > 0) {
-                    TextView reason = text(privateReasoning(m.reasoning) ? "private reasoning hidden" : m.reasoning, 13, Color.rgb(160,160,160));
+                    TextView reason = text(privateReasoning(m) ? "private reasoning hidden" : m.reasoning, 13, Color.rgb(160,160,160));
                     reason.setLineSpacing(dp(2), 1.0f);
-                    reason.setPadding(0, 0, 0, dp(8));
+                    reason.setPadding(0, 0, 0, dp(4));
+                    reason.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { toggleThinking(thinkingMessage); } });
                     messageList.addView(reason, new LinearLayout.LayoutParams(-1, -2));
                 }
             }
@@ -1964,8 +1985,8 @@ public class MainActivity extends Activity {
         final Msg assistant = new Msg("assistant", ".", "", "", LOADING, shortModel(model));
         assistant.slowVoice = voiceMode && voiceFullMode;
         assistant.voiceSessionId = assistant.slowVoice ? voiceSession : 0;
-        assistant.reasoningCapable = isReasoningModel(model);
-        if (assistant.slowVoice) assistant.text = "";
+        assistant.reasoningCapable = "custom".equals(source) || isReasoningModel(model);
+        if (assistant.slowVoice || assistant.reasoningCapable) assistant.text = "";
         messages.add(assistant);
         saveCurrentChat();
         resetMessageWindowToLatest();
@@ -2008,39 +2029,56 @@ public class MainActivity extends Activity {
                 } else one.put("content", requestText(m));
                 arr.put(one);
             }
-            body.put("messages", arr); body.put("usage", new JSONObject().put("include", true)); body.put("stream", true);
+            boolean streaming = true;
+            body.put("messages", arr);
+            if (source.equals("openrouter")) body.put("usage", new JSONObject().put("include", true));
+            body.put("stream", streaming);
             HttpURLConnection c = (HttpURLConnection) new URL(chatCompletionsUrl(source, model)).openConnection();
             c.setRequestMethod("POST"); c.setConnectTimeout(30000); c.setReadTimeout(120000); c.setDoOutput(true);
             if (key.length() > 0) c.setRequestProperty("Authorization", "Bearer " + key);
             c.setRequestProperty("Content-Type", "application/json");
+            c.setRequestProperty("Accept", "text/event-stream, application/json");
             if (source.equals("openrouter")) { c.setRequestProperty("HTTP-Referer", "https://minimal.chat/android"); c.setRequestProperty("X-Title", "chat"); }
             OutputStream os = c.getOutputStream(); os.write(body.toString().getBytes(StandardCharsets.UTF_8)); os.close();
             headersAt = System.nanoTime(); int code = c.getResponseCode();
             if (code >= 400) throw new RuntimeException(readAll(c.getErrorStream()));
             final StringBuilder answer = new StringBuilder();
             final StringBuilder reasoning = new StringBuilder();
-            BufferedReader br = new BufferedReader(new InputStreamReader(c.getInputStream(), StandardCharsets.UTF_8));
-            String line;
-            while ((line = br.readLine()) != null) {
-                line = line.trim();
-                if (!line.startsWith("data:")) continue;
-                String data = line.substring(5).trim();
-                if ("[DONE]".equals(data)) break;
-                JSONObject chunk = new JSONObject(data);
-                JSONArray choices = chunk.optJSONArray("choices");
-                if (choices == null || choices.length() == 0) continue;
-                JSONObject delta = choices.getJSONObject(0).optJSONObject("delta");
-                if (delta == null) continue;
-                String content = cleanJsonString(delta, "content");
-                String thought = reasoningDelta(delta);
-                if (content.length() == 0 && thought.length() == 0) continue;
-                answer.append(content);
-                reasoning.append(thought);
-                final String partial = answer.toString();
-                final String partialReasoning = reasoning.toString();
-                runOnUiThread(new Runnable() { @Override public void run() { updateStreamingAssistant(assistant, partial, partialReasoning); } });
+            if (streaming) {
+                BufferedReader br = new BufferedReader(new InputStreamReader(c.getInputStream(), StandardCharsets.UTF_8));
+                StringBuilder nonSse = new StringBuilder();
+                boolean[] inThinkTag = new boolean[]{false};
+                String line;
+                while ((line = br.readLine()) != null) {
+                    line = line.trim();
+                    if (!line.startsWith("data:")) { if (line.length() > 0) nonSse.append(line); continue; }
+                    String data = line.substring(5).trim();
+                    if ("[DONE]".equals(data)) break;
+                    JSONObject chunk = new JSONObject(data);
+                    JSONArray choices = chunk.optJSONArray("choices");
+                    if (choices == null || choices.length() == 0) continue;
+                    JSONObject delta = choices.getJSONObject(0).optJSONObject("delta");
+                    if (delta == null) continue;
+                    String content = cleanJsonString(delta, "content");
+                    String thought = reasoningDelta(delta);
+                    if (content.length() == 0 && thought.length() == 0) continue;
+                    appendReasoningAwareContent(content, answer, reasoning, inThinkTag);
+                    reasoning.append(thought);
+                    final String partial = answer.toString();
+                    final String partialReasoning = reasoning.toString();
+                    runOnUiThread(new Runnable() { @Override public void run() { updateStreamingAssistant(assistant, partial, partialReasoning); } });
+                }
+                br.close();
+                if (answer.length() == 0 && reasoning.length() == 0 && nonSse.length() > 0) {
+                    JSONObject resp = new JSONObject(nonSse.toString());
+                    answer.append(extractMessageText(resp));
+                    reasoning.append(extractMessageReasoning(resp));
+                }
+            } else {
+                JSONObject resp = new JSONObject(readAll(c.getInputStream()));
+                answer.append(extractMessageText(resp));
+                reasoning.append(extractMessageReasoning(resp));
             }
-            br.close();
             long end = System.nanoTime();
             String finalAnswer = answer.toString();
             String toolQuery = webSearchToolQuery(finalAnswer);
@@ -2092,17 +2130,80 @@ public class MainActivity extends Activity {
 
     private String reasoningDelta(JSONObject delta) {
         StringBuilder out = new StringBuilder();
-        String[] keys = new String[]{"reasoning", "reasoning_content", "thinking", "thought"};
+        String[] keys = new String[]{"reasoning", "reasoning_content", "reasoningContent", "reasoning_text", "reasoningText", "reasoning_summary", "reasoningSummary", "thinking", "think", "thought", "analysis"};
         for (String key : keys) {
-            String v = cleanJsonString(delta, key);
-            if (v.length() > 0) out.append(v);
+            if (delta != null && delta.has(key) && !delta.isNull(key)) appendReasoningValue(out, delta.opt(key));
         }
         JSONArray details = delta.optJSONArray("reasoning_details");
         if (details != null) for (int i = 0; i < details.length(); i++) {
             JSONObject d = details.optJSONObject(i);
-            if (d != null) { String v = cleanJsonString(d, "text"); if (v.length() == 0) v = cleanJsonString(d, "content"); out.append(v); }
+            if (d != null) appendReasoningValue(out, d);
         }
         return out.toString();
+    }
+
+    private void appendReasoningValue(StringBuilder out, Object value) {
+        if (value == null || JSONObject.NULL.equals(value)) return;
+        if (value instanceof JSONObject) {
+            JSONObject o = (JSONObject) value;
+            String[] keys = new String[]{"text", "content", "summary", "reasoning", "reasoning_content", "thinking", "thought"};
+            for (String key : keys) if (o.has(key) && !o.isNull(key)) appendReasoningValue(out, o.opt(key));
+            JSONArray arr = o.optJSONArray("items");
+            if (arr == null) arr = o.optJSONArray("details");
+            if (arr != null) appendReasoningValue(out, arr);
+            return;
+        }
+        if (value instanceof JSONArray) {
+            JSONArray arr = (JSONArray) value;
+            for (int i = 0; i < arr.length(); i++) appendReasoningValue(out, arr.opt(i));
+            return;
+        }
+        String v = String.valueOf(value);
+        if (v.length() > 0 && !"null".equals(v)) out.append(v);
+    }
+
+    private void appendReasoningAwareContent(String content, StringBuilder answer, StringBuilder reasoning, boolean[] inThinkTag) {
+        String s = content == null ? "" : content;
+        int i = 0;
+        while (i < s.length()) {
+            String lower = s.substring(i).toLowerCase(Locale.US);
+            int open = firstIndex(lower, new String[]{"<think>", "<thinking>"});
+            int close = firstIndex(lower, new String[]{"</think>", "</thinking>"});
+            if (inThinkTag[0]) {
+                if (close < 0) { reasoning.append(s.substring(i)); return; }
+                reasoning.append(s.substring(i, i + close));
+                i += close + (lower.startsWith("</thinking>", close) ? "</thinking>".length() : "</think>".length());
+                inThinkTag[0] = false;
+            } else {
+                if (open < 0) { answer.append(s.substring(i)); return; }
+                answer.append(s.substring(i, i + open));
+                i += open + (lower.startsWith("<thinking>", open) ? "<thinking>".length() : "<think>".length());
+                inThinkTag[0] = true;
+            }
+        }
+    }
+
+    private int firstIndex(String s, String[] needles) {
+        int out = -1;
+        for (String needle : needles) {
+            int at = s.indexOf(needle);
+            if (at >= 0) out = out < 0 ? at : Math.min(out, at);
+        }
+        return out;
+    }
+
+    private String reasoningFromText(String text) {
+        StringBuilder answer = new StringBuilder();
+        StringBuilder reasoning = new StringBuilder();
+        appendReasoningAwareContent(text, answer, reasoning, new boolean[]{false});
+        return reasoning.toString().trim();
+    }
+
+    private String stripReasoningTags(String text) {
+        StringBuilder answer = new StringBuilder();
+        StringBuilder reasoning = new StringBuilder();
+        appendReasoningAwareContent(text, answer, reasoning, new boolean[]{false});
+        return answer.toString().trim();
     }
 
     private String cleanJsonString(JSONObject o, String key) {
@@ -2118,6 +2219,7 @@ public class MainActivity extends Activity {
         assistant.stats = gotReasoning && partial.length() == 0 ? LOADING : "";
         if (gotReasoning && partial.length() == 0) { forceAutoScrollBottom = userAtChatBottom; renderMessages(); saveCurrentChat(); return; }
         String visiblePartial = visibleStreamingAnswer(partial);
+        if (gotReasoning && visiblePartial.length() > 0 && assistant.thoughtMs == 0) assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt);
         assistant.text = visiblePartial.length() == 0 ? "" : cleanSearchArtifacts(visiblePartial);
         forceAutoScrollBottom = userAtChatBottom;
         if (assistant.slowVoice && voiceMode && voiceFullMode) { updateVoiceStatus("responding"); if (assistant.ttsStarted || !prefs.getBoolean("voiceSpeak", true)) renderVoiceConversation(); }
@@ -2152,7 +2254,7 @@ public class MainActivity extends Activity {
         assistant.stats = stats;
         assistant.streamDone = true;
         assistant.text = cleanSearchArtifacts(finalAnswer.length() == 0 ? assistant.text : finalAnswer);
-        if (reasoning.length() > 0) { assistant.reasoning = reasoning; assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt); }
+        if (reasoning.length() > 0) { assistant.reasoning = reasoning; if (assistant.thoughtMs == 0) assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt); }
         if (assistant.slowVoice && isModelRefusal(assistant.text)) {
             assistant.ttsQueue.clear();
             assistant.ttsRequested = false;
@@ -2576,6 +2678,13 @@ public class MainActivity extends Activity {
     private boolean privateReasoning(String text) {
         String s = text == null ? "" : text.toLowerCase(Locale.US);
         return s.contains("persistent user memory") || s.contains("private persistent") || s.contains("memory.md") || s.contains("private project instructions") || s.contains("folder instructions") || s.contains("project instructions") || s.contains("system prompt") || s.contains("system message") || s.contains("my memory") || s.contains("from memory") || s.contains("entry #");
+    }
+
+    private boolean privateReasoning(Msg m) {
+        if (m == null) return false;
+        String fullModel = expandShortModel(m.model);
+        if ("custom".equals(modelSource(fullModel))) return false;
+        return privateReasoning(m.reasoning);
     }
 
     private String buildFolderInstructionContext() {
@@ -3682,20 +3791,38 @@ public class MainActivity extends Activity {
         JSONObject msg = choices.getJSONObject(0).optJSONObject("message");
         if (msg == null) return "";
         Object content = msg.opt("content");
-        if (content instanceof String) return ((String) content).trim();
+        if (content instanceof String) return stripReasoningTags((String) content);
         if (content instanceof JSONArray) {
             StringBuilder b = new StringBuilder();
             JSONArray arr = (JSONArray) content;
             for (int i = 0; i < arr.length(); i++) {
                 JSONObject part = arr.optJSONObject(i);
                 if (part == null) continue;
-                String text = part.optString("text", part.optString("content", ""));
+                String text = stripReasoningTags(part.optString("text", part.optString("content", "")));
                 if (text.length() > 0) { if (b.length() > 0) b.append('\n'); b.append(text); }
             }
             if (b.length() > 0) return b.toString().trim();
         }
         JSONObject audio = msg.optJSONObject("audio");
         return audio == null ? "" : audio.optString("transcript", "").trim();
+    }
+
+    private String extractMessageReasoning(JSONObject resp) throws Exception {
+        JSONArray choices = resp.optJSONArray("choices");
+        if (choices == null || choices.length() == 0) return "";
+        JSONObject msg = choices.getJSONObject(0).optJSONObject("message");
+        if (msg == null) return "";
+        StringBuilder out = new StringBuilder(reasoningDelta(msg));
+        Object content = msg.opt("content");
+        if (content instanceof String) out.append(reasoningFromText((String) content));
+        else if (content instanceof JSONArray) {
+            JSONArray arr = (JSONArray) content;
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject part = arr.optJSONObject(i);
+                if (part != null) out.append(reasoningFromText(part.optString("text", part.optString("content", ""))));
+            }
+        }
+        return out.toString().trim();
     }
 
     private void transcribeVoiceFile(final File file) {
@@ -5245,7 +5372,7 @@ public class MainActivity extends Activity {
     public class WaveView extends View { Paint p = new Paint(Paint.ANTI_ALIAS_FLAG); float level = 0.05f; public WaveView(Context c) { super(c); } @Override protected void onDraw(Canvas c) { int bars = 9; int gap = dp(8); int barW = dp(3); int total = bars * barW + (bars - 1) * gap; int start = (getWidth() - total) / 2; int mid = getHeight() / 2; p.setColor(Color.WHITE); p.setStyle(Paint.Style.FILL); for (int i = 0; i < bars; i++) { float distance = Math.abs(i - (bars - 1) / 2f); float scale = Math.max(0.15f, 1f - distance * 0.14f); int h = Math.max(dp(8), Math.round(dp(78) * level * scale)); int x = start + i * (barW + gap); c.drawRect(x, mid - h / 2f, x + barW, mid + h / 2f, p); } } }
     public class BorderWaveView extends View { Paint p = new Paint(Paint.ANTI_ALIAS_FLAG); float level = 0.05f; public BorderWaveView(Context c) { super(c); } @Override protected void onDraw(Canvas c) { p.setStyle(Paint.Style.STROKE); p.setStrokeCap(Paint.Cap.SQUARE); p.setStrokeJoin(Paint.Join.MITER); p.setColor(Color.argb(145,255,255,255)); p.setStrokeWidth(dp(2)); float h = dp(1); c.drawRect(h, h, getWidth() - h, getHeight() - h, p); if (level > 0.12f) { p.setColor(Color.argb(Math.min(210, 90 + Math.round(level * 120)),255,255,255)); p.setStrokeWidth(dp(1)); float in = dp(7); c.drawRect(in, in, getWidth() - in, getHeight() - in, p); } } }
     public class GlobeButton extends View { Paint p = new Paint(Paint.ANTI_ALIAS_FLAG); boolean active = false; public GlobeButton(Context c) { super(c); } @Override protected void onDraw(Canvas c) { if (!active) return; int w=getWidth(), h=getHeight(); float r=Math.min(w,h)*0.25f, cx=w/2f, cy=h/2f; p.setColor(Color.WHITE); p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(Math.max(1f, dp(1))); p.setStrokeCap(Paint.Cap.ROUND); c.drawCircle(cx, cy, r, p); c.drawOval(cx-r*0.45f, cy-r, cx+r*0.45f, cy+r, p); c.drawArc(cx-r, cy-r*0.55f, cx+r, cy+r*0.55f, 0, 360, false, p); c.drawLine(cx-r*0.94f, cy, cx+r*0.94f, cy, p); } }
-    public class JumpTextView extends TextView { String word = "thinking"; int step = 0; Runnable tick = new Runnable() { @Override public void run() { animateJump(); } }; public JumpTextView(Context c) { super(c); setIncludeFontPadding(true); setGravity(Gravity.CENTER_VERTICAL); } @Override protected void onAttachedToWindow() { super.onAttachedToWindow(); animateJump(); } @Override protected void onDetachedFromWindow() { removeCallbacks(tick); super.onDetachedFromWindow(); } private void animateJump() { String w = word == null || word.length() == 0 ? "thinking" : word; SpannableString span = new SpannableString(w); int cycle = w.length() + 4, pos = step++ % cycle, peak = Math.min(pos, w.length() - 1); for (int i = 0; i < w.length(); i++) { int dist = Math.abs(i - peak); float size = pos >= w.length() ? 1.0f : dist == 0 ? 1.14f : dist == 1 ? 1.06f : 1.0f; span.setSpan(new RelativeSizeSpan(size), i, i + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE); } setText(span); postDelayed(tick, pos >= w.length() ? 260 : 135); } }
+    public class JumpTextView extends TextView { String word = "thinking"; int step = 0; Runnable tick = new Runnable() { @Override public void run() { animateJump(); } }; public JumpTextView(Context c) { super(c); setSingleLine(true); setIncludeFontPadding(true); setGravity(Gravity.CENTER_VERTICAL); } @Override protected void onAttachedToWindow() { super.onAttachedToWindow(); animateJump(); } @Override protected void onDetachedFromWindow() { removeCallbacks(tick); super.onDetachedFromWindow(); } private void animateJump() { String w = word == null || word.length() == 0 ? "thinking" : word; SpannableString span = new SpannableString(w); int cycle = w.length() + 4, pos = step++ % cycle, peak = Math.min(pos, w.length() - 1); for (int i = 0; i < w.length(); i++) { final int dist = Math.abs(i - peak); final int shift = pos >= w.length() ? 0 : dist == 0 ? dp(3) : dist == 1 ? dp(1) : 0; if (shift > 0) span.setSpan(new android.text.style.CharacterStyle() { @Override public void updateDrawState(android.text.TextPaint tp) { tp.baselineShift += shift; } }, i, i + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE); } setText(span); postDelayed(tick, pos >= w.length() ? 260 : 135); } }
     public static class ContextMeter extends View { Paint p = new Paint(Paint.ANTI_ALIAS_FLAG); float percent = 0; public ContextMeter(Context c) { super(c); } @Override protected void onDraw(Canvas c) { int w=getWidth(), h=getHeight(), r=Math.min(w,h)/2-2; p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(2); p.setColor(Color.WHITE); c.drawCircle(w/2f,h/2f,r,p); p.setStyle(Paint.Style.FILL); c.drawArc(w/2f-r,h/2f-r,w/2f+r,h/2f+r,-90,percent*3.6f,true,p); p.setColor(Color.BLACK); c.drawCircle(w/2f,h/2f,Math.max(1,r-5),p); } }
     public static class Msg { String role, text, imageBase64, imageMime, stats, model, replyQuote, reasoning = "", memorySavedText = ""; boolean slowVoice = false, reasoningCapable = false, thinkingExpanded = false, searchExpanded = false, memorySaved = false, memoryExpanded = false, ttsRequested = false, ttsStarted = false, ttsPlaying = false, ttsStartDelayDone = false, streamDone = false; int spokenChars = 0, ttsPlaybackFailures = 0, voiceSessionId = 0; long startedAt = System.currentTimeMillis(), thoughtMs = 0; ArrayList<String> ttsQueue = new ArrayList<String>(); ArrayList<String> searchSources = new ArrayList<String>(); Msg(String r, String t, String i, String m, String s) { this(r,t,i,m,s,"",""); } Msg(String r, String t, String i, String m, String s, String modelName) { this(r,t,i,m,s,modelName,""); } Msg(String r, String t, String i, String m, String s, String modelName, String reply) { role=r; text=t==null?"":t; imageBase64=i==null?"":i; imageMime=m==null?"":m; stats=s==null?"":s; model=modelName==null?"":modelName; replyQuote=reply==null?"":reply; } JSONObject toJson() throws Exception { JSONArray src = new JSONArray(); for (String s : searchSources) src.put(s); return new JSONObject().put("role",role).put("text",text).put("image",imageBase64).put("mime",imageMime).put("stats",stats).put("model",model).put("replyQuote",replyQuote).put("reasoning",reasoning).put("thoughtMs",thoughtMs).put("memorySaved",memorySaved).put("memorySavedText",memorySavedText).put("searchSources",src); } static Msg fromJson(JSONObject o) { Msg m = new Msg(o.optString("role"),o.optString("text"),o.optString("image"),o.optString("mime"),o.optString("stats"),o.optString("model"),o.optString("replyQuote")); m.reasoning = o.optString("reasoning", ""); m.thoughtMs = o.optLong("thoughtMs", 0); m.memorySaved = o.optBoolean("memorySaved", false); m.memorySavedText = o.optString("memorySavedText", ""); JSONArray src = o.optJSONArray("searchSources"); if (src != null) for (int i = 0; i < src.length(); i++) { String s = src.optString(i, ""); if (s.length() > 0) m.searchSources.add(s); } m.streamDone = !LOADING.equals(m.stats); return m; } }
     public static class Chat { String id="", title="", folder="Inbox", model=""; boolean webSearch=false, titleGenerated=false; ArrayList<Msg> messages=new ArrayList<Msg>(); JSONObject toJson() throws Exception { JSONArray a=new JSONArray(); for(Msg m:messages)a.put(m.toJson()); return new JSONObject().put("id",id).put("title",title).put("titleGenerated",titleGenerated).put("folder",folder).put("model",model).put("webSearch",webSearch).put("messages",a); } static Chat fromJson(JSONObject o) { Chat c=new Chat(); c.id=o.optString("id"); c.title=o.optString("title"); c.titleGenerated=o.optBoolean("titleGenerated", false); c.folder=o.optString("folder","Inbox"); c.model=o.optString("model", ""); c.webSearch=o.optBoolean("webSearch", false); JSONArray a=o.optJSONArray("messages"); if(a!=null) for(int i=0;i<a.length();i++) c.messages.add(Msg.fromJson(a.optJSONObject(i))); return c; } }
