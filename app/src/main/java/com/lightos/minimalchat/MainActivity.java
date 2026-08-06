@@ -102,7 +102,7 @@ public class MainActivity extends Activity {
     private static final int MESSAGE_PAGE = 30;
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
-    private static final String APP_VERSION = "1.0.7";
+    private static final String APP_VERSION = "1.0.8";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 64;
@@ -545,29 +545,49 @@ public class MainActivity extends Activity {
 
     private void addVersionFooter(LinearLayout settings) {
         maybeCheckLatestVersion(false);
-        TextView v = text(versionFooterText(), 11, Color.rgb(130,130,130));
+        boolean outdated = hasPendingUpdate();
+        TextView v = text(versionFooterText(), 11, outdated ? Color.rgb(190, 190, 190) : Color.rgb(130, 130, 130));
         v.setGravity(Gravity.CENTER_VERTICAL);
-        v.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View view) {
-            String latest = prefs.getString("latestGitHubVersion", "");
-            String apk = prefs.getString("latestGitHubApkUrl", "");
-            if (latest.length() > 0 && apk.length() > 0 && compareVersions(latest, APP_VERSION) > 0) showUpdateDialog(latest, apk);
-            else { prefs.edit().remove("latestVersionCheckedAt").apply(); maybeCheckLatestVersion(true); toast("checking for updates"); }
-        } });
-        settings.addView(v, new LinearLayout.LayoutParams(-1, dp(28)));
+        v.setPadding(0, dp(10), 0, dp(10));
+        v.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View view) { onVersionFooterClick(); } });
+        settings.addView(v, new LinearLayout.LayoutParams(-1, -2));
+    }
+
+    private void onVersionFooterClick() {
+        if (updateDownloading) { toast("download already running"); return; }
+        if (updateDialogShowing) return;
+        String latest = prefs.getString("latestGitHubVersion", "");
+        String apk = prefs.getString("latestGitHubApkUrl", "");
+        if (latest.length() > 0 && apk.length() > 0 && compareVersions(latest, APP_VERSION) > 0) {
+            showUpdateDialog(latest, apk);
+            return;
+        }
+        toast("checking for updates");
+        prefs.edit().remove("latestVersionCheckedAt").apply();
+        checkLatestVersion(true, true);
+    }
+
+    private boolean hasPendingUpdate() {
+        if (prefs == null) return false;
+        String latest = prefs.getString("latestGitHubVersion", "");
+        return latest.length() > 0 && compareVersions(latest, APP_VERSION) > 0;
     }
 
     private String versionFooterText() {
-        String latest = prefs == null ? "" : prefs.getString("latestGitHubVersion", "");
-        boolean outdated = latest.length() > 0 && compareVersions(latest, APP_VERSION) > 0;
-        return "version " + APP_VERSION + (outdated ? " - update available" : "");
+        return "version " + APP_VERSION + (hasPendingUpdate() ? " - update available" : "");
     }
 
-    private void maybeCheckLatestVersion(final boolean prompt) {
+    private void maybeCheckLatestVersion(boolean prompt) {
+        checkLatestVersion(prompt, false);
+    }
+
+    private void checkLatestVersion(final boolean prompt, final boolean fromUser) {
         if (prefs == null || hookVoiceMode) return;
         long now = System.currentTimeMillis();
         long last = prefs.getLong("latestVersionCheckedAt", 0);
         if (now - last < VERSION_CHECK_MS) {
-            if (prompt) maybeShowUpdateDialog();
+            if (fromUser) presentUpdateCheckResult(true);
+            else if (prompt) maybeShowUpdateDialog();
             return;
         }
         prefs.edit().putLong("latestVersionCheckedAt", now).apply();
@@ -578,17 +598,27 @@ public class MainActivity extends Activity {
                 c.setReadTimeout(15000);
                 c.setRequestProperty("Accept", "application/vnd.github+json");
                 c.setRequestProperty("User-Agent", "lightui-android");
-                if (c.getResponseCode() >= 400) return;
+                int code = c.getResponseCode();
+                if (code >= 400) {
+                    if (fromUser) runOnUiThread(new Runnable() { @Override public void run() { toast("couldn't check for updates"); } });
+                    return;
+                }
                 JSONObject release = new JSONObject(readAll(c.getInputStream()));
                 final String tag = release.optString("tag_name", "").replaceFirst("^[vV]", "").trim();
                 final String apkUrl = findReleaseApkUrl(release);
-                if (tag.length() == 0) return;
+                if (tag.length() == 0) {
+                    if (fromUser) runOnUiThread(new Runnable() { @Override public void run() { toast("couldn't check for updates"); } });
+                    return;
+                }
                 prefs.edit().putString("latestGitHubVersion", tag).putString("latestGitHubApkUrl", apkUrl).apply();
                 runOnUiThread(new Runnable() { @Override public void run() {
                     if (pane == 2 && settingsPage.length() == 0) showSettingsPane();
-                    if (prompt) maybeShowUpdateDialog();
+                    if (fromUser) presentUpdateCheckResult(true);
+                    else if (prompt) maybeShowUpdateDialog();
                 } });
-            } catch (Exception ignored) { }
+            } catch (Exception e) {
+                if (fromUser) runOnUiThread(new Runnable() { @Override public void run() { toast("couldn't check for updates"); } });
+            }
         } }).start();
     }
 
@@ -609,12 +639,24 @@ public class MainActivity extends Activity {
     }
 
     private void maybeShowUpdateDialog() {
-        if (hookVoiceMode || prefs == null || updateDialogShowing || updateDownloading || voiceMode) return;
+        presentUpdateCheckResult(false);
+    }
+
+    private void presentUpdateCheckResult(boolean fromUser) {
+        if (hookVoiceMode || prefs == null || updateDialogShowing || updateDownloading || (!fromUser && voiceMode)) {
+            return;
+        }
         String latest = prefs.getString("latestGitHubVersion", "");
         String apkUrl = prefs.getString("latestGitHubApkUrl", "");
-        if (latest.length() == 0 || apkUrl.length() == 0) return;
-        if (compareVersions(latest, APP_VERSION) <= 0) return;
-        if (latest.equals(prefs.getString("silencedUpdateVersion", ""))) return;
+        if (latest.length() == 0 || apkUrl.length() == 0) {
+            if (fromUser) toast("couldn't check for updates");
+            return;
+        }
+        if (compareVersions(latest, APP_VERSION) <= 0) {
+            if (fromUser) toast("you're on the latest version");
+            return;
+        }
+        if (!fromUser && latest.equals(prefs.getString("silencedUpdateVersion", ""))) return;
         showUpdateDialog(latest, apkUrl);
     }
 
