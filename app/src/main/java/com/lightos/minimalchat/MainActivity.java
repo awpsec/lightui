@@ -15,6 +15,8 @@ import android.media.AudioFormat;
 import android.media.AudioManager;
 import android.media.AudioRecord;
 import android.media.AudioTrack;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.LinearGradient;
@@ -24,6 +26,7 @@ import android.graphics.Rect;
 import android.graphics.Shader;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.GradientDrawable;
 import android.media.MediaPlayer;
 import android.media.MediaRecorder;
 import android.net.Uri;
@@ -136,6 +139,7 @@ public class MainActivity extends Activity {
     private ScrollIndicator scrollIndicator;
     private EditText input, apiKey, endpointInput, endpointKeyInput, jinaKeyInput, voiceEndpointInput;
     private ImageButton composerAction;
+    private View photoPreviewOverlay;
     private TextView modelText, contextText, attachText, replyChip, notice, voiceStatus, voiceText, voiceReply, bulkButton, emptyPrompt, bottomButton;
     private GlobeButton webSearchIcon;
     private View chatFade;
@@ -287,6 +291,7 @@ public class MainActivity extends Activity {
         if (e.getAction() == KeyEvent.ACTION_UP) {
             int code = e.getKeyCode();
             if (code == KeyEvent.KEYCODE_HOME || code == KeyEvent.KEYCODE_BACK || code == KeyEvent.KEYCODE_ESCAPE || code == KeyEvent.KEYCODE_MOVE_HOME) {
+                if (photoPreviewOverlay != null) { dismissImagePreview(); return true; }
                 if (voiceMode && voiceFullMode) stopVoiceMode();
                 else if (projectEditorOpen) showChatsPane();
                 else if (pane == 0 && projectView.length() > 0) { projectView = ""; showChatsPane(); }
@@ -344,6 +349,7 @@ public class MainActivity extends Activity {
         attachText = null;
         replyChip = null;
         removeScreenChild(notice); notice = null;
+        dismissImagePreview();
         modelText = null;
         meter = null;
         emptyPrompt = null;
@@ -2049,17 +2055,25 @@ public class MainActivity extends Activity {
             final boolean hasMemoryRow = m.role.equals("assistant") && m.streamDone && m.memorySaved;
             TextView body = text("", 16, Color.WHITE);
             String bodyText = "assistant".equals(m.role) ? sanitizeAssistantText(m.text) : (m.text == null ? "" : m.text);
-            body.setText(markdownText(bodyText + (m.imageBase64.length() == 0 ? "" : "\n[image attached]")));
+            boolean hasImage = m.imageBase64 != null && m.imageBase64.length() > 0;
+            boolean hasText = bodyText.trim().length() > 0;
+            body.setText(hasText ? markdownText(bodyText) : "");
             body.setLineSpacing(dp(2), 1.0f);
             final Msg selectedMessage = m;
             body.setOnLongClickListener(new View.OnLongClickListener() { @Override public boolean onLongClick(View v) { showMessageActions(selectedMessage); return true; } });
             if (m.role.equals("user")) {
-                messageList.addView(userMessageBlock(body), userMessageBlockParams());
+                messageList.addView(userMessageBlock(hasText ? body : null, m), userMessageBlockParams());
             } else {
                 TextView role = text(messageModelLabel(m), 11, Color.LTGRAY);
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
                 lp.setMargins(0, dp(8), 0, 0);
                 messageList.addView(role, lp);
+                if (hasImage) {
+                    LinearLayout.LayoutParams imageLp = new LinearLayout.LayoutParams(dp(64), dp(64));
+                    imageLp.topMargin = dp(4);
+                    imageLp.bottomMargin = hasText ? dp(8) : dp(2);
+                    messageList.addView(messageImageThumb(m), imageLp);
+                }
             }
             if (hasThinkingRow) {
                 final Msg thinkingMessage = m;
@@ -2119,7 +2133,7 @@ public class MainActivity extends Activity {
                     messageList.addView(src, new LinearLayout.LayoutParams(-1, -2));
                 }
             }
-            if (!m.role.equals("user") && !isSearching) {
+            if (!m.role.equals("user") && !isSearching && hasText) {
                 messageList.addView(body, new LinearLayout.LayoutParams(-1, -2));
             }
             if (hasMemoryRow) {
@@ -6822,7 +6836,7 @@ public class MainActivity extends Activity {
         return lp;
     }
 
-    private View userMessageBlock(TextView body) {
+    private View userMessageBlock(TextView body, Msg m) {
         // Fieldset-style user bubble: light outline with "you" sitting on the top stroke.
         FrameLayout wrap = new FrameLayout(this);
         wrap.setClipChildren(false);
@@ -6832,8 +6846,16 @@ public class MainActivity extends Activity {
         box.setOrientation(LinearLayout.VERTICAL);
         box.setBackground(userMessageBorder());
         box.setPadding(dp(10), dp(12), dp(10), dp(8));
-        body.setPadding(0, 0, 0, 0);
-        box.addView(body, new LinearLayout.LayoutParams(-1, -2));
+        boolean hasImage = m != null && m.imageBase64 != null && m.imageBase64.length() > 0;
+        if (hasImage) {
+            LinearLayout.LayoutParams imageLp = new LinearLayout.LayoutParams(dp(64), dp(64));
+            if (body != null) imageLp.bottomMargin = dp(8);
+            box.addView(messageImageThumb(m), imageLp);
+        }
+        if (body != null) {
+            body.setPadding(0, 0, 0, 0);
+            box.addView(body, new LinearLayout.LayoutParams(-1, -2));
+        }
 
         TextView you = text("you", 11, Color.LTGRAY);
         you.setBackgroundColor(Color.BLACK);
@@ -6857,6 +6879,97 @@ public class MainActivity extends Activity {
         youLp.leftMargin = dp(10);
         wrap.addView(you, youLp);
         return wrap;
+    }
+
+    private ImageView messageImageThumb(final Msg m) {
+        int size = dp(64);
+        ImageView iv = new ImageView(this);
+        iv.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        iv.setBackgroundColor(Color.rgb(28, 28, 28));
+        Bitmap thumb = ensureMessageThumb(m, size * 2);
+        if (thumb != null) iv.setImageBitmap(thumb);
+        GradientDrawable frame = new GradientDrawable();
+        frame.setColor(Color.rgb(28, 28, 28));
+        frame.setStroke(1, Color.rgb(72, 72, 72));
+        iv.setBackground(frame);
+        iv.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { showImagePreview(m); }
+        });
+        iv.setOnLongClickListener(new View.OnLongClickListener() {
+            @Override public boolean onLongClick(View v) { showMessageActions(m); return true; }
+        });
+        return iv;
+    }
+
+    private Bitmap ensureMessageThumb(Msg m, int maxEdge) {
+        if (m == null || m.imageBase64 == null || m.imageBase64.length() == 0) return null;
+        if (m.imageThumb != null && !m.imageThumb.isRecycled()) return m.imageThumb;
+        m.imageThumb = decodeMessageBitmap(m.imageBase64, maxEdge);
+        return m.imageThumb;
+    }
+
+    private Bitmap decodeMessageBitmap(String b64, int maxEdge) {
+        try {
+            byte[] data = Base64.decode(b64, Base64.DEFAULT);
+            BitmapFactory.Options bounds = new BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            BitmapFactory.decodeByteArray(data, 0, data.length, bounds);
+            int sample = 1;
+            int largest = Math.max(bounds.outWidth, bounds.outHeight);
+            if (largest <= 0) largest = maxEdge;
+            while (largest / sample > maxEdge) sample *= 2;
+            BitmapFactory.Options opts = new BitmapFactory.Options();
+            opts.inSampleSize = Math.max(1, sample);
+            opts.inPreferredConfig = Bitmap.Config.RGB_565;
+            return BitmapFactory.decodeByteArray(data, 0, data.length, opts);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private void showImagePreview(Msg m) {
+        if (m == null || m.imageBase64 == null || m.imageBase64.length() == 0 || screen == null) return;
+        dismissImagePreview();
+        int maxEdge = Math.max(getResources().getDisplayMetrics().widthPixels, getResources().getDisplayMetrics().heightPixels);
+        final Bitmap full = decodeMessageBitmap(m.imageBase64, maxEdge);
+        if (full == null) { toast("couldn't open photo"); return; }
+
+        final FrameLayout overlay = new FrameLayout(this);
+        overlay.setClickable(true);
+        // Frosted dim chrome around the photo; tap outside the image to dismiss.
+        overlay.setBackgroundColor(Color.argb(198, 0, 0, 0));
+
+        ImageView img = new ImageView(this);
+        img.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        img.setImageBitmap(full);
+        img.setClickable(true);
+        // Consume taps on the photo itself so only frosted chrome dismisses.
+        img.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { } });
+
+        int padH = dp(26);
+        int padTop = dp(52);
+        int padBottom = dp(36);
+        FrameLayout.LayoutParams imgLp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                Gravity.CENTER);
+        imgLp.setMargins(padH, padTop, padH, padBottom);
+        overlay.addView(img, imgLp);
+
+        overlay.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { dismissImagePreview(); }
+        });
+
+        photoPreviewOverlay = overlay;
+        screen.addView(overlay, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
+    }
+
+    private void dismissImagePreview() {
+        if (photoPreviewOverlay == null) return;
+        removeScreenChild(photoPreviewOverlay);
+        photoPreviewOverlay = null;
     }
 
     public class MicButton extends View { Paint p = new Paint(Paint.ANTI_ALIAS_FLAG); public MicButton(Context c) { super(c); setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { startVoice(); } }); } @Override protected void onDraw(Canvas c) { p.setColor(Color.WHITE); p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(dp(2)); p.setStrokeCap(Paint.Cap.ROUND); float cx=getWidth()/2f, cy=getHeight()/2f; c.drawRoundRect(cx-dp(4), cy-dp(10), cx+dp(4), cy+dp(4), dp(4), dp(4), p); c.drawLine(cx-dp(10), cy-dp(2), cx-dp(10), cy+dp(3), p); c.drawArc(cx-dp(10), cy-dp(2), cx+dp(10), cy+dp(16), 0, 180, false, p); c.drawLine(cx+dp(10), cy-dp(2), cx+dp(10), cy+dp(3), p); c.drawLine(cx, cy+dp(15), cx, cy+dp(20), p); c.drawLine(cx-dp(6), cy+dp(20), cx+dp(6), cy+dp(20), p); } }
@@ -6938,6 +7051,7 @@ public class MainActivity extends Activity {
         boolean slowVoice = false, reasoningCapable = false, thinkingExpanded = false, searchExpanded = false, memorySaved = false, memoryExpanded = false, ttsRequested = false, ttsPrefetching = false, ttsStarted = false, ttsPlaying = false, ttsStartDelayDone = false, streamDone = false;
         int spokenChars = 0, ttsPlaybackFailures = 0, voiceSessionId = 0, thinkingAnimStep = 0;
         long startedAt = System.currentTimeMillis(), thoughtMs = 0;
+        transient Bitmap imageThumb;
         ArrayList<String> ttsQueue = new ArrayList<String>();
         ArrayList<String> searchSources = new ArrayList<String>();
         Msg(String r, String t, String i, String m, String s) { this(r,t,i,m,s,"",""); }
