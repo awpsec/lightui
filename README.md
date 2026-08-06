@@ -11,6 +11,7 @@ Minimal black-and-white Android chat client built for small Android devices (spe
 - Project-based instructions injected privately into chats in that project
 - Local chat/project history stored on device
 - STT/TTS voice flows with endpoint/OpenRouter support
+- Voice-only call/text shortcuts (e.g. "call Mom", "text Dad I'm on the way") that confirm, dismiss the overlay, and open the dialer/SMS composer
 - Android assistant/voice-command overlay support
 - Pure black/white UI designed around the lightOS style
 
@@ -26,13 +27,19 @@ Minimal black-and-white Android chat client built for small Android devices (spe
 
 ## Install
 
-Download `release/lightui-release.apk` from this package or build it yourself.
+Download `lightui-release.apk` from the latest [GitHub Release](https://github.com/awpsec/lightui/releases/latest), or use `release/lightui-release.apk` from this package, or build it yourself.
 
 On a connected Android device:
 
-```powershell
-adb install -r release\lightui-release.apk
+```bash
+adb install -r release/lightui-release.apk
 ```
+
+When a newer GitHub Release exists, lightui prompts on open:
+
+- **update** — download the APK, open the system installer, then relaunch
+- **dismiss** — close for now (prompt returns on a later launch)
+- **silence** — hide prompts for that version only (a newer version prompts again)
 
 First launch setup:
 
@@ -52,19 +59,35 @@ Requirements:
 - JDK 11 or newer
 - `ANDROID_HOME` or `ANDROID_SDK_ROOT` set
 
-Build from the project root in PowerShell:
+Build from the project root:
 
 ```powershell
 .\build.ps1
 ```
 
+```bash
+./build.sh
+# or package into release/ for sideload + GitHub Release assets:
+./package-release.sh
+```
+
+To publish a GitHub Release with the APK attached, tag the version and push:
+
+```bash
+git tag v1.0.6
+git push origin v1.0.6
+```
+
+The `Release` GitHub Action builds `lightui-release.apk` and attaches it to that tag. In-app update checks read `https://github.com/awpsec/lightui/releases/latest`.
+
 The signed installable APK is written to:
 
 ```text
-build\lightui-release.apk
+build/lightui-release.apk
+release/lightui-release.apk
 ```
 
-The build script signs with the local Android debug keystore in `%USERPROFILE%\.android\debug.keystore` if no keystore exists. That is fine for sideload testing and GitHub APK downloads, but use your own private release keystore if you need long-term production signing.
+The build script signs with the local Android debug keystore (`~/.android/debug.keystore`) if no keystore exists. That is fine for sideload testing and GitHub APK downloads, but use your own private release keystore if you need long-term production signing.
 
 ## Privacy
 
@@ -83,6 +106,13 @@ The app exposes an assistant overlay activity for Android assistant/voice-comman
 
 The main activity can also receive shared text through Android `ACTION_SEND`.
 
+In fullscreen/assistant voice mode only (not typed chat), local shortcuts can place a call or open a text without involving the LLM:
+
+- "call Mom" / "start a call to Mom" → speaks "calling Mom", closes the overlay, opens the dialer
+- "text Dad I'm running late" / "text Mom saying I'll be home soon" → speaks "texting Dad", opens the SMS composer
+
+These use `READ_CONTACTS` to resolve names, then `ACTION_DIAL` / `ACTION_SENDTO` so the system phone/messages apps complete the action.
+
 ## Project Layout
 
 ```text
@@ -91,12 +121,19 @@ app/src/main/java/com/lightos/minimalchat/MainActivity.java
 app/src/main/java/com/lightos/minimalchat/VoiceHookActivity.java
 app/src/main/res/
 build.ps1
+build.sh
+package-release.sh
+.github/workflows/release.yml
 release/lightui-release.apk
 ```
 
 ## Notes
 
-This is a compact native Android Java project with no Gradle wrapper. The build script calls Android SDK tools directly: `aapt2`, `javac`, `d8`, `zipalign`, and `apksigner`.
+This is a compact native Android Java project with no Gradle wrapper. The build scripts call Android SDK tools directly: `aapt2`, `javac`, `d8`, `zipalign`, and `apksigner`.
+
+Chat history, folders, and project instructions are stored in an app-private `chats-store.json` file (migrated automatically from older SharedPreferences installs). Streaming responses debounce disk writes and throttle chat redraws to keep the UI responsive on small devices.
+
+GitHub Releases are the update source of truth. Tagging `vX.Y.Z` publishes `lightui-release.apk` via Actions so devices can update in-app.
 
 ## License
 
