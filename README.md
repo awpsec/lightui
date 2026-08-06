@@ -52,19 +52,23 @@ Requirements:
 - JDK 11 or newer
 - `ANDROID_HOME` or `ANDROID_SDK_ROOT` set
 
-Build from the project root in PowerShell:
+Build from the project root:
 
 ```powershell
 .\build.ps1
 ```
 
+```bash
+./build.sh
+```
+
 The signed installable APK is written to:
 
 ```text
-build\lightui-release.apk
+build/lightui-release.apk
 ```
 
-The build script signs with the local Android debug keystore in `%USERPROFILE%\.android\debug.keystore` if no keystore exists. That is fine for sideload testing and GitHub APK downloads, but use your own private release keystore if you need long-term production signing.
+The build script signs with the local Android debug keystore (`~/.android/debug.keystore`) if no keystore exists. That is fine for sideload testing and GitHub APK downloads, but use your own private release keystore if you need long-term production signing.
 
 ## Privacy
 
@@ -91,12 +95,15 @@ app/src/main/java/com/lightos/minimalchat/MainActivity.java
 app/src/main/java/com/lightos/minimalchat/VoiceHookActivity.java
 app/src/main/res/
 build.ps1
+build.sh
 release/lightui-release.apk
 ```
 
 ## Notes
 
-This is a compact native Android Java project with no Gradle wrapper. The build script calls Android SDK tools directly: `aapt2`, `javac`, `d8`, `zipalign`, and `apksigner`.
+This is a compact native Android Java project with no Gradle wrapper. The build scripts call Android SDK tools directly: `aapt2`, `javac`, `d8`, `zipalign`, and `apksigner`.
+
+Chat history, folders, and project instructions are stored in an app-private `chats-store.json` file (migrated automatically from older SharedPreferences installs). Streaming responses debounce disk writes and throttle chat redraws to keep the UI responsive on small devices.
 
 ## License
 

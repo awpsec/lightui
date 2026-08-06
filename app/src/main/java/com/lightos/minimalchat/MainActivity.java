@@ -100,8 +100,15 @@ public class MainActivity extends Activity {
     private static final int MESSAGE_PAGE = 30;
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
-    private static final String APP_VERSION = "1.0.2";
+    private static final String APP_VERSION = "1.0.3";
+    private static final String CHATS_STORE = "chats-store.json";
+    private static final long PERSIST_DEBOUNCE_MS = 900;
+    private static final long STREAM_RENDER_MIN_MS = 64;
     private SharedPreferences prefs;
+    private Runnable pendingPersist;
+    private Runnable pendingStreamRender;
+    private long lastStreamRenderAt = 0;
+    private boolean chatsDirty = false;
     private FrameLayout screen;
     private LinearLayout root, messageList, folderList, chatList;
     private ScrollView scroll, settingsScrollView;
@@ -176,6 +183,7 @@ public class MainActivity extends Activity {
     @Override protected void onNewIntent(Intent intent) { super.onNewIntent(intent); handleIncoming(intent); }
 
     @Override protected void onDestroy() {
+        flushPendingPersist();
         super.onDestroy();
         stopAllVoiceAudio();
         if (speechRecognizer != null) { speechRecognizer.destroy(); speechRecognizer = null; }
@@ -185,6 +193,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onPause() {
         super.onPause();
+        flushPendingPersist();
         if (voiceMode && voiceFullMode) stopVoiceMode();
     }
 
@@ -1375,7 +1384,6 @@ public class MainActivity extends Activity {
     private void showChatsPane() {
         projectEditorOpen = false;
         saveCurrentChat();
-        reloadChatsFromPrefs();
         pane = 0;
         renderingMessages = false;
         forceAutoScrollBottom = false;
@@ -2110,18 +2118,6 @@ public class MainActivity extends Activity {
             int completionTokens = estimateTokens(finishedAnswer) + (reasoning.length() == 0 ? 0 : estimateTokens(reasoning.toString()));
             final String stats = String.format(Locale.US, "%.1f tok/s", completionTokens / Math.max(0.001, (end - start) / 1e9));
             runOnUiThread(new Runnable() { @Override public void run() { finishStreamingAssistant(assistant, finishedAnswer, reasoning.toString(), stats, key, source, model); } });
-/*            String raw = readAll(code >= 400 ? c.getErrorStream() : c.getInputStream()); long end = System.nanoTime();
-            if (code >= 400) throw new RuntimeException(raw);
-            JSONObject resp = new JSONObject(raw);
-            String answer = resp.getJSONArray("choices").getJSONObject(0).getJSONObject("message").optString("content", "");
-            JSONObject usage = resp.optJSONObject("usage");
-            int completionTokens = usage == null ? estimateTokens(answer) : usage.optInt("completion_tokens", estimateTokens(answer));
-            final String stats = String.format(Locale.US, "%.1f tok/s", completionTokens / Math.max(0.001, (end - start) / 1e9));
-            final String finalAnswer = answer;
-            runOnUiThread(new Runnable() { @Override public void run() {
-                assistant.stats = "";
-                animateAssistant(assistant, finalAnswer, stats, 0);
-            } });*/
         } catch (Exception e) {
             final String msg = friendlyError(e);
             runOnUiThread(new Runnable() { @Override public void run() { stopVoiceThinking(); assistant.stats = ""; assistant.text = isModelRefusal(msg) ? "model refused\n" + msg : "failed to load model\n" + msg; setVoiceText(assistant.text); updateVoiceStatus(isModelRefusal(msg) ? "model refused" : "failed"); renderMessages(); } });
@@ -2217,15 +2213,42 @@ public class MainActivity extends Activity {
         boolean gotReasoning = reasoning.length() > 0;
         if (gotReasoning) { assistant.reasoning = reasoning; assistant.reasoningCapable = true; assistant.text = ""; }
         assistant.stats = gotReasoning && partial.length() == 0 ? LOADING : "";
-        if (gotReasoning && partial.length() == 0) { forceAutoScrollBottom = userAtChatBottom; renderMessages(); saveCurrentChat(); return; }
+        if (gotReasoning && partial.length() == 0) { forceAutoScrollBottom = userAtChatBottom; requestStreamingRender(); saveCurrentChatDeferred(); return; }
         String visiblePartial = visibleStreamingAnswer(partial);
         if (gotReasoning && visiblePartial.length() > 0 && assistant.thoughtMs == 0) assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt);
         assistant.text = visiblePartial.length() == 0 ? "" : cleanSearchArtifacts(visiblePartial);
         forceAutoScrollBottom = userAtChatBottom;
         if (assistant.slowVoice && voiceMode && voiceFullMode) { updateVoiceStatus("responding"); if (assistant.ttsStarted || !prefs.getBoolean("voiceSpeak", true)) renderVoiceConversation(); }
         maybeSpeakStreamingChunk(assistant, visiblePartial, false);
+        requestStreamingRender();
+        saveCurrentChatDeferred();
+    }
+
+    private void requestStreamingRender() {
+        long now = System.currentTimeMillis();
+        long wait = STREAM_RENDER_MIN_MS - (now - lastStreamRenderAt);
+        if (wait <= 0) {
+            if (pendingStreamRender != null) { ui.removeCallbacks(pendingStreamRender); pendingStreamRender = null; }
+            lastStreamRenderAt = now;
+            renderMessages();
+            return;
+        }
+        if (pendingStreamRender != null) return;
+        pendingStreamRender = new Runnable() { @Override public void run() {
+            pendingStreamRender = null;
+            lastStreamRenderAt = System.currentTimeMillis();
+            renderMessages();
+        } };
+        ui.postDelayed(pendingStreamRender, wait);
+    }
+
+    private void flushPendingStreamRender() {
+        if (pendingStreamRender != null) {
+            ui.removeCallbacks(pendingStreamRender);
+            pendingStreamRender = null;
+        }
+        lastStreamRenderAt = 0;
         renderMessages();
-        saveCurrentChat();
     }
 
     private String visibleStreamingAnswer(String text) {
@@ -2260,13 +2283,13 @@ public class MainActivity extends Activity {
             assistant.ttsRequested = false;
             assistant.ttsPlaying = false;
             forceAutoScrollBottom = true;
-            renderMessages();
+            flushPendingStreamRender();
             saveCurrentChat();
             pauseVoiceAfterProviderFailure("model refused", "model refused\n" + assistant.text);
             return;
         }
         forceAutoScrollBottom = userAtChatBottom;
-        renderMessages();
+        flushPendingStreamRender();
         saveCurrentChat();
         maybeGenerateChatTitle(key, source, model);
         if (assistant.slowVoice) { maybeSpeakStreamingChunk(assistant, assistant.text, true); maybeFinishVoiceAfterTts(assistant); }
@@ -5031,7 +5054,30 @@ public class MainActivity extends Activity {
 
     private void newChat() { saveCurrentChat(); currentChatId = ""; messages.clear(); selectedFolder = projectView.length() > 0 ? projectView : "Inbox"; webSearchChat = false; savedChatScrollKnown = false; forceAutoScrollBottom = false; resetMessageWindowToLatest(); if (messageList != null) renderMessages(); }
     private void loadChat(Chat c) { currentChatId = c.id; selectedFolder = c.folder; if (!"Inbox".equals(c.folder)) projectView = c.folder; messages.clear(); messages.addAll(c.messages); webSearchChat = c.webSearch; if (c.model.length() > 0) prefs.edit().putString("model", c.model).putBoolean("modelSelected", true).apply(); savedChatScrollKnown = false; forceAutoScrollBottom = true; resetMessageWindowToLatest(); }
-    private void saveCurrentChat() { if (messages.size() == 0) return; if (currentChatId.length() == 0) currentChatId = String.valueOf(System.currentTimeMillis()); Chat t = null; for (Chat c : chats) if (c.id.equals(currentChatId)) t = c; if (t == null) { t = new Chat(); t.id = currentChatId; chats.add(0, t); } t.folder = selectedFolder; if (t.title.length() == 0) t.title = firstUserText(); t.webSearch = webSearchChat; t.model = chatModelForSave(); t.messages.clear(); t.messages.addAll(messages); saveState(); }
+    private void saveCurrentChat() {
+        if (!syncCurrentChatInMemory()) return;
+        persistChatStore(true);
+    }
+
+    private void saveCurrentChatDeferred() {
+        if (!syncCurrentChatInMemory()) return;
+        persistChatStore(false);
+    }
+
+    private boolean syncCurrentChatInMemory() {
+        if (messages.size() == 0) return false;
+        if (currentChatId.length() == 0) currentChatId = String.valueOf(System.currentTimeMillis());
+        Chat t = null;
+        for (Chat c : chats) if (c.id.equals(currentChatId)) t = c;
+        if (t == null) { t = new Chat(); t.id = currentChatId; chats.add(0, t); }
+        t.folder = selectedFolder;
+        if (t.title.length() == 0) t.title = firstUserText();
+        t.webSearch = webSearchChat;
+        t.model = chatModelForSave();
+        t.messages.clear();
+        t.messages.addAll(messages);
+        return true;
+    }
     private String chatModelForSave() { for (int i = messages.size() - 1; i >= 0; i--) if (messages.get(i).role.equals("assistant") && messages.get(i).model.length() > 0) return expandShortModel(messages.get(i).model); return activeAnswerModel(); }
     private String expandShortModel(String label) { for (String m : models) if (shortModel(m).equals(label) || m.equals(label)) return m; return label; }
 
@@ -5062,20 +5108,71 @@ public class MainActivity extends Activity {
     private void loadState() {
         if (!prefs.getBoolean("modelSelected", false)) prefs.edit().remove("model").apply();
         loadModelState();
-        folders.add("Inbox"); String savedFolders = prefs.getString("folders", ""); if (savedFolders.length() > 0) for (String f : savedFolders.split("\\n")) { String clean = f.trim(); if (clean.length() > 0 && !folders.contains(clean)) folders.add(clean); }
-        loadFolderInstructions();
-        try { JSONArray arr = new JSONArray(prefs.getString("chats", "[]")); for (int i = 0; i < arr.length(); i++) chats.add(Chat.fromJson(arr.getJSONObject(i))); } catch (Exception ignored) { }
+        loadChatStore();
     }
 
-    private void reloadChatsFromPrefs() {
-        chats.clear();
+    private void loadChatStore() {
         folders.clear();
         folderInstructions.clear();
+        chats.clear();
         folders.add("Inbox");
-        String savedFolders = prefs.getString("folders", "");
-        if (savedFolders.length() > 0) for (String f : savedFolders.split("\\n")) { String clean = f.trim(); if (clean.length() > 0 && !folders.contains(clean)) folders.add(clean); }
-        loadFolderInstructions();
-        try { JSONArray arr = new JSONArray(prefs.getString("chats", "[]")); for (int i = 0; i < arr.length(); i++) chats.add(Chat.fromJson(arr.getJSONObject(i))); } catch (Exception ignored) { }
+        String raw = readChatStoreRaw();
+        boolean fromFile = raw.length() > 0;
+        if (!fromFile) {
+            String legacyFolders = prefs.getString("folders", "");
+            String legacyInstructions = prefs.getString("folderInstructions", "{}");
+            String legacyChats = prefs.getString("chats", "[]");
+            try {
+                JSONObject migrated = new JSONObject();
+                migrated.put("folders", new JSONArray());
+                if (legacyFolders.length() > 0) for (String f : legacyFolders.split("\\n")) {
+                    String clean = f.trim();
+                    if (clean.length() > 0) migrated.getJSONArray("folders").put(clean);
+                }
+                migrated.put("folderInstructions", new JSONObject(legacyInstructions.length() == 0 ? "{}" : legacyInstructions));
+                migrated.put("chats", new JSONArray(legacyChats.length() == 0 ? "[]" : legacyChats));
+                raw = migrated.toString();
+            } catch (Exception ignored) { raw = ""; }
+        }
+        if (raw.length() > 0) {
+            try {
+                JSONObject root = new JSONObject(raw);
+                JSONArray savedFolders = root.optJSONArray("folders");
+                if (savedFolders != null) for (int i = 0; i < savedFolders.length(); i++) {
+                    String clean = savedFolders.optString(i, "").trim();
+                    if (clean.length() > 0 && !folders.contains(clean)) folders.add(clean);
+                }
+                JSONObject instructions = root.optJSONObject("folderInstructions");
+                if (instructions != null) {
+                    JSONArray names = instructions.names();
+                    if (names != null) for (int i = 0; i < names.length(); i++) {
+                        String folder = names.getString(i);
+                        String instruction = instructions.optString(folder, "").trim();
+                        if (instruction.length() > 0) folderInstructions.put(folder, instruction);
+                    }
+                }
+                JSONArray arr = root.optJSONArray("chats");
+                if (arr != null) for (int i = 0; i < arr.length(); i++) {
+                    JSONObject one = arr.optJSONObject(i);
+                    if (one != null) chats.add(Chat.fromJson(one));
+                }
+            } catch (Exception ignored) { }
+        }
+        if (!fromFile && (chats.size() > 0 || folders.size() > 1 || folderInstructions.size() > 0)) {
+            persistChatStore(true);
+            prefs.edit().remove("chats").remove("folders").remove("folderInstructions").apply();
+        }
+    }
+
+    private String readChatStoreRaw() {
+        File file = new File(getFilesDir(), CHATS_STORE);
+        if (!file.exists()) return "";
+        try {
+            FileInputStream in = new FileInputStream(file);
+            String raw = readAll(in);
+            in.close();
+            return raw == null ? "" : raw.trim();
+        } catch (Exception e) { return ""; }
     }
 
     private void loadModelState() {
@@ -5133,11 +5230,73 @@ public class MainActivity extends Activity {
         saveModels();
         saveMyModels();
     }
-    private void loadFolderInstructions() { try { JSONObject o = new JSONObject(prefs.getString("folderInstructions", "{}")); JSONArray names = o.names(); if (names != null) for (int i = 0; i < names.length(); i++) { String folder = names.getString(i); String instruction = o.optString(folder, "").trim(); if (instruction.length() > 0) folderInstructions.put(folder, instruction); } } catch (Exception ignored) { } }
     private JSONObject folderInstructionsJson() { JSONObject o = new JSONObject(); try { for (String folder : folderInstructions.keySet()) { String instruction = folderInstructions.get(folder); if (instruction != null && instruction.trim().length() > 0 && folders.contains(folder)) o.put(folder, instruction.trim()); } } catch (Exception ignored) { } return o; }
     private String folderInstruction(String folder) { String s = folderInstructions.get(folder == null ? "" : folder); return s == null ? "" : s.trim(); }
     private void putFolderInstruction(String folder, String instruction) { String clean = instruction == null ? "" : instruction.trim(); if (clean.length() == 0) folderInstructions.remove(folder); else folderInstructions.put(folder, clean); }
-    private void saveState() { JSONArray arr = new JSONArray(); try { for (Chat c : chats) arr.put(c.toJson()); } catch (Exception ignored) { } prefs.edit().putString("folders", join(folders)).putString("folderInstructions", folderInstructionsJson().toString()).putString("chats", arr.toString()).apply(); }
+    private void saveState() { persistChatStore(true); }
+
+    private JSONObject chatStoreJson() {
+        JSONObject root = new JSONObject();
+        try {
+            JSONArray folderArr = new JSONArray();
+            for (String folder : folders) {
+                String clean = folder == null ? "" : folder.trim();
+                if (clean.length() > 0 && !"Inbox".equals(clean)) folderArr.put(clean);
+            }
+            JSONArray arr = new JSONArray();
+            for (Chat c : chats) arr.put(c.toJson());
+            root.put("folders", folderArr);
+            root.put("folderInstructions", folderInstructionsJson());
+            root.put("chats", arr);
+        } catch (Exception ignored) { }
+        return root;
+    }
+
+    private void persistChatStore(boolean immediate) {
+        chatsDirty = true;
+        if (immediate) {
+            flushPendingPersist();
+            return;
+        }
+        if (pendingPersist != null) return;
+        pendingPersist = new Runnable() { @Override public void run() {
+            pendingPersist = null;
+            writeChatStoreIfDirty();
+        } };
+        ui.postDelayed(pendingPersist, PERSIST_DEBOUNCE_MS);
+    }
+
+    private void flushPendingPersist() {
+        if (pendingPersist != null) {
+            ui.removeCallbacks(pendingPersist);
+            pendingPersist = null;
+        }
+        writeChatStoreIfDirty();
+    }
+
+    private void writeChatStoreIfDirty() {
+        if (!chatsDirty) return;
+        chatsDirty = false;
+        String payload = chatStoreJson().toString();
+        try {
+            File dir = getFilesDir();
+            File tmp = new File(dir, CHATS_STORE + ".tmp");
+            File out = new File(dir, CHATS_STORE);
+            FileOutputStream fos = new FileOutputStream(tmp);
+            fos.write(payload.getBytes(StandardCharsets.UTF_8));
+            fos.getFD().sync();
+            fos.close();
+            if (!tmp.renameTo(out)) {
+                FileOutputStream direct = new FileOutputStream(out);
+                direct.write(payload.getBytes(StandardCharsets.UTF_8));
+                direct.getFD().sync();
+                direct.close();
+                tmp.delete();
+            }
+        } catch (Exception ignored) {
+            chatsDirty = true;
+        }
+    }
     private void saveModels() { prefs.edit().putString("modelCatalog", join(models)).apply(); }
     private void saveModelContexts() { JSONObject o = new JSONObject(); try { for (String m : modelContexts.keySet()) o.put(m, modelContexts.get(m)); } catch (Exception ignored) { } prefs.edit().putString("modelContexts", o.toString()).apply(); }
     private void saveModelSources() { JSONObject o = new JSONObject(); try { for (String m : modelSources.keySet()) o.put(m, modelSources.get(m)); } catch (Exception ignored) { } prefs.edit().putString("modelSources", o.toString()).apply(); }
