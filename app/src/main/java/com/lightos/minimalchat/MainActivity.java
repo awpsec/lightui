@@ -209,6 +209,8 @@ public class MainActivity extends Activity {
         super.onResume();
         maybeAutoRefreshModels(false);
         if (!hookVoiceMode) {
+            // VoiceHookActivity may have written new chats while we were paused.
+            reloadChatStorePreservingCurrent();
             maybeShowUpdateDialog();
             maybeCheckLatestVersion(true);
             if (pendingInstallApkUrl.length() > 0 && canInstallPackages()) {
@@ -1791,6 +1793,7 @@ public class MainActivity extends Activity {
 
     private void showChatsPane() {
         projectEditorOpen = false;
+        reloadChatStorePreservingCurrent();
         saveCurrentChat();
         pane = 0;
         renderingMessages = false;
@@ -4111,6 +4114,7 @@ public class MainActivity extends Activity {
         voiceSession++;
         voiceMode = true;
         voiceFullMode = fullMode || hookVoiceMode;
+        if (hookVoiceMode) beginFreshVoiceChat();
         requestVoiceAudioFocus();
         if (voiceFullMode) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         pane = 1;
@@ -4118,6 +4122,18 @@ public class MainActivity extends Activity {
         showVoiceOverlay();
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) { requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, VOICE); return; }
         beginListening();
+    }
+
+    private void beginFreshVoiceChat() {
+        // Assist/voice-command sessions always become their own saved chat.
+        if (messages.size() > 0) saveCurrentChat();
+        currentChatId = "";
+        messages.clear();
+        selectedFolder = "Inbox";
+        webSearchChat = false;
+        savedChatScrollKnown = false;
+        forceAutoScrollBottom = true;
+        resetMessageWindowToLatest();
     }
 
     @Override public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
@@ -4839,17 +4855,18 @@ public class MainActivity extends Activity {
             int completionTokens = estimateTokens(answer.length() == 0 ? "audio" : answer);
             final String stats = String.format(Locale.US, "%.1f tok/s", completionTokens / Math.max(0.001, (System.nanoTime() - start) / 1e9));
             runOnUiThread(new Runnable() { @Override public void run() {
-                if (!voiceSessionActive(session)) return;
                 stopVoiceThinking();
                 assistant.text = answer.length() == 0 ? "[voice response]" : answer;
                 assistant.stats = stats;
                 assistant.streamDone = true;
+                forceAutoScrollBottom = true;
+                // Always persist the transcript/answer even if the voice UI session ended.
+                saveCurrentChat();
+                if (!voiceSessionActive(session)) return;
                 assistant.ttsStarted = true;
                 assistant.ttsPlaying = true;
                 activeTtsOwner = assistant;
-                forceAutoScrollBottom = true;
                 renderMessages();
-                saveCurrentChat();
                 renderVoiceConversation();
                 updateVoiceStatus("speaking");
                 playPcm16Audio(spoken, assistant);
@@ -4857,11 +4874,27 @@ public class MainActivity extends Activity {
         } catch (ModelRefusalException e) {
             final String msg = detailedError(e);
             final int session = voiceSession;
-            runOnUiThread(new Runnable() { @Override public void run() { if (!voiceSessionActive(session)) return; assistant.stats = ""; assistant.text = "model refused\n" + msg; pauseVoiceAfterProviderFailure("model refused", assistant.text); renderMessages(); saveCurrentChat(); } });
+            runOnUiThread(new Runnable() { @Override public void run() {
+                assistant.stats = "";
+                assistant.text = "model refused\n" + msg;
+                assistant.streamDone = true;
+                saveCurrentChat();
+                if (!voiceSessionActive(session)) return;
+                pauseVoiceAfterProviderFailure("model refused", assistant.text);
+                renderMessages();
+            } });
         } catch (Exception e) {
             final String msg = detailedError(e);
             final int session = voiceSession;
-            runOnUiThread(new Runnable() { @Override public void run() { if (!voiceSessionActive(session)) return; assistant.stats = ""; assistant.text = "multimodal failed\n" + msg; pauseVoiceAfterProviderFailure("failed", assistant.text); renderMessages(); saveCurrentChat(); } });
+            runOnUiThread(new Runnable() { @Override public void run() {
+                assistant.stats = "";
+                assistant.text = "multimodal failed\n" + msg;
+                assistant.streamDone = true;
+                saveCurrentChat();
+                if (!voiceSessionActive(session)) return;
+                pauseVoiceAfterProviderFailure("failed", assistant.text);
+                renderMessages();
+            } });
         }
     }
 
@@ -5182,7 +5215,7 @@ public class MainActivity extends Activity {
     }
 
     private void stopVoiceMode() {
-        if (hookVoiceMode) saveCurrentChat();
+        saveCurrentChat();
         voiceSession++;
         voiceAwaitingSpeechResult = false;
         voiceMode = false;
@@ -6140,12 +6173,68 @@ public class MainActivity extends Activity {
         for (Chat c : chats) if (c.id.equals(currentChatId)) t = c;
         if (t == null) { t = new Chat(); t.id = currentChatId; chats.add(0, t); }
         t.folder = selectedFolder;
-        if (t.title.length() == 0) t.title = firstUserText();
+        if (t.title.length() == 0 || "[voice input]".equals(t.title)) t.title = firstUserText();
         t.webSearch = webSearchChat;
         t.model = chatModelForSave();
         t.messages.clear();
         t.messages.addAll(messages);
         return true;
+    }
+
+    private boolean chatWorkInFlight() {
+        if (voiceMode) return true;
+        for (Msg m : messages) if (isBusyStats(m.stats)) return true;
+        return false;
+    }
+
+    private void reloadChatStorePreservingCurrent() {
+        if (hookVoiceMode) return;
+        String keepId = currentChatId;
+        ArrayList<Msg> localCopy = null;
+        String localFolder = selectedFolder;
+        boolean localWeb = webSearchChat;
+        boolean preserveLocal = keepId.length() > 0 && messages.size() > 0;
+        if (preserveLocal) {
+            localCopy = new ArrayList<Msg>(messages);
+        }
+        loadChatStore();
+        if (keepId.length() == 0) {
+            if (localCopy != null) {
+                messages.clear();
+                messages.addAll(localCopy);
+            }
+            return;
+        }
+        Chat keep = null;
+        for (Chat c : chats) if (c.id.equals(keepId)) { keep = c; break; }
+        if (preserveLocal && localCopy != null) {
+            if (keep == null) {
+                keep = new Chat();
+                keep.id = keepId;
+                chats.add(0, keep);
+            }
+            keep.folder = localFolder;
+            keep.webSearch = localWeb;
+            keep.messages.clear();
+            keep.messages.addAll(localCopy);
+            messages.clear();
+            messages.addAll(localCopy);
+            selectedFolder = localFolder;
+            webSearchChat = localWeb;
+            if (keep.title.length() == 0 || "[voice input]".equals(keep.title)) keep.title = firstUserText();
+        } else if (keep != null) {
+            messages.clear();
+            messages.addAll(keep.messages);
+            selectedFolder = keep.folder;
+            webSearchChat = keep.webSearch;
+        } else {
+            currentChatId = "";
+            messages.clear();
+        }
+        if (!chatWorkInFlight() && pane == 1 && messageList != null) {
+            resetMessageWindowToLatest();
+            renderMessages();
+        }
     }
     private String chatModelForSave() { for (int i = messages.size() - 1; i >= 0; i--) if (messages.get(i).role.equals("assistant") && messages.get(i).model.length() > 0) return expandShortModel(messages.get(i).model); return activeAnswerModel(); }
     private String expandShortModel(String label) { for (String m : models) if (shortModel(m).equals(label) || m.equals(label)) return m; return label; }
@@ -6441,7 +6530,21 @@ public class MainActivity extends Activity {
     private String shortTokens(int n) { return n >= 1000 ? Math.round(n / 1000.0) + "k" : String.valueOf(n); }
     private String friendlyError(Exception e) { String msg = e.getMessage(); if (msg == null || msg.length() == 0) msg = e.getClass().getSimpleName(); msg = msg.replace('\n', ' ').trim(); return msg.length() > 120 ? msg.substring(0, 120) : msg; }
     private String detailedError(Exception e) { String msg = e.getMessage(); if (msg == null || msg.length() == 0) msg = e.getClass().getSimpleName(); msg = msg.replace('\n', ' ').trim(); return msg.length() > 700 ? msg.substring(0, 700) : msg; }
-    private String firstUserText() { for (Msg m : messages) if (m.role.equals("user") && m.text.length() > 0) return m.text.length() > 36 ? m.text.substring(0, 36) : m.text; return "Image chat"; }
+    private String firstUserText() {
+        for (Msg m : messages) {
+            if (!"user".equals(m.role) || m.text == null || m.text.length() == 0) continue;
+            if ("[voice input]".equals(m.text)) continue;
+            return m.text.length() > 36 ? m.text.substring(0, 36) : m.text;
+        }
+        for (Msg m : messages) {
+            if (!"assistant".equals(m.role) || m.text == null || m.text.length() == 0 || isBusyStats(m.stats)) continue;
+            String t = m.text.replace('\n', ' ').trim();
+            if (t.length() == 0) continue;
+            return t.length() > 36 ? t.substring(0, 36) : t;
+        }
+        for (Msg m : messages) if ("user".equals(m.role) && "[voice input]".equals(m.text)) return "Voice chat";
+        return "Image chat";
+    }
     private String join(ArrayList<String> xs) { StringBuilder b = new StringBuilder(); for (String x : xs) { String clean = x == null ? "" : x.trim(); if (clean.length() > 0) b.append(clean).append('\n'); } return b.toString(); }
     private String readAll(InputStream in) throws Exception { if (in == null) return ""; return new String(bytes(in), StandardCharsets.UTF_8); }
     private byte[] bytes(InputStream in) throws Exception { ByteArrayOutputStream out = new ByteArrayOutputStream(); byte[] buf = new byte[8192]; int n; while ((n = in.read(buf)) >= 0) out.write(buf, 0, n); return out.toByteArray(); }
