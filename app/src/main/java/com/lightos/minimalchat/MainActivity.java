@@ -102,7 +102,7 @@ public class MainActivity extends Activity {
     private static final int MESSAGE_PAGE = 30;
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
-    private static final String APP_VERSION = "1.0.14";
+    private static final String APP_VERSION = "1.0.15";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 64;
@@ -1151,7 +1151,6 @@ public class MainActivity extends Activity {
         } });
         phone.addView(phoneToggle, new LinearLayout.LayoutParams(dp(48), dp(28)));
         settings.addView(phone);
-        settings.addView(text("voice-only: call Mom, text Dad I'm late", 10, Color.rgb(120, 120, 120)), new LinearLayout.LayoutParams(-1, dp(24)));
 
         settings.addView(sectionHeader("voice assistant / two way voice"));
         settings.addView(settingChoice("web search", voiceWebSearchMode(), new View.OnClickListener() { @Override public void onClick(View v) { chooseVoiceProvider("voiceWebSearchMode", new String[]{"off", "auto", "on"}); } }));
@@ -1165,7 +1164,9 @@ public class MainActivity extends Activity {
         settings.addView(continuous);
         settings.addView(sectionHeader("assistant answer"));
         settings.addView(settingChoice("model", voiceAnswerModelLabel(), new View.OnClickListener() { @Override public void onClick(View v) { chooseVoiceAnswerModel(); } }));
-        settings.addView(text(voicePipelineLabel(), 10, Color.rgb(120,120,120)), new LinearLayout.LayoutParams(-1, dp(28)));
+        if (voiceAnswerModel().length() > 0) {
+            settings.addView(text(voicePipelineLabel(), 10, Color.rgb(120,120,120)), new LinearLayout.LayoutParams(-1, dp(28)));
+        }
 
         settings.addView(sectionHeader("input"));
         settings.addView(settingChoice("provider", voiceInputProvider(), new View.OnClickListener() { @Override public void onClick(View v) { chooseVoiceProvider("voiceInputProvider", new String[]{"auto", "system", "openrouter", "endpoint"}); } }));
@@ -1206,7 +1207,7 @@ public class MainActivity extends Activity {
     private String searchProvider() { return prefs.getString("searchProvider", "jina"); }
     private String voiceAnswerModel() { return prefs.getString("voiceAnswerModel", "").trim(); }
     private String voiceAnswerModelLabel() { String m = voiceAnswerModel(); return m.length() == 0 ? "same as chat" : shortModel(m); }
-    private String voicePipelineLabel() { String m = configuredVoiceAnswerModel(); if (sameOpenRouterVoiceModelForAllThree() && isAllInOneVoiceModel(m)) return "single multimodal request when fullscreen voice records"; if (sameOpenRouterVoiceModelForAllThree()) return "same model set, but catalog does not show audio in + out"; if (voiceAnswerModel().length() == 0) return "two-way voice answers use the current chat model"; return isAllInOneVoiceModel(m) ? "all-in-one capable model selected" : "two-way voice answers only; normal chats unchanged"; }
+    private String voicePipelineLabel() { String m = configuredVoiceAnswerModel(); if (sameOpenRouterVoiceModelForAllThree() && isAllInOneVoiceModel(m)) return "single multimodal request when fullscreen voice records"; if (sameOpenRouterVoiceModelForAllThree()) return "same model set, but catalog does not show audio in + out"; return isAllInOneVoiceModel(m) ? "all-in-one capable model selected" : "two-way voice answers only; normal chats unchanged"; }
     private boolean isAllInOneVoiceModel(String model) { return model.length() > 0 && audioInputModels.contains(model) && audioOutputModels.contains(model); }
     private String configuredVoiceAnswerModel() { String m = voiceAnswerModel(); return m.length() == 0 ? selectedModel() : m; }
     private String configuredVoiceInputModel() { return "openrouter".equals(voiceInputProvider()) ? prefs.getString("voiceTranscribeModel", "whisper-1").trim() : ""; }
