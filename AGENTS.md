@@ -10,7 +10,10 @@ The following are baked into the VM and do **not** need reinstalling (the startu
 
 - JDK 17 at `/usr/lib/jvm/java-17-openjdk-amd64` (default `JAVA_HOME`) and JDK 21 (system default `java`).
 - Android SDK at `$HOME/android-sdk`: platform `android-34`, build-tools `34.0.0`, `platform-tools`, `emulator`, and system images `system-images;android-34;default;x86_64` (AOSP) and `system-images;android-34;google_apis;x86_64`.
-- Two AVDs: `lightui_aosp` (AOSP image — **prefer this**) and `lightui_avd` (google_apis). Under software emulation the `google_apis` image is much heavier and its `system_server` repeatedly hits the watchdog and restarts (services flap, launcher gets stuck on `FallbackHome`), making UI automation unreliable. The AOSP `lightui_aosp` AVD boots lighter, settles to a low idle load, and is stable for interaction. The app needs no Google Play services (plain `HttpURLConnection`), so AOSP is fine.
+- Three AVDs (all AOSP `android-34`, x86_64, no Google Play services needed since the app uses plain `HttpURLConnection`):
+  - `lightui_lp3` — **prefer this for realistic testing.** Custom screen matching the Light Phone III target device: **1080×1240 @ 420 dpi** (near-square 3.92" panel). There is no official LP3 system image/skin; this is a stock AOSP image with the screen geometry overridden in `~/.android/avd/lightui_lp3.avd/config.ini` (`hw.lcd.width/height/density`). It renders the app at the real device proportions, which differ a lot from a normal tall phone.
+  - `lightui_aosp` — generic `pixel_5` geometry (1080×2340), useful as a plain tall-phone reference.
+  - `lightui_avd` — google_apis image; **avoid under software emulation** — it is much heavier and its `system_server` repeatedly hits the watchdog and restarts (services flap, launcher gets stuck on `FallbackHome`), making UI automation unreliable.
 - `~/.bashrc` exports `JAVA_HOME` (JDK 17), `ANDROID_HOME`/`ANDROID_SDK_ROOT`, and adds `cmdline-tools/latest/bin`, `platform-tools`, and `emulator` to `PATH`. New login shells pick these up automatically; if you run a non-login shell, `source ~/.bashrc` first.
 
 ### Building the APK
@@ -21,7 +24,8 @@ The following are baked into the VM and do **not** need reinstalling (the startu
 ### Running / testing on the emulator (important gotchas)
 
 - **Nested KVM does not work here.** The VM's host kernel throws `kernel BUG at arch/x86/kvm/x86.c` when the Android emulator tries to create a KVM vCPU, so a normal (KVM-accelerated) emulator boot hangs. Start the emulator with **software emulation** instead:
-  `emulator -avd lightui_aosp -gpu swiftshader_indirect -no-snapshot -no-audio -no-window -accel off -memory 3072`
+  `emulator -avd lightui_lp3 -gpu swiftshader_indirect -no-snapshot -no-audio -no-window -accel off -memory 3072`
+  (swap in `lightui_aosp` for a generic tall-phone screen.)
   (`-no-window` is fine — drive it via `adb`; add a window only if a desktop/computer-use session needs to see it.)
 - **It is slow.** Under TCG software emulation a cold boot to `sys.boot_completed=1` takes ~5-15 min, and after that `package`/`activity` system services may need another minute. Poll `adb shell getprop sys.boot_completed` and `adb shell service check package`; be patient rather than assuming failure.
 - **Do not hammer it, and wait for idle.** The guest is slow; app cold-start causes a load spike that can trigger a transient system ANR. After boot, wait for `/proc/loadavg` to drop (the AOSP image settles to <1 when idle) before interacting. Rapid `am force-stop`/relaunch loops and bursts of `input` events can wedge `system_server`; space out interactions and wait for each screen to settle. If the `input`/`package` service briefly reports "not found", the system is mid-restart — wait and retry.
