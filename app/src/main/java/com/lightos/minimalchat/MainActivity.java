@@ -68,6 +68,7 @@ import android.widget.FrameLayout;
 import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.PopupWindow;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
 import android.widget.TextView;
@@ -112,6 +113,7 @@ public class MainActivity extends Activity {
     private static final int CONTACTS_PERM = 12;
     private static final int CALL_PERM = 13;
     private static final int INSTALL_PERM = 14;
+    private static final int PICK_IMAGE = 15;
     private boolean forceDialFallback = false;
     private static final String PHONE_UTTERANCE = "phone-command";
     private static final String GITHUB_RELEASES_LATEST = "https://api.github.com/repos/awpsec/lightui/releases/latest";
@@ -133,6 +135,7 @@ public class MainActivity extends Activity {
     private ScrollView scroll, settingsScrollView;
     private ScrollIndicator scrollIndicator;
     private EditText input, apiKey, endpointInput, endpointKeyInput, jinaKeyInput, voiceEndpointInput;
+    private ImageButton composerAction;
     private TextView modelText, contextText, attachText, replyChip, notice, voiceStatus, voiceText, voiceReply, bulkButton, emptyPrompt, bottomButton;
     private GlobeButton webSearchIcon;
     private View chatFade;
@@ -331,6 +334,7 @@ public class MainActivity extends Activity {
     private void clearPaneViews() {
         root.removeAllViews();
         input = null;
+        composerAction = null;
         apiKey = null;
         endpointInput = null;
         endpointKeyInput = null;
@@ -433,6 +437,9 @@ public class MainActivity extends Activity {
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
 
         attachText = text("", 11, Color.LTGRAY);
+        attachText.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { clearPendingAttachment(); }
+        });
         root.addView(attachText, new LinearLayout.LayoutParams(-1, dp(18)));
         replyChip = text("", 11, Color.LTGRAY);
         replyChip.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { replyQuote = ""; updateReplyChip(); } });
@@ -465,18 +472,28 @@ public class MainActivity extends Activity {
         input.setOnFocusChangeListener(new View.OnFocusChangeListener() {
             @Override public void onFocusChange(View v, boolean hasFocus) { input.setHint(hasFocus ? "" : "ask"); }
         });
+        input.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) { updateComposerAction(); }
+            @Override public void afterTextChanged(Editable e) { }
+        });
         composer.addView(input, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
-        LinearLayout.LayoutParams micLp = new LinearLayout.LayoutParams(dp(30), dp(30));
-        micLp.setMargins(0, 0, dp(12), dp(10));
-        micLp.gravity = Gravity.BOTTOM;
-        ImageButton mic = iconButton(R.drawable.ic_mic, new View.OnClickListener() { @Override public void onClick(View v) { startVoice(false); } }, 5);
-        mic.setOnLongClickListener(new View.OnLongClickListener() { @Override public boolean onLongClick(View v) { startVoice(true); return true; } });
-        composer.addView(mic, micLp);
-        LinearLayout.LayoutParams sendLp = new LinearLayout.LayoutParams(dp(32), dp(32));
-        sendLp.gravity = Gravity.BOTTOM;
-        sendLp.bottomMargin = dp(9);
-        composer.addView(iconButton(R.drawable.ic_send, new View.OnClickListener() { @Override public void onClick(View v) { send(); } }, 4), sendLp);
+        LinearLayout.LayoutParams actionLp = new LinearLayout.LayoutParams(dp(34), dp(34));
+        actionLp.gravity = Gravity.BOTTOM;
+        actionLp.bottomMargin = dp(8);
+        composerAction = iconButton(R.drawable.ic_mic, new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                if (composerHasOutgoing()) send();
+                else startVoice(false);
+            }
+        }, 4);
+        composerAction.setOnLongClickListener(new View.OnLongClickListener() {
+            @Override public boolean onLongClick(View v) { showComposerActionMenu(v); return true; }
+        });
+        composer.addView(composerAction, actionLp);
         root.addView(composer);
+        updateComposerAction();
+        updateAttachChip();
         renderMessages();
     }
 
@@ -2126,7 +2143,8 @@ public class MainActivity extends Activity {
         if (messageEnd < messages.size()) messageList.addView(windowMarker("newer messages below"));
         if (meter != null) { meter.percent = contextPercent(); meter.invalidate(); }
         if (contextText != null) contextText.setText(contextPercentText());
-        if (attachText != null) { boolean showAttach = imageBase64.length() > 0; attachText.setVisibility(showAttach ? View.VISIBLE : View.GONE); attachText.setText(showAttach ? "attachment ready" : ""); }
+        updateAttachChip();
+        updateComposerAction();
         final ScrollView renderScroll = scroll;
         if (renderScroll != null) renderScroll.post(new Runnable() { @Override public void run() {
             if (renderScroll != scroll || pane != 1) return;
@@ -2443,7 +2461,7 @@ public class MainActivity extends Activity {
         saveCurrentChat();
         resetMessageWindowToLatest();
         forceAutoScrollBottom = userAtChatBottom;
-        if (input != null) input.setText(""); pendingVoiceText = ""; replyQuote = ""; updateReplyChip(); imageBase64 = ""; renderMessages();
+        if (input != null) input.setText(""); pendingVoiceText = ""; replyQuote = ""; updateReplyChip(); imageBase64 = ""; imageMime = "image/jpeg"; updateComposerAction(); updateAttachChip(); renderMessages();
         animateLoading(assistant, 0);
         final String userText = text;
         final String sendKey = key;
@@ -5855,9 +5873,15 @@ public class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int req, int res, Intent data) {
         super.onActivityResult(req, res, data);
-        if (res == RESULT_OK && req == VOICE && data != null) {
+        if (res != RESULT_OK || data == null) return;
+        if (req == VOICE) {
             ArrayList<String> r = data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS);
             if (r != null && r.size() > 0 && input != null) input.setText(r.get(0));
+            return;
+        }
+        if (req == PICK_IMAGE) {
+            Uri u = data.getData();
+            if (u != null) attachUri(u);
         }
     }
 
@@ -6248,6 +6272,72 @@ public class MainActivity extends Activity {
     }
     private String clipboardText() { try { ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE); if (cm == null || !cm.hasPrimaryClip()) return ""; ClipData clip = cm.getPrimaryClip(); if (clip == null || clip.getItemCount() == 0) return ""; CharSequence text = clip.getItemAt(0).coerceToText(this); return text == null ? "" : text.toString().trim(); } catch (Exception e) { return ""; } }
     private void copyText(String s) { ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE); if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("message", s)); }
+
+    private boolean composerHasOutgoing() {
+        boolean hasText = input != null && input.getText() != null && input.getText().toString().trim().length() > 0;
+        return hasText || imageBase64.length() > 0;
+    }
+
+    private void updateComposerAction() {
+        if (composerAction == null) return;
+        composerAction.setImageResource(composerHasOutgoing() ? R.drawable.ic_send_up : R.drawable.ic_mic);
+    }
+
+    private void updateAttachChip() {
+        if (attachText == null) return;
+        boolean show = imageBase64.length() > 0;
+        attachText.setVisibility(show ? View.VISIBLE : View.GONE);
+        attachText.setText(show ? "photo attached  x" : "");
+    }
+
+    private void clearPendingAttachment() {
+        imageBase64 = "";
+        imageMime = "image/jpeg";
+        updateAttachChip();
+        updateComposerAction();
+    }
+
+    private void showComposerActionMenu(View anchor) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setBackground(cardBorder());
+        box.setPadding(dp(14), dp(10), dp(14), dp(10));
+        final PopupWindow popup = new PopupWindow(box, LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT, true);
+        popup.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+        popup.setOutsideTouchable(true);
+        popup.setElevation(dp(6));
+
+        TextView photo = text("photo", 16, Color.WHITE);
+        photo.setPadding(dp(8), dp(10), dp(8), dp(10));
+        photo.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { popup.dismiss(); pickImageFromGallery(); }
+        });
+        box.addView(photo, new LinearLayout.LayoutParams(-1, -2));
+
+        TextView voice = text("voice assistant", 16, Color.WHITE);
+        voice.setPadding(dp(8), dp(10), dp(8), dp(10));
+        voice.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { popup.dismiss(); startVoice(true); }
+        });
+        box.addView(voice, new LinearLayout.LayoutParams(-1, -2));
+
+        box.measure(View.MeasureSpec.makeMeasureSpec(dp(200), View.MeasureSpec.AT_MOST), View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+        int xOff = anchor.getWidth() - box.getMeasuredWidth();
+        int yOff = -(anchor.getHeight() + box.getMeasuredHeight() + dp(6));
+        popup.showAsDropDown(anchor, xOff, yOff);
+    }
+
+    private void pickImageFromGallery() {
+        try {
+            Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.setType("image/*");
+            startActivityForResult(Intent.createChooser(intent, "photo"), PICK_IMAGE);
+        } catch (Exception e) {
+            toast("no photo picker");
+        }
+    }
+
     private void attachUri(Uri uri) {
         try {
             String type = getContentResolver().getType(uri);
@@ -6259,6 +6349,9 @@ public class MainActivity extends Activity {
             finally { try { in.close(); } catch (Exception ignored) { } }
             imageBase64 = Base64.encodeToString(b, Base64.NO_WRAP);
             imageMime = type;
+            updateAttachChip();
+            updateComposerAction();
+            toast("photo attached");
         } catch (TooLargeException e) { toast("image too large"); }
         catch (Exception e) { toast("attach failed"); }
     }
