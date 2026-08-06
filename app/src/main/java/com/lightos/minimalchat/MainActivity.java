@@ -100,15 +100,17 @@ public class MainActivity extends Activity {
     private static final int MESSAGE_PAGE = 30;
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
-    private static final String APP_VERSION = "1.0.3";
+    private static final String APP_VERSION = "1.0.4";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 64;
+    private static final long MODEL_AUTO_REFRESH_MS = 60L * 60L * 1000L;
     private SharedPreferences prefs;
     private Runnable pendingPersist;
     private Runnable pendingStreamRender;
     private long lastStreamRenderAt = 0;
     private boolean chatsDirty = false;
+    private boolean modelsRefreshing = false;
     private FrameLayout screen;
     private LinearLayout root, messageList, folderList, chatList;
     private ScrollView scroll, settingsScrollView;
@@ -178,6 +180,12 @@ public class MainActivity extends Activity {
         if (!hookVoiceMode) showChatPane();
         handleIncoming(getIntent());
         if (hookVoiceMode && !voiceMode) startVoice(true);
+        maybeAutoRefreshModels(false);
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        maybeAutoRefreshModels(false);
     }
 
     @Override protected void onNewIntent(Intent intent) { super.onNewIntent(intent); handleIncoming(intent); }
@@ -673,7 +681,7 @@ public class MainActivity extends Activity {
         TextView save = smallPill("save");
         TextView refresh = smallPill("refresh models");
         save.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { saveApiKey(); toast("saved"); } });
-        refresh.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { refreshModels(); } });
+        refresh.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { refreshModels(true); } });
         actions.addView(save);
         actions.addView(refresh);
         settings.addView(actions, new LinearLayout.LayoutParams(-1, dp(34)));
@@ -708,7 +716,7 @@ public class MainActivity extends Activity {
         TextView refresh = smallPill("refresh models");
         save.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { addEndpointFromInput(); } });
         test.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { testCustomEndpoint(); } });
-        refresh.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { refreshModels(); } });
+        refresh.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { refreshModels(true); } });
         actions.addView(save);
         actions.addView(test);
         actions.addView(refresh);
@@ -1628,18 +1636,27 @@ public class MainActivity extends Activity {
             if (hasThinkingRow) {
                 final Msg thinkingMessage = m;
                 LinearLayout thinkRow = row();
+                thinkRow.setPadding(0, dp(4), 0, dp(4));
                 TextView thinking;
-                if (!m.streamDone && m.text.length() == 0) { JumpTextView jump = new JumpTextView(this); jump.word = "thinking"; thinking = jump; }
-                else if (!m.streamDone) thinking = text("thought for " + thoughtDuration(m.thoughtMs > 0 ? m.thoughtMs : Math.max(1, System.currentTimeMillis() - m.startedAt)), 11, Color.rgb(135,135,135));
-                else thinking = text("thought for " + thoughtDuration(m.thoughtMs), 11, Color.rgb(135,135,135));
+                if (!m.streamDone && m.text.length() == 0) {
+                    JumpTextView jump = new JumpTextView(this);
+                    jump.word = "thinking";
+                    jump.bind(m);
+                    thinking = jump;
+                } else if (!m.streamDone) {
+                    long elapsed = m.thoughtMs > 0 ? m.thoughtMs : Math.max(1, System.currentTimeMillis() - m.startedAt);
+                    thinking = text("thought for " + thoughtDuration(elapsed), 11, Color.rgb(135,135,135));
+                } else {
+                    long doneMs = m.thoughtMs > 0 ? m.thoughtMs : Math.max(1, System.currentTimeMillis() - m.startedAt);
+                    thinking = text("thought for " + thoughtDuration(doneMs), 11, Color.rgb(135,135,135));
+                }
                 thinking.setTextColor(Color.rgb(135,135,135)); thinking.setGravity(Gravity.CENTER_VERTICAL); setTextPx(thinking, 11); thinking.setPadding(0, 0, 0, 0);
                 thinking.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { toggleThinking(thinkingMessage); } });
                 thinking.setMinHeight(dp(34));
-                thinkRow.setMinimumHeight(dp(34));
+                thinkRow.setMinimumHeight(dp(42));
                 thinkRow.addView(thinking, new LinearLayout.LayoutParams(-1, dp(34)));
                 thinkRow.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { toggleThinking(thinkingMessage); } });
-                messageList.addView(thinkRow, new LinearLayout.LayoutParams(-1, dp(34)));
-                expandTouchArea(thinkRow, dp(13));
+                messageList.addView(thinkRow, new LinearLayout.LayoutParams(-1, -2));
                 if (m.thinkingExpanded && m.reasoning.length() > 0) {
                     TextView reason = text(privateReasoning(m) ? "private reasoning hidden" : m.reasoning, 13, Color.rgb(160,160,160));
                     reason.setLineSpacing(dp(2), 1.0f);
@@ -2209,12 +2226,12 @@ public class MainActivity extends Activity {
     }
 
     private void updateStreamingAssistant(Msg assistant, String partial, String reasoning) {
-        stopVoiceThinking();
         boolean gotReasoning = reasoning.length() > 0;
         if (gotReasoning) { assistant.reasoning = reasoning; assistant.reasoningCapable = true; assistant.text = ""; }
         assistant.stats = gotReasoning && partial.length() == 0 ? LOADING : "";
         if (gotReasoning && partial.length() == 0) { forceAutoScrollBottom = userAtChatBottom; requestStreamingRender(); saveCurrentChatDeferred(); return; }
         String visiblePartial = visibleStreamingAnswer(partial);
+        if (visiblePartial.length() > 0) stopVoiceThinking();
         if (gotReasoning && visiblePartial.length() > 0 && assistant.thoughtMs == 0) assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt);
         assistant.text = visiblePartial.length() == 0 ? "" : cleanSearchArtifacts(visiblePartial);
         forceAutoScrollBottom = userAtChatBottom;
@@ -2278,9 +2295,11 @@ public class MainActivity extends Activity {
         assistant.streamDone = true;
         assistant.text = cleanSearchArtifacts(finalAnswer.length() == 0 ? assistant.text : finalAnswer);
         if (reasoning.length() > 0) { assistant.reasoning = reasoning; if (assistant.thoughtMs == 0) assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt); }
+        else if (assistant.thoughtMs == 0 && assistant.reasoningCapable) assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt);
         if (assistant.slowVoice && isModelRefusal(assistant.text)) {
             assistant.ttsQueue.clear();
             assistant.ttsRequested = false;
+            assistant.ttsPrefetching = false;
             assistant.ttsPlaying = false;
             forceAutoScrollBottom = true;
             flushPendingStreamRender();
@@ -2307,8 +2326,13 @@ public class MainActivity extends Activity {
             if (cut <= 0) break;
             String speak = pending.substring(0, Math.min(cut, pending.length())).trim();
             base += cut;
-            if (speak.length() >= 8) assistant.ttsQueue.add(speak);
+            if (speak.length() >= 8 || (finish && speak.length() > 0)) assistant.ttsQueue.add(speak);
             if (!finish) break;
+        }
+        if (finish && base < fullText.length()) {
+            String tail = fullText.substring(base).trim();
+            if (tail.length() > 0) assistant.ttsQueue.add(tail);
+            base = fullText.length();
         }
         assistant.spokenChars = base;
         playNextQueuedSpeech(assistant);
@@ -2319,6 +2343,10 @@ public class MainActivity extends Activity {
         if (!voiceMode || !voiceFullMode) return;
         if (owner.voiceSessionId != 0 && owner.voiceSessionId != voiceSession) return;
         if (owner.ttsRequested || owner.ttsPlaying || owner.ttsQueue.size() == 0) return;
+        if (owner.ttsPrefetching) {
+            ui.postDelayed(new Runnable() { @Override public void run() { playNextQueuedSpeech(owner); } }, 100);
+            return;
+        }
         if (!owner.ttsStarted && !owner.ttsStartDelayDone) {
             owner.ttsStartDelayDone = true;
             prefetchNextQueuedSpeech(owner);
@@ -2329,16 +2357,39 @@ public class MainActivity extends Activity {
         final int session = voiceSession;
         activeTtsOwner = owner;
         File ready = ttsReadyFiles.remove(text);
-        if (ready != null && ready.exists()) { if (owner.ttsQueue.size() > 0 && owner.ttsQueue.get(0).equals(text)) owner.ttsQueue.remove(0); owner.ttsStarted = true; owner.ttsPlaying = true; owner.ttsPlaybackFailures = 0; renderVoiceConversation(); playSpeechAudio(ready, text, owner); prefetchNextQueuedSpeech(owner); return; }
+        if (ready != null && ready.exists()) {
+            if (owner.ttsQueue.size() > 0 && owner.ttsQueue.get(0).equals(text)) owner.ttsQueue.remove(0);
+            owner.ttsStarted = true;
+            owner.ttsPlaying = true;
+            owner.ttsPlaybackFailures = 0;
+            renderVoiceConversation();
+            playSpeechAudio(ready, text, owner);
+            prefetchNextQueuedSpeech(owner);
+            return;
+        }
         owner.ttsRequested = true;
         updateVoiceStatus("speaking");
         new Thread(new Runnable() { @Override public void run() {
             try {
                 final File audio = requestSpeechAudio(text);
-                runOnUiThread(new Runnable() { @Override public void run() { if (!voiceSessionActive(session)) return; owner.ttsRequested = false; if (owner.ttsQueue.size() > 0 && owner.ttsQueue.get(0).equals(text)) owner.ttsQueue.remove(0); owner.ttsStarted = true; owner.ttsPlaying = true; owner.ttsPlaybackFailures = 0; renderVoiceConversation(); playSpeechAudio(audio, text, owner); } });
+                runOnUiThread(new Runnable() { @Override public void run() {
+                    if (!voiceSessionActive(session)) return;
+                    owner.ttsRequested = false;
+                    if (owner.ttsQueue.size() > 0 && owner.ttsQueue.get(0).equals(text)) owner.ttsQueue.remove(0);
+                    owner.ttsStarted = true;
+                    owner.ttsPlaying = true;
+                    owner.ttsPlaybackFailures = 0;
+                    renderVoiceConversation();
+                    playSpeechAudio(audio, text, owner);
+                    prefetchNextQueuedSpeech(owner);
+                } });
             } catch (Exception e) {
                 final String msg = friendlyError(e);
-                runOnUiThread(new Runnable() { @Override public void run() { if (!voiceSessionActive(session)) return; owner.ttsRequested = false; owner.ttsQueue.clear(); owner.streamDone = true; updateVoiceStatus(isModelRefusal(msg) ? "model refused" : "tts failed"); if (voiceText != null) setVoiceText(voiceText.getText().toString() + "\n\n" + (isModelRefusal(msg) ? "model refused: " : "tts: ") + msg); ui.postDelayed(new Runnable() { @Override public void run() { finishVoiceResponse(); } }, 1200); } });
+                runOnUiThread(new Runnable() { @Override public void run() {
+                    if (!voiceSessionActive(session)) return;
+                    owner.ttsRequested = false;
+                    handleQueuedSpeechFailure(owner, text, msg);
+                } });
             }
         } }).start();
     }
@@ -2346,20 +2397,52 @@ public class MainActivity extends Activity {
     private void prefetchNextQueuedSpeech(final Msg owner) {
         if (!voiceMode || !voiceFullMode) return;
         if (owner.voiceSessionId != 0 && owner.voiceSessionId != voiceSession) return;
-        if (owner.ttsRequested || owner.ttsQueue.size() == 0) return;
+        if (owner.ttsRequested || owner.ttsPrefetching || owner.ttsQueue.size() == 0) return;
         final String text = owner.ttsQueue.get(0);
         final int session = voiceSession;
         if (ttsReadyFiles.containsKey(text)) return;
-        owner.ttsRequested = true;
+        owner.ttsPrefetching = true;
         new Thread(new Runnable() { @Override public void run() {
             try {
                 final File audio = requestSpeechAudio(text);
-                runOnUiThread(new Runnable() { @Override public void run() { if (!voiceSessionActive(session)) return; owner.ttsRequested = false; ttsReadyFiles.put(text, audio); if (!owner.ttsPlaying) playNextQueuedSpeech(owner); } });
+                runOnUiThread(new Runnable() { @Override public void run() {
+                    if (!voiceSessionActive(session)) return;
+                    owner.ttsPrefetching = false;
+                    ttsReadyFiles.put(text, audio);
+                    if (!owner.ttsPlaying && !owner.ttsRequested) playNextQueuedSpeech(owner);
+                } });
             } catch (Exception e) {
-                final String msg = friendlyError(e);
-                runOnUiThread(new Runnable() { @Override public void run() { if (!voiceSessionActive(session)) return; owner.ttsRequested = false; updateVoiceStatus("tts: " + msg); maybeFinishVoiceAfterTts(owner); } });
+                runOnUiThread(new Runnable() { @Override public void run() {
+                    if (!voiceSessionActive(session)) return;
+                    owner.ttsPrefetching = false;
+                    if (!owner.ttsPlaying && !owner.ttsRequested) playNextQueuedSpeech(owner);
+                    else maybeFinishVoiceAfterTts(owner);
+                } });
             }
         } }).start();
+    }
+
+    private void handleQueuedSpeechFailure(Msg owner, String failedText, String msg) {
+        if (owner == null) return;
+        if (owner.ttsQueue.size() > 0 && owner.ttsQueue.get(0).equals(failedText)) owner.ttsQueue.remove(0);
+        ttsReadyFiles.remove(failedText);
+        if (owner.ttsPlaybackFailures++ < 2 && failedText != null && failedText.trim().length() > 0) {
+            owner.ttsQueue.add(0, failedText);
+            updateVoiceStatus("retrying speech");
+            ui.postDelayed(new Runnable() { @Override public void run() { playNextQueuedSpeech(owner); } }, 350);
+            return;
+        }
+        if (owner.ttsQueue.size() > 0) {
+            updateVoiceStatus("continuing");
+            if (voiceText != null) setVoiceText(voiceText.getText().toString() + "\n\ntts skip: " + msg);
+            playNextQueuedSpeech(owner);
+            prefetchNextQueuedSpeech(owner);
+            return;
+        }
+        updateVoiceStatus(isModelRefusal(msg) ? "model refused" : "tts failed");
+        if (voiceText != null) setVoiceText(voiceText.getText().toString() + "\n\n" + (isModelRefusal(msg) ? "model refused: " : "tts: ") + msg);
+        owner.streamDone = true;
+        ui.postDelayed(new Runnable() { @Override public void run() { finishVoiceResponse(); } }, 1200);
     }
 
     private void maybeFinishVoiceAfterTts(Msg owner) {
@@ -2367,7 +2450,8 @@ public class MainActivity extends Activity {
         if (owner.voiceSessionId != 0 && owner.voiceSessionId != voiceSession) return;
         if (!owner.slowVoice) return;
         if (!prefs.getBoolean("voiceSpeak", true)) { finishVoiceResponse(); return; }
-        if (owner.streamDone && !owner.ttsRequested && !owner.ttsPlaying && owner.ttsQueue.size() == 0) finishVoiceResponse();
+        if (owner.streamDone && !owner.ttsRequested && !owner.ttsPrefetching && !owner.ttsPlaying && owner.ttsQueue.size() == 0) finishVoiceResponse();
+        else if (owner.streamDone && !owner.ttsRequested && !owner.ttsPlaying && owner.ttsQueue.size() > 0) playNextQueuedSpeech(owner);
     }
 
     private int firstSpeakableCut(String s, boolean finish) {
@@ -2467,7 +2551,7 @@ public class MainActivity extends Activity {
         if (reasoningModels.contains(model)) return true;
         String meta = modelSearchText.containsKey(model) ? modelSearchText.get(model).toLowerCase(Locale.US) : "";
         String haystack = m + " " + meta;
-        return haystack.contains("minimax") || haystack.contains("reasoning") || haystack.contains("thinking") || haystack.contains("deepseek-r1") || haystack.contains("r1-") || haystack.endsWith("/r1") || haystack.contains("qwq") || haystack.contains("qwen3") || haystack.contains("qwen-3") || haystack.contains("qwen/qwen3") || haystack.contains("magistral") || haystack.contains("glm-4.5") || haystack.contains("sonar-reasoning") || haystack.contains("kimi-k2-thinking") || haystack.contains("o1") || haystack.contains("o3") || haystack.contains("o4-");
+        return haystack.contains("minimax") || haystack.contains("reasoning") || haystack.contains("thinking") || haystack.contains("deepseek-r1") || haystack.contains("r1-") || haystack.endsWith("/r1") || haystack.contains("qwq") || haystack.contains("qwen3") || haystack.contains("qwen-3") || haystack.contains("qwen/qwen3") || haystack.contains("magistral") || haystack.contains("glm-4.5") || haystack.contains("sonar-reasoning") || haystack.contains("kimi-k2-thinking") || haystack.contains("kimi-k3") || haystack.contains("kimi/k3") || haystack.contains("o1") || haystack.contains("o3") || haystack.contains("o4-");
     }
 
     private String buildSearchContext(String userText) throws Exception {
@@ -3213,9 +3297,23 @@ public class MainActivity extends Activity {
         return out.toString();
     }
 
-    private void refreshModels() {
+    private void refreshModels() { refreshModels(true); }
+
+    private void maybeAutoRefreshModels(boolean force) {
+        if (hookVoiceMode || modelsRefreshing) return;
+        String key = savedApiKey();
+        if (key.length() == 0 && customEndpoints.size() == 0) return;
+        long last = prefs.getLong("modelsRefreshedAt", 0);
+        if (!force && last > 0 && System.currentTimeMillis() - last < MODEL_AUTO_REFRESH_MS) return;
+        refreshModels(false);
+    }
+
+    private void refreshModels(final boolean manual) {
         saveApiKey(); final String key = savedApiKey(); final ArrayList<String> endpoints = new ArrayList<String>(customEndpoints); String typedEndpoint = endpointInput == null ? "" : normalizeEndpoint(endpointInput.getText().toString()); if (typedEndpoint.length() > 0 && !endpoints.contains(typedEndpoint)) endpoints.add(typedEndpoint);
-        if (key.length() == 0 && endpoints.size() == 0) { toast("add key or endpoint"); return; }
+        if (key.length() == 0 && endpoints.size() == 0) { if (manual) toast("add key or endpoint"); return; }
+        if (modelsRefreshing) { if (manual) toast("refreshing models..."); return; }
+        modelsRefreshing = true;
+        if (manual) toast("refreshing models...");
         new Thread(new Runnable() { @Override public void run() {
             try {
                 final ArrayList<String> found = new ArrayList<String>();
@@ -3229,12 +3327,22 @@ public class MainActivity extends Activity {
                 if (key.length() > 0) fetchModelsInto(OPENROUTER_ENDPOINT, key, "openrouter", found, foundContexts, foundSources, foundEndpoints, foundAudioOutput, foundAudioInput, foundReasoning, foundSpeed);
                 for (String endpoint : endpoints) fetchModelsInto(endpoint, "", "custom", found, foundContexts, foundSources, foundEndpoints, foundAudioOutput, foundAudioInput, foundReasoning, foundSpeed);
                 runOnUiThread(new Runnable() { @Override public void run() {
+                    modelsRefreshing = false;
                     for (String endpoint : endpoints) if (!customEndpoints.contains(endpoint)) customEndpoints.add(endpoint);
                     models.clear(); models.addAll(found); modelContexts.clear(); modelContexts.putAll(foundContexts); modelSources.clear(); modelSources.putAll(foundSources); modelEndpoints.clear(); modelEndpoints.putAll(foundEndpoints); audioOutputModels.clear(); audioOutputModels.addAll(foundAudioOutput); audioInputModels.clear(); audioInputModels.addAll(foundAudioInput); reasoningModels.clear(); reasoningModels.addAll(foundReasoning); speedModels.clear(); speedModels.addAll(foundSpeed);
                     for (String m : found) if ("custom".equals(foundSources.get(m)) && !myModels.contains(m)) myModels.add(m);
-                    saveCustomEndpoints(); saveModels(); saveModelContexts(); saveModelSources(); saveModelEndpoints(); saveAudioOutputModels(); saveAudioInputModels(); saveReasoningModels(); saveSpeedModels(); saveMyModels(); toast("models updated"); renderPane();
+                    saveCustomEndpoints(); saveModels(); saveModelContexts(); saveModelSources(); saveModelEndpoints(); saveAudioOutputModels(); saveAudioInputModels(); saveReasoningModels(); saveSpeedModels(); saveMyModels();
+                    prefs.edit().putLong("modelsRefreshedAt", System.currentTimeMillis()).apply();
+                    if (manual) toast("models updated");
+                    if (manual || pane == 2) renderPane();
                 } });
-            } catch (Exception e) { final String msg = friendlyError(e); runOnUiThread(new Runnable() { @Override public void run() { toast("models failed: " + msg); } }); }
+            } catch (Exception e) {
+                final String msg = friendlyError(e);
+                runOnUiThread(new Runnable() { @Override public void run() {
+                    modelsRefreshing = false;
+                    if (manual) toast("models failed: " + msg);
+                } });
+            }
         } }).start();
     }
 
@@ -3297,7 +3405,7 @@ public class MainActivity extends Activity {
             if (p.equals("reasoning") || p.equals("include_reasoning") || p.equals("reasoning_effort")) return true;
         }
         String haystack = (id + " " + name + " " + description).toLowerCase(Locale.US);
-        return haystack.contains("reasoning") || haystack.contains("thinking") || haystack.contains("deepseek-r1") || haystack.contains("r1-") || haystack.endsWith("/r1") || haystack.contains("qwq") || haystack.contains("qwen3") || haystack.contains("qwen-3") || haystack.contains("qwen/qwen3") || haystack.contains("minimax") || haystack.contains("magistral") || haystack.contains("glm-4.5") || haystack.contains("sonar-reasoning") || haystack.contains("kimi-k2-thinking") || haystack.contains("o1") || haystack.contains("o3") || haystack.contains("o4-");
+        return haystack.contains("reasoning") || haystack.contains("thinking") || haystack.contains("deepseek-r1") || haystack.contains("r1-") || haystack.endsWith("/r1") || haystack.contains("qwq") || haystack.contains("qwen3") || haystack.contains("qwen-3") || haystack.contains("qwen/qwen3") || haystack.contains("minimax") || haystack.contains("magistral") || haystack.contains("glm-4.5") || haystack.contains("sonar-reasoning") || haystack.contains("kimi-k2-thinking") || haystack.contains("kimi-k3") || haystack.contains("kimi/k3") || haystack.contains("o1") || haystack.contains("o3") || haystack.contains("o4-");
     }
 
     private boolean hasSpeedParameter(JSONObject model, String id, String name, String description) {
@@ -3365,8 +3473,24 @@ public class MainActivity extends Activity {
                 tts.setLanguage(Locale.getDefault());
                 tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
                     @Override public void onStart(String id) { runOnUiThread(new Runnable() { @Override public void run() { updateVoiceStatus("speaking"); } }); }
-                    @Override public void onDone(String id) { runOnUiThread(new Runnable() { @Override public void run() { if (activeTtsOwner != null) { activeTtsOwner.ttsPlaying = false; activeTtsOwner.ttsRequested = false; } finishVoiceResponse(); } }); }
-                    @Override public void onError(String id) { runOnUiThread(new Runnable() { @Override public void run() { if (activeTtsOwner != null) { activeTtsOwner.ttsPlaying = false; activeTtsOwner.ttsRequested = false; } updateVoiceStatus("speech failed"); } }); }
+                    @Override public void onDone(String id) { runOnUiThread(new Runnable() { @Override public void run() {
+                        if (activeTtsOwner != null) {
+                            Msg owner = activeTtsOwner;
+                            owner.ttsPlaying = false;
+                            owner.ttsRequested = false;
+                            if (owner.ttsQueue.size() > 0) playNextQueuedSpeech(owner);
+                            else maybeFinishVoiceAfterTts(owner);
+                        } else finishVoiceResponse();
+                    } }); }
+                    @Override public void onError(String id) { runOnUiThread(new Runnable() { @Override public void run() {
+                        if (activeTtsOwner != null) {
+                            Msg owner = activeTtsOwner;
+                            owner.ttsPlaying = false;
+                            owner.ttsRequested = false;
+                            if (owner.ttsQueue.size() > 0) playNextQueuedSpeech(owner);
+                            else { updateVoiceStatus("speech failed"); maybeFinishVoiceAfterTts(owner); }
+                        } else updateVoiceStatus("speech failed");
+                    } }); }
                 });
             }
         } });
@@ -4142,6 +4266,7 @@ public class MainActivity extends Activity {
         pcm16AudioFiles.clear();
         for (Msg m : messages) {
             m.ttsRequested = false;
+            m.ttsPrefetching = false;
             m.ttsPlaying = false;
             m.ttsQueue.clear();
         }
@@ -4217,7 +4342,7 @@ public class MainActivity extends Activity {
     }
 
     private boolean voiceChunkFollowActive() {
-        return voiceMode && voiceFullMode && activeTtsOwner != null && (activeTtsOwner.ttsPlaying || activeTtsOwner.ttsRequested || activeTtsOwner.ttsQueue.size() > 0);
+        return voiceMode && voiceFullMode && activeTtsOwner != null && (activeTtsOwner.ttsPlaying || activeTtsOwner.ttsRequested || activeTtsOwner.ttsPrefetching || activeTtsOwner.ttsQueue.size() > 0);
     }
 
     private void followVoiceChunk(final Msg owner, final String chunk) {
@@ -4742,7 +4867,7 @@ public class MainActivity extends Activity {
 
     private void finishVoiceResponse() {
         if (!voiceMode || !voiceFullMode) return;
-        if (activeTtsOwner != null && (activeTtsOwner.ttsRequested || activeTtsOwner.ttsPlaying || activeTtsOwner.ttsQueue.size() > 0)) {
+        if (activeTtsOwner != null && (activeTtsOwner.ttsRequested || activeTtsOwner.ttsPrefetching || activeTtsOwner.ttsPlaying || activeTtsOwner.ttsQueue.size() > 0)) {
             ui.postDelayed(new Runnable() { @Override public void run() { finishVoiceResponse(); } }, 250);
             return;
         }
@@ -5531,8 +5656,75 @@ public class MainActivity extends Activity {
     public class WaveView extends View { Paint p = new Paint(Paint.ANTI_ALIAS_FLAG); float level = 0.05f; public WaveView(Context c) { super(c); } @Override protected void onDraw(Canvas c) { int bars = 9; int gap = dp(8); int barW = dp(3); int total = bars * barW + (bars - 1) * gap; int start = (getWidth() - total) / 2; int mid = getHeight() / 2; p.setColor(Color.WHITE); p.setStyle(Paint.Style.FILL); for (int i = 0; i < bars; i++) { float distance = Math.abs(i - (bars - 1) / 2f); float scale = Math.max(0.15f, 1f - distance * 0.14f); int h = Math.max(dp(8), Math.round(dp(78) * level * scale)); int x = start + i * (barW + gap); c.drawRect(x, mid - h / 2f, x + barW, mid + h / 2f, p); } } }
     public class BorderWaveView extends View { Paint p = new Paint(Paint.ANTI_ALIAS_FLAG); float level = 0.05f; public BorderWaveView(Context c) { super(c); } @Override protected void onDraw(Canvas c) { p.setStyle(Paint.Style.STROKE); p.setStrokeCap(Paint.Cap.SQUARE); p.setStrokeJoin(Paint.Join.MITER); p.setColor(Color.argb(145,255,255,255)); p.setStrokeWidth(dp(2)); float h = dp(1); c.drawRect(h, h, getWidth() - h, getHeight() - h, p); if (level > 0.12f) { p.setColor(Color.argb(Math.min(210, 90 + Math.round(level * 120)),255,255,255)); p.setStrokeWidth(dp(1)); float in = dp(7); c.drawRect(in, in, getWidth() - in, getHeight() - in, p); } } }
     public class GlobeButton extends View { Paint p = new Paint(Paint.ANTI_ALIAS_FLAG); boolean active = false; public GlobeButton(Context c) { super(c); } @Override protected void onDraw(Canvas c) { if (!active) return; int w=getWidth(), h=getHeight(); float r=Math.min(w,h)*0.25f, cx=w/2f, cy=h/2f; p.setColor(Color.WHITE); p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(Math.max(1f, dp(1))); p.setStrokeCap(Paint.Cap.ROUND); c.drawCircle(cx, cy, r, p); c.drawOval(cx-r*0.45f, cy-r, cx+r*0.45f, cy+r, p); c.drawArc(cx-r, cy-r*0.55f, cx+r, cy+r*0.55f, 0, 360, false, p); c.drawLine(cx-r*0.94f, cy, cx+r*0.94f, cy, p); } }
-    public class JumpTextView extends TextView { String word = "thinking"; int step = 0; Runnable tick = new Runnable() { @Override public void run() { animateJump(); } }; public JumpTextView(Context c) { super(c); setSingleLine(true); setIncludeFontPadding(true); setGravity(Gravity.CENTER_VERTICAL); } @Override protected void onAttachedToWindow() { super.onAttachedToWindow(); animateJump(); } @Override protected void onDetachedFromWindow() { removeCallbacks(tick); super.onDetachedFromWindow(); } private void animateJump() { String w = word == null || word.length() == 0 ? "thinking" : word; SpannableString span = new SpannableString(w); int cycle = w.length() + 4, pos = step++ % cycle, peak = Math.min(pos, w.length() - 1); for (int i = 0; i < w.length(); i++) { final int dist = Math.abs(i - peak); final int shift = pos >= w.length() ? 0 : dist == 0 ? dp(3) : dist == 1 ? dp(1) : 0; if (shift > 0) span.setSpan(new android.text.style.CharacterStyle() { @Override public void updateDrawState(android.text.TextPaint tp) { tp.baselineShift += shift; } }, i, i + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE); } setText(span); postDelayed(tick, pos >= w.length() ? 260 : 135); } }
+    public class JumpTextView extends TextView {
+        String word = "thinking";
+        int step = 0;
+        Msg bound;
+        final Runnable tick = new Runnable() { @Override public void run() { animateJump(); } };
+        public JumpTextView(Context c) {
+            super(c);
+            setSingleLine(true);
+            setIncludeFontPadding(true);
+            setGravity(Gravity.CENTER_VERTICAL);
+        }
+        void bind(Msg m) {
+            bound = m;
+            if (m != null) step = Math.max(0, m.thinkingAnimStep);
+        }
+        @Override protected void onAttachedToWindow() {
+            super.onAttachedToWindow();
+            removeCallbacks(tick);
+            animateJump();
+        }
+        @Override protected void onDetachedFromWindow() {
+            removeCallbacks(tick);
+            if (bound != null) bound.thinkingAnimStep = step;
+            super.onDetachedFromWindow();
+        }
+        private void animateJump() {
+            if (!isAttachedToWindow()) return;
+            String w = word == null || word.length() == 0 ? "thinking" : word;
+            SpannableString span = new SpannableString(w);
+            int cycle = w.length() + 4, pos = step++ % cycle, peak = Math.min(pos, w.length() - 1);
+            if (bound != null) bound.thinkingAnimStep = step;
+            for (int i = 0; i < w.length(); i++) {
+                final int dist = Math.abs(i - peak);
+                final int shift = pos >= w.length() ? 0 : dist == 0 ? dp(3) : dist == 1 ? dp(1) : 0;
+                if (shift > 0) span.setSpan(new android.text.style.CharacterStyle() {
+                    @Override public void updateDrawState(android.text.TextPaint tp) { tp.baselineShift += shift; }
+                }, i, i + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            }
+            setText(span);
+            postDelayed(tick, pos >= w.length() ? 260 : 135);
+        }
+    }
     public static class ContextMeter extends View { Paint p = new Paint(Paint.ANTI_ALIAS_FLAG); float percent = 0; public ContextMeter(Context c) { super(c); } @Override protected void onDraw(Canvas c) { int w=getWidth(), h=getHeight(), r=Math.min(w,h)/2-2; p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(2); p.setColor(Color.WHITE); c.drawCircle(w/2f,h/2f,r,p); p.setStyle(Paint.Style.FILL); c.drawArc(w/2f-r,h/2f-r,w/2f+r,h/2f+r,-90,percent*3.6f,true,p); p.setColor(Color.BLACK); c.drawCircle(w/2f,h/2f,Math.max(1,r-5),p); } }
-    public static class Msg { String role, text, imageBase64, imageMime, stats, model, replyQuote, reasoning = "", memorySavedText = ""; boolean slowVoice = false, reasoningCapable = false, thinkingExpanded = false, searchExpanded = false, memorySaved = false, memoryExpanded = false, ttsRequested = false, ttsStarted = false, ttsPlaying = false, ttsStartDelayDone = false, streamDone = false; int spokenChars = 0, ttsPlaybackFailures = 0, voiceSessionId = 0; long startedAt = System.currentTimeMillis(), thoughtMs = 0; ArrayList<String> ttsQueue = new ArrayList<String>(); ArrayList<String> searchSources = new ArrayList<String>(); Msg(String r, String t, String i, String m, String s) { this(r,t,i,m,s,"",""); } Msg(String r, String t, String i, String m, String s, String modelName) { this(r,t,i,m,s,modelName,""); } Msg(String r, String t, String i, String m, String s, String modelName, String reply) { role=r; text=t==null?"":t; imageBase64=i==null?"":i; imageMime=m==null?"":m; stats=s==null?"":s; model=modelName==null?"":modelName; replyQuote=reply==null?"":reply; } JSONObject toJson() throws Exception { JSONArray src = new JSONArray(); for (String s : searchSources) src.put(s); return new JSONObject().put("role",role).put("text",text).put("image",imageBase64).put("mime",imageMime).put("stats",stats).put("model",model).put("replyQuote",replyQuote).put("reasoning",reasoning).put("thoughtMs",thoughtMs).put("memorySaved",memorySaved).put("memorySavedText",memorySavedText).put("searchSources",src); } static Msg fromJson(JSONObject o) { Msg m = new Msg(o.optString("role"),o.optString("text"),o.optString("image"),o.optString("mime"),o.optString("stats"),o.optString("model"),o.optString("replyQuote")); m.reasoning = o.optString("reasoning", ""); m.thoughtMs = o.optLong("thoughtMs", 0); m.memorySaved = o.optBoolean("memorySaved", false); m.memorySavedText = o.optString("memorySavedText", ""); JSONArray src = o.optJSONArray("searchSources"); if (src != null) for (int i = 0; i < src.length(); i++) { String s = src.optString(i, ""); if (s.length() > 0) m.searchSources.add(s); } m.streamDone = !LOADING.equals(m.stats); return m; } }
+    public static class Msg {
+        String role, text, imageBase64, imageMime, stats, model, replyQuote, reasoning = "", memorySavedText = "";
+        boolean slowVoice = false, reasoningCapable = false, thinkingExpanded = false, searchExpanded = false, memorySaved = false, memoryExpanded = false, ttsRequested = false, ttsPrefetching = false, ttsStarted = false, ttsPlaying = false, ttsStartDelayDone = false, streamDone = false;
+        int spokenChars = 0, ttsPlaybackFailures = 0, voiceSessionId = 0, thinkingAnimStep = 0;
+        long startedAt = System.currentTimeMillis(), thoughtMs = 0;
+        ArrayList<String> ttsQueue = new ArrayList<String>();
+        ArrayList<String> searchSources = new ArrayList<String>();
+        Msg(String r, String t, String i, String m, String s) { this(r,t,i,m,s,"",""); }
+        Msg(String r, String t, String i, String m, String s, String modelName) { this(r,t,i,m,s,modelName,""); }
+        Msg(String r, String t, String i, String m, String s, String modelName, String reply) { role=r; text=t==null?"":t; imageBase64=i==null?"":i; imageMime=m==null?"":m; stats=s==null?"":s; model=modelName==null?"":modelName; replyQuote=reply==null?"":reply; }
+        JSONObject toJson() throws Exception {
+            JSONArray src = new JSONArray();
+            for (String s : searchSources) src.put(s);
+            return new JSONObject().put("role",role).put("text",text).put("image",imageBase64).put("mime",imageMime).put("stats",stats).put("model",model).put("replyQuote",replyQuote).put("reasoning",reasoning).put("thoughtMs",thoughtMs).put("memorySaved",memorySaved).put("memorySavedText",memorySavedText).put("searchSources",src);
+        }
+        static Msg fromJson(JSONObject o) {
+            Msg m = new Msg(o.optString("role"),o.optString("text"),o.optString("image"),o.optString("mime"),o.optString("stats"),o.optString("model"),o.optString("replyQuote"));
+            m.reasoning = o.optString("reasoning", "");
+            m.thoughtMs = o.optLong("thoughtMs", 0);
+            m.memorySaved = o.optBoolean("memorySaved", false);
+            m.memorySavedText = o.optString("memorySavedText", "");
+            JSONArray src = o.optJSONArray("searchSources");
+            if (src != null) for (int i = 0; i < src.length(); i++) { String s = src.optString(i, ""); if (s.length() > 0) m.searchSources.add(s); }
+            m.streamDone = !LOADING.equals(m.stats);
+            return m;
+        }
+    }
     public static class Chat { String id="", title="", folder="Inbox", model=""; boolean webSearch=false, titleGenerated=false; ArrayList<Msg> messages=new ArrayList<Msg>(); JSONObject toJson() throws Exception { JSONArray a=new JSONArray(); for(Msg m:messages)a.put(m.toJson()); return new JSONObject().put("id",id).put("title",title).put("titleGenerated",titleGenerated).put("folder",folder).put("model",model).put("webSearch",webSearch).put("messages",a); } static Chat fromJson(JSONObject o) { Chat c=new Chat(); c.id=o.optString("id"); c.title=o.optString("title"); c.titleGenerated=o.optBoolean("titleGenerated", false); c.folder=o.optString("folder","Inbox"); c.model=o.optString("model", ""); c.webSearch=o.optBoolean("webSearch", false); JSONArray a=o.optJSONArray("messages"); if(a!=null) for(int i=0;i<a.length();i++) c.messages.add(Msg.fromJson(a.optJSONObject(i))); return c; } }
 }
