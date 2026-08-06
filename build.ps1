@@ -36,14 +36,37 @@ Copy-Item "$out\unsigned.apk" "$out\with-dex.apk"
 & jar uf "$out\with-dex.apk" -C "$out\dex" classes.dex
 & $zipalign -f 4 "$out\with-dex.apk" "$out\aligned.apk"
 
-$keyDir = Join-Path $env:USERPROFILE ".android"
-$keyStore = Join-Path $keyDir "debug.keystore"
-if (-not (Test-Path $keyStore)) {
-  New-Item -ItemType Directory -Force $keyDir | Out-Null
-  & keytool -genkeypair -keystore $keyStore -storepass android -keypass android -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+$keyStore = $null
+$storePass = "android"
+$keyPass = "android"
+$keyAlias = "androiddebugkey"
+$tempKeystore = $null
+
+if ($env:LIGHTUI_KEYSTORE -and (Test-Path -LiteralPath $env:LIGHTUI_KEYSTORE)) {
+  $keyStore = $env:LIGHTUI_KEYSTORE
+  if ($env:LIGHTUI_KEYSTORE_PASSWORD) { $storePass = $env:LIGHTUI_KEYSTORE_PASSWORD }
+  if ($env:LIGHTUI_KEY_PASSWORD) { $keyPass = $env:LIGHTUI_KEY_PASSWORD } else { $keyPass = $storePass }
+  if ($env:LIGHTUI_KEY_ALIAS) { $keyAlias = $env:LIGHTUI_KEY_ALIAS }
+} elseif ($env:LIGHTUI_KEYSTORE_BASE64) {
+  $tempKeystore = Join-Path $out "release.keystore"
+  [System.IO.File]::WriteAllBytes($tempKeystore, [Convert]::FromBase64String($env:LIGHTUI_KEYSTORE_BASE64))
+  $keyStore = $tempKeystore
+  if ($env:LIGHTUI_KEYSTORE_PASSWORD) { $storePass = $env:LIGHTUI_KEYSTORE_PASSWORD }
+  if ($env:LIGHTUI_KEY_PASSWORD) { $keyPass = $env:LIGHTUI_KEY_PASSWORD } else { $keyPass = $storePass }
+  if ($env:LIGHTUI_KEY_ALIAS) { $keyAlias = $env:LIGHTUI_KEY_ALIAS }
+} elseif ($env:LIGHTUI_REQUIRE_RELEASE_KEYSTORE -eq "1") {
+  throw "Release signing required, but no LIGHTUI_KEYSTORE / LIGHTUI_KEYSTORE_BASE64 was provided."
+} else {
+  $keyDir = Join-Path $env:USERPROFILE ".android"
+  $keyStore = Join-Path $keyDir "debug.keystore"
+  if (-not (Test-Path $keyStore)) {
+    New-Item -ItemType Directory -Force $keyDir | Out-Null
+    & keytool -genkeypair -keystore $keyStore -storepass android -keypass android -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+  }
 }
 
-& $apksigner sign --ks $keyStore --ks-pass pass:android --key-pass pass:android --out "$out\lightui-release.apk" "$out\aligned.apk"
+& $apksigner sign --ks $keyStore --ks-key-alias $keyAlias --ks-pass "pass:$storePass" --key-pass "pass:$keyPass" --out "$out\lightui-release.apk" "$out\aligned.apk"
 & $apksigner verify "$out\lightui-release.apk"
+if ($tempKeystore) { Remove-Item $tempKeystore -Force -ErrorAction SilentlyContinue }
 
 Write-Host "Built $out\lightui-release.apk"

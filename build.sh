@@ -57,14 +57,48 @@ cp "$out/unsigned.apk" "$out/with-dex.apk"
 "$jar_bin" uf "$out/with-dex.apk" -C "$out/dex" classes.dex
 "$build_tools/zipalign" -f 4 "$out/with-dex.apk" "$out/aligned.apk"
 
-key_dir="${HOME}/.android"
-keystore="$key_dir/debug.keystore"
-if [[ ! -f "$keystore" ]]; then
-  mkdir -p "$key_dir"
-  "$keytool_bin" -genkeypair -keystore "$keystore" -storepass android -keypass android -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+keystore=""
+keystore_pass="android"
+key_pass="android"
+key_alias="androiddebugkey"
+cleanup_keystore=""
+
+if [[ -n "${LIGHTUI_KEYSTORE:-}" && -f "${LIGHTUI_KEYSTORE}" ]]; then
+  keystore="$LIGHTUI_KEYSTORE"
+  keystore_pass="${LIGHTUI_KEYSTORE_PASSWORD:-android}"
+  key_pass="${LIGHTUI_KEY_PASSWORD:-$keystore_pass}"
+  key_alias="${LIGHTUI_KEY_ALIAS:-androiddebugkey}"
+elif [[ -n "${LIGHTUI_KEYSTORE_BASE64:-}" ]]; then
+  keystore="$out/release.keystore"
+  cleanup_keystore="$keystore"
+  printf '%s' "$LIGHTUI_KEYSTORE_BASE64" | base64 -d > "$keystore"
+  keystore_pass="${LIGHTUI_KEYSTORE_PASSWORD:-android}"
+  key_pass="${LIGHTUI_KEY_PASSWORD:-$keystore_pass}"
+  key_alias="${LIGHTUI_KEY_ALIAS:-androiddebugkey}"
+elif [[ "${LIGHTUI_REQUIRE_RELEASE_KEYSTORE:-}" == "1" ]]; then
+  echo "Release signing required, but no LIGHTUI_KEYSTORE / LIGHTUI_KEYSTORE_BASE64 was provided." >&2
+  echo "Add GitHub Actions secrets (see scripts/upload-signing-keystore.ps1)." >&2
+  exit 1
+else
+  key_dir="${HOME}/.android"
+  keystore="$key_dir/debug.keystore"
+  if [[ ! -f "$keystore" ]]; then
+    mkdir -p "$key_dir"
+    "$keytool_bin" -genkeypair -keystore "$keystore" -storepass android -keypass android -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+  fi
 fi
 
-"$build_tools/apksigner" sign --ks "$keystore" --ks-pass pass:android --key-pass pass:android --out "$out/lightui-release.apk" "$out/aligned.apk"
+"$build_tools/apksigner" sign \
+  --ks "$keystore" \
+  --ks-key-alias "$key_alias" \
+  --ks-pass "pass:$keystore_pass" \
+  --key-pass "pass:$key_pass" \
+  --out "$out/lightui-release.apk" \
+  "$out/aligned.apk"
 "$build_tools/apksigner" verify "$out/lightui-release.apk"
+
+if [[ -n "$cleanup_keystore" ]]; then
+  rm -f "$cleanup_keystore"
+fi
 
 echo "Built $out/lightui-release.apk"

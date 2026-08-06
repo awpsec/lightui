@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Build lightui and stage release/lightui-release.apk.
-# To publish: tag and push, e.g.
-#   git tag v1.0.6 && git push origin v1.0.6
-# The Release GitHub Action uploads the APK to GitHub Releases.
+# To publish: ensure release signing secrets are set, then tag and push, e.g.
+#   ./scripts/upload-signing-keystore.sh
+#   git tag v1.0.10 && git push origin v1.0.10
+# The Release GitHub Action signs with those secrets and uploads the APK.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"

@@ -74,20 +74,37 @@ Build from the project root:
 To publish a GitHub Release with the APK attached, tag the version and push:
 
 ```bash
-git tag v1.0.6
-git push origin v1.0.6
+git tag v1.0.10
+git push origin v1.0.10
 ```
 
 The `Release` GitHub Action builds `lightui-release.apk` and attaches it to that tag. In-app update checks read `https://github.com/awpsec/lightui/releases/latest`.
 
-The signed installable APK is written to:
+### Release signing (required for GitHub Releases)
+
+CI **will not** mint a random debug keystore anymore. Releases must be signed with a stable keystore stored as GitHub Actions secrets:
+
+- `LIGHTUI_KEYSTORE_BASE64`
+- `LIGHTUI_KEYSTORE_PASSWORD`
+- `LIGHTUI_KEY_ALIAS`
+- `LIGHTUI_KEY_PASSWORD`
+
+Upload the keystore that is already on your devices (usually your Windows `%USERPROFILE%\.android\debug.keystore`) so updates install over existing apps:
+
+```powershell
+.\scripts\upload-signing-keystore.ps1
+```
+
+```bash
+./scripts/upload-signing-keystore.sh
+```
+
+Local builds still fall back to `~/.android/debug.keystore` when those env vars are unset. The signed installable APK is written to:
 
 ```text
 build/lightui-release.apk
 release/lightui-release.apk
 ```
-
-The build script signs with the local Android debug keystore (`~/.android/debug.keystore`) if no keystore exists. That is fine for sideload testing and GitHub APK downloads, but use your own private release keystore if you need long-term production signing.
 
 ## Privacy
 

@@ -29,13 +29,40 @@ jobs:
           sdkmanager "platforms;android-34" "build-tools;34.0.0"
           yes | sdkmanager --licenses >/dev/null || true
 
+      - name: Verify release signing secrets
+        env:
+          LIGHTUI_KEYSTORE_BASE64: ${{ secrets.LIGHTUI_KEYSTORE_BASE64 }}
+          LIGHTUI_KEYSTORE_PASSWORD: ${{ secrets.LIGHTUI_KEYSTORE_PASSWORD }}
+          LIGHTUI_KEY_ALIAS: ${{ secrets.LIGHTUI_KEY_ALIAS }}
+          LIGHTUI_KEY_PASSWORD: ${{ secrets.LIGHTUI_KEY_PASSWORD }}
+        run: |
+          missing=0
+          for name in LIGHTUI_KEYSTORE_BASE64 LIGHTUI_KEYSTORE_PASSWORD LIGHTUI_KEY_ALIAS LIGHTUI_KEY_PASSWORD; do
+            if [[ -z "${!name}" ]]; then
+              echo "Missing repository secret: $name" >&2
+              missing=1
+            fi
+          done
+          if [[ "$missing" -ne 0 ]]; then
+            echo >&2
+            echo "Add secrets with scripts/upload-signing-keystore.ps1 (or .sh), then re-push the tag." >&2
+            exit 1
+          fi
+
       - name: Build signed APK
+        env:
+          LIGHTUI_REQUIRE_RELEASE_KEYSTORE: "1"
+          LIGHTUI_KEYSTORE_BASE64: ${{ secrets.LIGHTUI_KEYSTORE_BASE64 }}
+          LIGHTUI_KEYSTORE_PASSWORD: ${{ secrets.LIGHTUI_KEYSTORE_PASSWORD }}
+          LIGHTUI_KEY_ALIAS: ${{ secrets.LIGHTUI_KEY_ALIAS }}
+          LIGHTUI_KEY_PASSWORD: ${{ secrets.LIGHTUI_KEY_PASSWORD }}
         run: |
           chmod +x ./build.sh
           ./build.sh
           mkdir -p release
           cp -f build/lightui-release.apk release/lightui-release.apk
           ls -la build/lightui-release.apk release/lightui-release.apk
+          keytool -printcert -jarfile build/lightui-release.apk | sed -n '1,20p'
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -47,4 +74,6 @@ jobs:
           body: |
             Install `lightui-release.apk` on your Light Phone III / Android device.
 
-            In-app updates: open lightui and choose **update** when prompted.
+            In-app updates: open lightui → settings → tap the version line → **update**.
+
+            All GitHub Release APKs are signed with the shared lightui release keystore so updates install over previous release builds.
