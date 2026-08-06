@@ -102,7 +102,7 @@ public class MainActivity extends Activity {
     private static final int MESSAGE_PAGE = 30;
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
-    private static final String APP_VERSION = "1.0.8";
+    private static final String APP_VERSION = "1.0.9";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 64;
@@ -131,7 +131,7 @@ public class MainActivity extends Activity {
     private LinearLayout root, messageList, folderList, chatList;
     private ScrollView scroll, settingsScrollView;
     private ScrollIndicator scrollIndicator;
-    private EditText input, apiKey, endpointInput, jinaKeyInput, voiceEndpointInput;
+    private EditText input, apiKey, endpointInput, endpointKeyInput, jinaKeyInput, voiceEndpointInput;
     private TextView modelText, contextText, attachText, replyChip, notice, voiceStatus, voiceText, voiceReply, bulkButton, emptyPrompt, bottomButton;
     private GlobeButton webSearchIcon;
     private View chatFade;
@@ -156,6 +156,7 @@ public class MainActivity extends Activity {
     private final ArrayList<String> models = new ArrayList<String>();
     private final ArrayList<String> myModels = new ArrayList<String>();
     private final ArrayList<String> customEndpoints = new ArrayList<String>();
+    private final HashMap<String, String> endpointKeys = new HashMap<String, String>();
     private final HashMap<String, Integer> modelContexts = new HashMap<String, Integer>();
     private final HashMap<String, String> modelSources = new HashMap<String, String>();
     private final HashMap<String, String> modelEndpoints = new HashMap<String, String>();
@@ -326,6 +327,7 @@ public class MainActivity extends Activity {
         input = null;
         apiKey = null;
         endpointInput = null;
+        endpointKeyInput = null;
         jinaKeyInput = null;
         voiceEndpointInput = null;
         contextText = null;
@@ -469,6 +471,7 @@ public class MainActivity extends Activity {
         root.setPadding(dp(26), dp(14), dp(26), dp(10));
         apiKey = null;
         endpointInput = null;
+        endpointKeyInput = null;
         jinaKeyInput = null;
         voiceEndpointInput = null;
         root.addView(settingsTitle());
@@ -924,22 +927,28 @@ public class MainActivity extends Activity {
         for (int i = 0; i < customEndpoints.size(); i++) {
             final String endpoint = customEndpoints.get(i);
             LinearLayout line = row();
-            TextView name = text(endpoint, 12, Color.WHITE);
+            TextView name = text(endpointLabelWithKey(endpoint), 12, Color.WHITE);
             name.setSingleLine(true);
             name.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
-            TextView remove = text("remove", 11, Color.LTGRAY);
-            remove.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
-            remove.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { removeCustomEndpoint(endpoint); showSettingsPane(); } });
-            line.addView(name, new LinearLayout.LayoutParams(0, dp(30), 1));
-            line.addView(remove, new LinearLayout.LayoutParams(dp(76), dp(30)));
+            TextView more = text("···", 16, Color.LTGRAY);
+            more.setGravity(Gravity.CENTER);
+            more.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { showEndpointActions(endpoint); } });
+            line.addView(name, new LinearLayout.LayoutParams(0, dp(34), 1));
+            line.addView(more, new LinearLayout.LayoutParams(dp(40), dp(34)));
             settings.addView(line);
         }
         settings.addView(text("endpoint", 11, Color.LTGRAY));
-        endpointInput = plainEdit("http://100.x.x.x:11434/v1");
+        endpointInput = plainEdit("https://api.example.com/v1");
         endpointInput.setSingleLine(true);
         endpointInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         endpointInput.setText("");
         settings.addView(endpointInput, new LinearLayout.LayoutParams(-1, dp(42)));
+        settings.addView(text("api key", 11, Color.LTGRAY));
+        endpointKeyInput = plainEdit("optional");
+        endpointKeyInput.setSingleLine(true);
+        endpointKeyInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        endpointKeyInput.setText("");
+        settings.addView(endpointKeyInput, new LinearLayout.LayoutParams(-1, dp(42)));
         LinearLayout actions = row();
         TextView save = smallPill("save");
         TextView test = smallPill("test");
@@ -952,6 +961,73 @@ public class MainActivity extends Activity {
         actions.addView(refresh);
         settings.addView(actions, new LinearLayout.LayoutParams(-1, dp(34)));
         settings.addView(space(8));
+    }
+
+    private String endpointLabelWithKey(String endpoint) {
+        String clean = normalizeEndpoint(endpoint);
+        if (clean.length() == 0) return "";
+        return endpointKey(clean).length() > 0 ? clean + " · key" : clean;
+    }
+
+    private void showEndpointActions(final String endpoint) {
+        final Dialog d = panel("endpoint");
+        d.setCancelable(true);
+        d.setCanceledOnTouchOutside(true);
+        LinearLayout box = panelBox();
+        box.addView(panelTitle(shortEndpoint(endpoint)));
+        TextView edit = panelAction("edit");
+        TextView remove = panelAction("remove");
+        edit.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); showEditEndpointDialog(endpoint); } });
+        remove.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
+            d.dismiss();
+            removeCustomEndpoint(endpoint);
+            toast("endpoint removed");
+            showSettingsPane();
+        } });
+        box.addView(edit, new LinearLayout.LayoutParams(-1, dp(48)));
+        box.addView(remove, new LinearLayout.LayoutParams(-1, dp(48)));
+        showPanel(d, box);
+    }
+
+    private void showEditEndpointDialog(final String originalEndpoint) {
+        final String from = normalizeEndpoint(originalEndpoint);
+        final Dialog d = panel("edit endpoint");
+        d.setCancelable(true);
+        d.setCanceledOnTouchOutside(true);
+        LinearLayout box = panelBox();
+        box.addView(panelTitle("edit endpoint"));
+        box.addView(text("endpoint", 11, Color.LTGRAY));
+        final EditText urlInput = plainEdit("https://api.example.com/v1");
+        urlInput.setSingleLine(true);
+        urlInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        urlInput.setText(from);
+        box.addView(urlInput, new LinearLayout.LayoutParams(-1, dp(42)));
+        box.addView(text("api key", 11, Color.LTGRAY));
+        final EditText keyInput = plainEdit("optional");
+        keyInput.setSingleLine(true);
+        keyInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        keyInput.setText(endpointKey(from));
+        box.addView(keyInput, new LinearLayout.LayoutParams(-1, dp(42)));
+        box.addView(space(8));
+        TextView test = panelAction("test");
+        TextView save = panelAction("save");
+        TextView cancel = panelAction("cancel");
+        test.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
+            testEndpointConnection(normalizeEndpoint(urlInput.getText().toString()), keyInput.getText().toString().trim());
+        } });
+        save.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
+            String to = normalizeEndpoint(urlInput.getText().toString());
+            if (to.length() == 0) { toast("enter endpoint"); return; }
+            renameCustomEndpoint(from, to, keyInput.getText().toString().trim());
+            d.dismiss();
+            toast("endpoint saved");
+            showSettingsPane();
+        } });
+        cancel.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); } });
+        box.addView(test, new LinearLayout.LayoutParams(-1, dp(48)));
+        box.addView(save, new LinearLayout.LayoutParams(-1, dp(48)));
+        box.addView(cancel, new LinearLayout.LayoutParams(-1, dp(48)));
+        showPanel(d, box);
     }
 
     private void addJinaSettings(LinearLayout settings) {
@@ -1155,8 +1231,8 @@ public class MainActivity extends Activity {
         HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
         c.setConnectTimeout(3500);
         c.setReadTimeout(6000);
-        String key = savedApiKey();
-        if (url.toLowerCase(Locale.US).contains("openrouter.ai") && key.length() > 0) c.setRequestProperty("Authorization", "Bearer " + key);
+        String key = authKeyForUrl(url);
+        if (key.length() > 0) c.setRequestProperty("Authorization", "Bearer " + key);
         int code = c.getResponseCode();
         String raw = readAll(code >= 400 ? c.getErrorStream() : c.getInputStream());
         if (code >= 400) throw new RuntimeException(raw);
@@ -2230,14 +2306,15 @@ public class MainActivity extends Activity {
         saveApiKey();
         String model = activeAnswerModel();
         String source = modelSource(model);
-        String key = source.equals("openrouter") ? savedApiKey() : "";
+        String endpoint = source.equals("custom") ? modelEndpoint(model) : "";
+        String key = source.equals("openrouter") ? savedApiKey() : endpointKey(endpoint);
         String text = input == null ? pendingVoiceText.trim() : input.getText().toString().trim();
         if (handleMemoryRecall(text)) return true;
         String pendingUserMemoryNote = pendingUserMemoryNote(text);
         String pendingUserMemoryRemoval = pendingUserMemoryRemoval(text);
         if (model.length() == 0) { toast("select a model first"); return false; }
         if (source.equals("openrouter") && key.length() == 0) { toast("add openrouter key"); return false; }
-        if (source.equals("custom") && modelEndpoint(model).length() == 0) { toast("add endpoint"); return false; }
+        if (source.equals("custom") && endpoint.length() == 0) { toast("add endpoint"); return false; }
         if (text.length() == 0 && imageBase64.length() == 0) return false;
         if (input != null) hideKeyboardFrom(input);
         if (input != null) input.clearFocus();
@@ -3565,7 +3642,12 @@ public class MainActivity extends Activity {
     }
 
     private void refreshModels(final boolean manual) {
-        saveApiKey(); final String key = savedApiKey(); final ArrayList<String> endpoints = new ArrayList<String>(customEndpoints); String typedEndpoint = endpointInput == null ? "" : normalizeEndpoint(endpointInput.getText().toString()); if (typedEndpoint.length() > 0 && !endpoints.contains(typedEndpoint)) endpoints.add(typedEndpoint);
+        saveApiKey();
+        final String key = savedApiKey();
+        final ArrayList<String> endpoints = new ArrayList<String>(customEndpoints);
+        final String typedEndpoint = endpointInput == null ? "" : normalizeEndpoint(endpointInput.getText().toString());
+        final String typedKey = endpointKeyInput == null ? "" : endpointKeyInput.getText().toString().trim();
+        if (typedEndpoint.length() > 0 && !endpoints.contains(typedEndpoint)) endpoints.add(typedEndpoint);
         if (key.length() == 0 && endpoints.size() == 0) { if (manual) toast("add key or endpoint"); return; }
         if (modelsRefreshing) { if (manual) toast("refreshing models..."); return; }
         modelsRefreshing = true;
@@ -3581,13 +3663,19 @@ public class MainActivity extends Activity {
                 final HashSet<String> foundReasoning = new HashSet<String>();
                 final HashSet<String> foundSpeed = new HashSet<String>();
                 if (key.length() > 0) fetchModelsInto(OPENROUTER_ENDPOINT, key, "openrouter", found, foundContexts, foundSources, foundEndpoints, foundAudioOutput, foundAudioInput, foundReasoning, foundSpeed);
-                for (String endpoint : endpoints) fetchModelsInto(endpoint, "", "custom", found, foundContexts, foundSources, foundEndpoints, foundAudioOutput, foundAudioInput, foundReasoning, foundSpeed);
+                for (String endpoint : endpoints) {
+                    String endpointKey = typedEndpoint.equals(endpoint) && typedKey.length() > 0 ? typedKey : endpointKey(endpoint);
+                    fetchModelsInto(endpoint, endpointKey, "custom", found, foundContexts, foundSources, foundEndpoints, foundAudioOutput, foundAudioInput, foundReasoning, foundSpeed);
+                }
                 runOnUiThread(new Runnable() { @Override public void run() {
                     modelsRefreshing = false;
-                    for (String endpoint : endpoints) if (!customEndpoints.contains(endpoint)) customEndpoints.add(endpoint);
+                    for (String endpoint : endpoints) {
+                        if (!customEndpoints.contains(endpoint)) customEndpoints.add(endpoint);
+                        if (typedEndpoint.equals(endpoint) && typedKey.length() > 0) setEndpointKey(endpoint, typedKey);
+                    }
                     models.clear(); models.addAll(found); modelContexts.clear(); modelContexts.putAll(foundContexts); modelSources.clear(); modelSources.putAll(foundSources); modelEndpoints.clear(); modelEndpoints.putAll(foundEndpoints); audioOutputModels.clear(); audioOutputModels.addAll(foundAudioOutput); audioInputModels.clear(); audioInputModels.addAll(foundAudioInput); reasoningModels.clear(); reasoningModels.addAll(foundReasoning); speedModels.clear(); speedModels.addAll(foundSpeed);
                     for (String m : found) if ("custom".equals(foundSources.get(m)) && !myModels.contains(m)) myModels.add(m);
-                    saveCustomEndpoints(); saveModels(); saveModelContexts(); saveModelSources(); saveModelEndpoints(); saveAudioOutputModels(); saveAudioInputModels(); saveReasoningModels(); saveSpeedModels(); saveMyModels();
+                    saveCustomEndpoints(); saveEndpointKeys(); saveModels(); saveModelContexts(); saveModelSources(); saveModelEndpoints(); saveAudioOutputModels(); saveAudioInputModels(); saveReasoningModels(); saveSpeedModels(); saveMyModels();
                     prefs.edit().putLong("modelsRefreshedAt", System.currentTimeMillis()).apply();
                     if (manual) toast("models updated");
                     if (manual || pane == 2) renderPane();
@@ -3672,9 +3760,15 @@ public class MainActivity extends Activity {
     }
 
     private void testCustomEndpoint() {
-        saveApiKey();
         final String typed = endpointInput == null ? "" : normalizeEndpoint(endpointInput.getText().toString());
         final String endpoint = typed.length() > 0 ? typed : customEndpointBase();
+        final String typedKey = endpointKeyInput == null ? "" : endpointKeyInput.getText().toString().trim();
+        final String key = typed.length() > 0 ? typedKey : endpointKey(endpoint);
+        testEndpointConnection(endpoint, key);
+    }
+
+    private void testEndpointConnection(final String endpointRaw, final String key) {
+        final String endpoint = normalizeEndpoint(endpointRaw);
         if (endpoint.length() == 0) { toast("add endpoint"); return; }
         toast("testing endpoint");
         new Thread(new Runnable() { @Override public void run() {
@@ -3683,7 +3777,7 @@ public class MainActivity extends Activity {
                 HashMap<String, Integer> contexts = new HashMap<String, Integer>();
                 HashMap<String, String> sources = new HashMap<String, String>();
                 HashMap<String, String> endpoints = new HashMap<String, String>();
-                fetchModelsInto(endpoint, "", "custom", found, contexts, sources, endpoints, null, null, null, null);
+                fetchModelsInto(endpoint, key == null ? "" : key.trim(), "custom", found, contexts, sources, endpoints, null, null, null, null);
                 final int count = found.size();
                 runOnUiThread(new Runnable() { @Override public void run() { toast(count == 0 ? "endpoint connected: audio/no models" : "endpoint connected: " + count + " models"); } });
             } catch (Exception e) {
@@ -3698,28 +3792,94 @@ public class MainActivity extends Activity {
     private String chatCompletionsUrl(String source) { return chatCompletionsUrl(source, selectedModel()); }
     private String chatCompletionsUrl(String source, String model) { return (source.equals("custom") ? modelEndpoint(model) : OPENROUTER_ENDPOINT) + "/chat/completions"; }
 
+    private String endpointKey(String endpoint) {
+        String e = normalizeEndpoint(endpoint);
+        if (e.length() == 0) return "";
+        String key = endpointKeys.get(e);
+        return key == null ? "" : key;
+    }
+
+    private void setEndpointKey(String endpoint, String key) {
+        String e = normalizeEndpoint(endpoint);
+        if (e.length() == 0) return;
+        String clean = key == null ? "" : key.trim();
+        if (clean.length() == 0) endpointKeys.remove(e);
+        else endpointKeys.put(e, clean);
+    }
+
+    private String authKeyForUrl(String url) {
+        String u = url == null ? "" : url.trim();
+        if (u.length() == 0) return "";
+        String lower = u.toLowerCase(Locale.US);
+        if (lower.contains("openrouter.ai")) return savedApiKey();
+        String best = "";
+        String bestKey = "";
+        for (String endpoint : customEndpoints) {
+            String e = normalizeEndpoint(endpoint);
+            if (e.length() == 0) continue;
+            if (lower.startsWith(e.toLowerCase(Locale.US)) && e.length() > best.length()) {
+                best = e;
+                bestKey = endpointKey(e);
+            }
+        }
+        return bestKey;
+    }
+
     private void addEndpointFromInput() {
         if (endpointInput == null) return;
         String endpoint = normalizeEndpoint(endpointInput.getText().toString());
         if (endpoint.length() == 0) { toast("enter endpoint"); return; }
+        String key = endpointKeyInput == null ? "" : endpointKeyInput.getText().toString().trim();
         if (!customEndpoints.contains(endpoint)) customEndpoints.add(endpoint);
+        setEndpointKey(endpoint, key);
         saveCustomEndpoints();
+        saveEndpointKeys();
         if ("endpoint".equals(voiceOutputProvider()) && (prefs.getString("voiceTtsEndpoint", "").trim().length() == 0 || endpoint.equals(voiceTtsEndpoint()))) discoverVoiceEndpoint(endpoint);
         endpointInput.setText("");
+        if (endpointKeyInput != null) endpointKeyInput.setText("");
         toast("endpoint added");
         showSettingsPane();
+    }
+
+    private void renameCustomEndpoint(String fromRaw, String toRaw, String key) {
+        String from = normalizeEndpoint(fromRaw);
+        String to = normalizeEndpoint(toRaw);
+        if (to.length() == 0) return;
+        if (from.length() > 0 && !from.equals(to)) {
+            int idx = customEndpoints.indexOf(from);
+            if (idx >= 0) {
+                if (customEndpoints.contains(to)) customEndpoints.remove(idx);
+                else customEndpoints.set(idx, to);
+            } else if (!customEndpoints.contains(to)) {
+                customEndpoints.add(to);
+            }
+            endpointKeys.remove(from);
+            for (String m : new ArrayList<String>(modelEndpoints.keySet())) {
+                if (from.equals(modelEndpoints.get(m))) modelEndpoints.put(m, to);
+            }
+            if (from.equals(normalizeEndpoint(prefs.getString("voiceTranscribeEndpoint", "")))) prefs.edit().putString("voiceTranscribeEndpoint", to).apply();
+            if (from.equals(normalizeEndpoint(prefs.getString("voiceTtsEndpoint", "")))) prefs.edit().putString("voiceTtsEndpoint", to).apply();
+        } else if (!customEndpoints.contains(to)) {
+            customEndpoints.add(to);
+        }
+        setEndpointKey(to, key);
+        saveCustomEndpoints();
+        saveEndpointKeys();
+        saveModelEndpoints();
+        if ("endpoint".equals(voiceOutputProvider()) && (prefs.getString("voiceTtsEndpoint", "").trim().length() == 0 || to.equals(voiceTtsEndpoint()))) discoverVoiceEndpoint(to);
     }
 
     private void removeCustomEndpoint(String endpoint) {
         endpoint = normalizeEndpoint(endpoint);
         boolean removedSelected = false;
         customEndpoints.remove(endpoint);
+        endpointKeys.remove(endpoint);
         for (int i = models.size() - 1; i >= 0; i--) {
             String m = models.get(i);
             if (endpoint.equals(modelEndpoints.get(m))) { if (m.equals(selectedModel())) removedSelected = true; models.remove(i); myModels.remove(m); modelContexts.remove(m); modelSources.remove(m); modelEndpoints.remove(m); }
         }
         if (removedSelected) prefs.edit().remove("model").putBoolean("modelSelected", false).apply();
-        saveCustomEndpoints(); saveModels(); saveMyModels(); saveModelContexts(); saveModelSources(); saveModelEndpoints();
+        saveCustomEndpoints(); saveEndpointKeys(); saveModels(); saveMyModels(); saveModelContexts(); saveModelSources(); saveModelEndpoints();
     }
 
     private void initTts() {
@@ -4650,7 +4810,8 @@ public class MainActivity extends Activity {
         c.setReadTimeout(120000);
         c.setDoOutput(true);
         c.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
-        if (url.toLowerCase(Locale.US).contains("openrouter.ai") && savedApiKey().length() > 0) c.setRequestProperty("Authorization", "Bearer " + savedApiKey());
+        String auth = authKeyForUrl(url);
+        if (auth.length() > 0) c.setRequestProperty("Authorization", "Bearer " + auth);
         OutputStream out = c.getOutputStream();
         if ("openrouter".equals(voiceInputProvider()) || url.toLowerCase(Locale.US).contains("openrouter.ai")) writePart(out, boundary, "model", modelOverride == null ? openRouterTranscriptionModel(prefs.getString("voiceTranscribeModel", "whisper-1")) : modelOverride);
         String fileField = url.contains("/asr") ? "audio_file" : "file";
@@ -5108,8 +5269,8 @@ public class MainActivity extends Activity {
         c.setDoOutput(true);
         c.setRequestProperty("Content-Type", "application/json");
         c.setRequestProperty("Accept", "audio/mpeg, audio/wav, audio/*;q=0.9, */*;q=0.1");
-        String key = savedApiKey();
-        if (endpoint.toLowerCase(Locale.US).contains("openrouter.ai") && key.length() > 0) c.setRequestProperty("Authorization", "Bearer " + key);
+        String key = authKeyForUrl(endpoint);
+        if (key.length() > 0) c.setRequestProperty("Authorization", "Bearer " + key);
         OutputStream os = c.getOutputStream(); os.write(body.toString().getBytes(StandardCharsets.UTF_8)); os.close();
         int code = c.getResponseCode();
         if (code >= 400) throw new RuntimeException(readAll(c.getErrorStream()));
@@ -5904,6 +6065,16 @@ public class MainActivity extends Activity {
     private void loadModelState() {
         String savedEndpoints = prefs.getString("customEndpoints", ""); if (savedEndpoints.length() > 0) for (String e : savedEndpoints.split("\\n")) { String clean = normalizeEndpoint(e); if (clean.length() > 0 && !customEndpoints.contains(clean)) customEndpoints.add(clean); }
         String legacyEndpoint = normalizeEndpoint(prefs.getString("endpointBase", "")); if (legacyEndpoint.length() > 0 && !customEndpoints.contains(legacyEndpoint)) customEndpoints.add(legacyEndpoint);
+        try {
+            JSONObject savedEndpointKeys = new JSONObject(prefs.getString("endpointKeys", "{}"));
+            JSONArray keyNames = savedEndpointKeys.names();
+            if (keyNames != null) for (int i = 0; i < keyNames.length(); i++) {
+                String key = keyNames.getString(i);
+                String value = savedEndpointKeys.optString(key, "").trim();
+                String clean = normalizeEndpoint(key);
+                if (clean.length() > 0 && value.length() > 0) endpointKeys.put(clean, value);
+            }
+        } catch (Exception ignored) { }
         String savedModels = prefs.getString("modelCatalog", prefs.getString("models", "")); if (savedModels.length() > 0) for (String m : savedModels.split("\\n")) { String clean = m.trim(); if (clean.length() > 0 && !models.contains(clean)) models.add(clean); }
         String savedAudioInput = prefs.getString("audioInputModelsV2", ""); if (savedAudioInput.length() > 0) for (String m : savedAudioInput.split("\\n")) { String clean = m.trim(); if (clean.length() > 0) audioInputModels.add(clean); }
         String savedAudio = prefs.getString("audioOutputModelsV2", ""); if (savedAudio.length() > 0) for (String m : savedAudio.split("\\n")) { String clean = m.trim(); if (clean.length() > 0) audioOutputModels.add(clean); }
@@ -6033,6 +6204,11 @@ public class MainActivity extends Activity {
     private void saveReasoningModels() { prefs.edit().putString("reasoningModels", join(new ArrayList<String>(reasoningModels))).apply(); }
     private void saveSpeedModels() { prefs.edit().putString("speedModels", join(new ArrayList<String>(speedModels))).apply(); }
     private void saveCustomEndpoints() { prefs.edit().putString("customEndpoints", join(customEndpoints)).remove("endpointBase").apply(); }
+    private void saveEndpointKeys() {
+        JSONObject o = new JSONObject();
+        try { for (String e : endpointKeys.keySet()) { String key = endpointKeys.get(e); if (key != null && key.length() > 0) o.put(e, key); } } catch (Exception ignored) { }
+        prefs.edit().putString("endpointKeys", o.toString()).apply();
+    }
     private void saveMyModels() { prefs.edit().putString("myModels", join(myModels)).apply(); }
     private String savedApiKey() { return prefs.getString("apiKey", ""); }
     private void saveApiKey() {
