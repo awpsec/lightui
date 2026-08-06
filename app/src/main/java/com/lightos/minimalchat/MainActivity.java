@@ -102,7 +102,7 @@ public class MainActivity extends Activity {
     private static final int MESSAGE_PAGE = 30;
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
-    private static final String APP_VERSION = "1.0.15";
+    private static final String APP_VERSION = "1.0.16";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 64;
@@ -2011,18 +2011,19 @@ public class MainActivity extends Activity {
             final boolean hasThinkingRow = m.role.equals("assistant") && ((m.reasoning.length() > 0 && !m.reasoning.trim().equals("null")) || (LOADING.equals(m.stats) && m.reasoningCapable));
             final boolean hasSearchRow = m.role.equals("assistant") && m.searchSources.size() > 0;
             final boolean hasMemoryRow = m.role.equals("assistant") && m.streamDone && m.memorySaved;
-            TextView role = text(m.role.equals("user") ? "you" : messageModelLabel(m), 11, Color.LTGRAY);
             TextView body = text("", 16, Color.WHITE);
             body.setText(markdownText(m.text + (m.imageBase64.length() == 0 ? "" : "\n[image attached]")));
             body.setLineSpacing(dp(2), 1.0f);
-            if (m.role.equals("user")) {
-                body.setPadding(dp(10), dp(8), dp(10), dp(8));
-                body.setBackground(userMessageBorder());
-            }
             final Msg selectedMessage = m;
             body.setOnLongClickListener(new View.OnLongClickListener() { @Override public boolean onLongClick(View v) { showMessageActions(selectedMessage); return true; } });
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2); lp.setMargins(0, dp(8), 0, 0);
-            messageList.addView(role, lp);
+            if (m.role.equals("user")) {
+                messageList.addView(userMessageBlock(body), userMessageBlockParams());
+            } else {
+                TextView role = text(messageModelLabel(m), 11, Color.LTGRAY);
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+                lp.setMargins(0, dp(8), 0, 0);
+                messageList.addView(role, lp);
+            }
             if (hasThinkingRow) {
                 final Msg thinkingMessage = m;
                 LinearLayout thinkRow = row();
@@ -2068,9 +2069,9 @@ public class MainActivity extends Activity {
                     messageList.addView(src, new LinearLayout.LayoutParams(-1, -2));
                 }
             }
-            LinearLayout.LayoutParams bodyLp = new LinearLayout.LayoutParams(-1, -2);
-            if (m.role.equals("user")) bodyLp.setMargins(0, dp(2), 0, dp(2));
-            messageList.addView(body, bodyLp);
+            if (!m.role.equals("user")) {
+                messageList.addView(body, new LinearLayout.LayoutParams(-1, -2));
+            }
             if (hasMemoryRow) {
                 final Msg memoryMessage = m;
                 boolean removedMemory = m.memorySavedText.startsWith("__REMOVED__\n");
@@ -6511,6 +6512,49 @@ public class MainActivity extends Activity {
         g.setColor(Color.BLACK);
         g.setStroke(1, Color.rgb(72, 72, 72));
         return g;
+    }
+
+    private LinearLayout.LayoutParams userMessageBlockParams() {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.setMargins(0, dp(10), 0, dp(4));
+        return lp;
+    }
+
+    private View userMessageBlock(TextView body) {
+        // Fieldset-style user bubble: light outline with "you" sitting on the top stroke.
+        FrameLayout wrap = new FrameLayout(this);
+        wrap.setClipChildren(false);
+        wrap.setClipToPadding(false);
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setBackground(userMessageBorder());
+        box.setPadding(dp(10), dp(12), dp(10), dp(8));
+        body.setPadding(0, 0, 0, 0);
+        box.addView(body, new LinearLayout.LayoutParams(-1, -2));
+
+        TextView you = text("you", 11, Color.LTGRAY);
+        you.setBackgroundColor(Color.BLACK);
+        you.setIncludeFontPadding(false);
+        you.setPadding(dp(6), 0, dp(6), 0);
+        you.setSingleLine(true);
+        you.setGravity(Gravity.CENTER_VERTICAL);
+
+        // Leave room so the top border runs through the vertical center of "you".
+        int labelHalf = dp(7);
+        FrameLayout.LayoutParams boxLp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT);
+        boxLp.topMargin = labelHalf;
+        wrap.addView(box, boxLp);
+
+        FrameLayout.LayoutParams youLp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.LEFT | Gravity.TOP);
+        youLp.leftMargin = dp(10);
+        wrap.addView(you, youLp);
+        return wrap;
     }
 
     public class MicButton extends View { Paint p = new Paint(Paint.ANTI_ALIAS_FLAG); public MicButton(Context c) { super(c); setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { startVoice(); } }); } @Override protected void onDraw(Canvas c) { p.setColor(Color.WHITE); p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(dp(2)); p.setStrokeCap(Paint.Cap.ROUND); float cx=getWidth()/2f, cy=getHeight()/2f; c.drawRoundRect(cx-dp(4), cy-dp(10), cx+dp(4), cy+dp(4), dp(4), dp(4), p); c.drawLine(cx-dp(10), cy-dp(2), cx-dp(10), cy+dp(3), p); c.drawArc(cx-dp(10), cy-dp(2), cx+dp(10), cy+dp(16), 0, 180, false, p); c.drawLine(cx+dp(10), cy-dp(2), cx+dp(10), cy+dp(3), p); c.drawLine(cx, cy+dp(15), cx, cy+dp(20), p); c.drawLine(cx-dp(6), cy+dp(20), cx+dp(6), cy+dp(20), p); } }
