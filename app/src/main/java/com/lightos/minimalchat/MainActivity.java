@@ -102,7 +102,7 @@ public class MainActivity extends Activity {
     private static final int MESSAGE_PAGE = 30;
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
-    private static final String APP_VERSION = "1.0.13";
+    private static final String APP_VERSION = "1.0.14";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 64;
@@ -550,19 +550,41 @@ public class MainActivity extends Activity {
     }
 
     private void maybeShowWelcome() {
-        if (hookVoiceMode || prefs == null || prefs.getBoolean("welcomeShown", false)) return;
+        if (hookVoiceMode || prefs == null) return;
+        if (prefs.getBoolean("welcomeShown", false)) return;
+        // Upgrades / existing installs never had this flag — don't treat them as first launch.
+        if (hasPriorAppUse()) {
+            prefs.edit().putBoolean("welcomeShown", true).commit();
+            return;
+        }
         if (updateDialogShowing || voiceMode) return;
         showWelcomeDialog();
     }
 
+    private boolean hasPriorAppUse() {
+        if (prefs == null) return false;
+        if (savedApiKey().length() > 0) return true;
+        if (customEndpoints.size() > 0) return true;
+        if (chats.size() > 0) return true;
+        if (prefs.getBoolean("modelSelected", false)) return true;
+        if (prefs.getLong("modelsRefreshedAt", 0) > 0) return true;
+        if (prefs.getString("memoryMd", "").trim().length() > 0) return true;
+        if (prefs.contains("latestGitHubVersion")) return true;
+        if (prefs.contains("silencedUpdateVersion")) return true;
+        if (prefs.contains("latestVersionCheckedAt")) return true;
+        File store = new File(getFilesDir(), CHATS_STORE);
+        return store.exists() && store.length() > 2;
+    }
+
     private void showWelcomeDialog() {
         if (prefs == null) return;
+        // Persist immediately so updates / relaunches never re-show this.
+        prefs.edit().putBoolean("welcomeShown", true).commit();
         final Dialog d = panel("welcome");
         d.setCancelable(true);
         d.setCanceledOnTouchOutside(true);
         d.setOnDismissListener(new android.content.DialogInterface.OnDismissListener() {
             @Override public void onDismiss(android.content.DialogInterface dialog) {
-                prefs.edit().putBoolean("welcomeShown", true).apply();
                 maybeShowUpdateDialog();
             }
         });
