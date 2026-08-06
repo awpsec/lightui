@@ -181,6 +181,8 @@ public class MainActivity extends Activity {
     private final ArrayList<Msg> messages = new ArrayList<Msg>();
     private final ArrayList<Chat> chats = new ArrayList<Chat>();
     private final ArrayList<String> lastSearchSources = new ArrayList<String>();
+    private String lastSearchResult = "";
+    private String lastSearchQuery = "";
     private final HashSet<String> selectedChats = new HashSet<String>();
     private final Handler ui = new Handler(Looper.getMainLooper());
     private String currentChatId = "", selectedFolder = "Inbox", projectView = "", expandedFolder = "", imageBase64 = "", imageMime = "image/jpeg", pendingVoiceText = "", replyQuote = "", voiceThinkingWord = "thinking", settingsPage = "";
@@ -2051,7 +2053,8 @@ public class MainActivity extends Activity {
             Msg m = messages.get(i);
             final boolean isSearching = SEARCHING.equals(m.stats);
             final boolean hasThinkingRow = m.role.equals("assistant") && ((m.reasoning.length() > 0 && !m.reasoning.trim().equals("null")) || (LOADING.equals(m.stats) && m.reasoningCapable));
-            final boolean hasSearchRow = m.role.equals("assistant") && m.searchSources.size() > 0 && !isSearching;
+            // Only show gathered sources after the turn finishes — mid-stream URL lists feel like a premature "search done".
+            final boolean hasSearchRow = m.role.equals("assistant") && m.searchSources.size() > 0 && m.streamDone && !isSearching;
             final boolean hasMemoryRow = m.role.equals("assistant") && m.streamDone && m.memorySaved;
             TextView body = text("", 16, Color.WHITE);
             String bodyText = "assistant".equals(m.role) ? sanitizeAssistantText(m.text) : (m.text == null ? "" : m.text);
@@ -2085,9 +2088,6 @@ public class MainActivity extends Activity {
                     jump.word = "thinking";
                     jump.bind(m);
                     thinking = jump;
-                } else if (!m.streamDone && !isSearching) {
-                    long elapsed = m.thoughtMs > 0 ? m.thoughtMs : Math.max(1, System.currentTimeMillis() - m.startedAt);
-                    thinking = text("thought for " + thoughtDuration(elapsed), 11, Color.rgb(135,135,135));
                 } else {
                     long doneMs = m.thoughtMs > 0 ? m.thoughtMs : Math.max(1, System.currentTimeMillis() - m.startedAt);
                     thinking = text("thought for " + thoughtDuration(doneMs), 11, Color.rgb(135,135,135));
@@ -2122,10 +2122,10 @@ public class MainActivity extends Activity {
                 messageList.addView(searchRow, new LinearLayout.LayoutParams(-1, -2));
             } else if (hasSearchRow) {
                 final Msg searchMessage = m;
-                TextView searched = text("searched " + m.searchSources.size() + " sources" + (m.searchExpanded ? " ˅" : " ›"), 11, Color.rgb(135,135,135));
-                searched.setGravity(Gravity.CENTER_VERTICAL);
-                searched.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { searchMessage.searchExpanded = !searchMessage.searchExpanded; renderMessages(); } });
-                messageList.addView(searched, new LinearLayout.LayoutParams(-1, dp(24)));
+                TextView gathered = text("gathered " + m.searchSources.size() + " sources" + (m.searchExpanded ? " ˅" : " ›"), 11, Color.rgb(135,135,135));
+                gathered.setGravity(Gravity.CENTER_VERTICAL);
+                gathered.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { searchMessage.searchExpanded = !searchMessage.searchExpanded; renderMessages(); } });
+                messageList.addView(gathered, new LinearLayout.LayoutParams(-1, dp(24)));
                 if (m.searchExpanded) {
                     TextView src = text(join(m.searchSources), 12, Color.rgb(160,160,160));
                     src.setLineSpacing(dp(1), 1.0f);
@@ -2558,23 +2558,35 @@ public class MainActivity extends Activity {
                 reasoning.append(extractMessageReasoning(resp));
             }
             long end = System.nanoTime();
-            String finalAnswer = answer.toString();
-            String toolQuery = webSearchToolQuery(finalAnswer);
-            if (toolQuery.length() > 0) {
+            String finalAnswer = sanitizeAssistantText(answer.toString());
+            String toolQuery = webSearchToolQuery(answer.toString());
+            if (toolQuery.length() == 0) toolQuery = webSearchToolQuery(reasoning.toString());
+            boolean needsSearchAnswer = toolQuery.length() > 0
+                    || ((finalAnswer.length() == 0 || looksLikeToolResidue(answer.toString()))
+                        && (lastSearchResult.length() > 0 || assistant.searchSources.size() > 0));
+            if (needsSearchAnswer) {
                 runOnUiThread(new Runnable() { @Override public void run() {
+                    if (assistant.thoughtMs == 0 && assistant.reasoningCapable) {
+                        assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt);
+                    }
                     assistant.text = "";
                     assistant.stats = SEARCHING;
                     forceAutoScrollBottom = userAtChatBottom;
                     renderMessages();
                 } });
-                final String result = webSearch(toolQuery);
-                assistant.searchSources.clear();
-                assistant.searchSources.addAll(extractSearchSources(result));
-                finalAnswer = sanitizeAssistantText(followupAfterWebSearch(key, source, model, toolQuery, cleanSearchArtifacts(result), false));
-                if (finalAnswer.length() == 0 || looksLikeToolResidue(finalAnswer)) {
-                    finalAnswer = sanitizeAssistantText(followupAfterWebSearch(key, source, model, toolQuery, cleanSearchArtifacts(result), true));
+                String result = lastSearchResult;
+                String queryForFollowup = lastSearchQuery.length() > 0 ? lastSearchQuery : (userText == null ? "" : userText.trim());
+                if (toolQuery.length() > 0) {
+                    queryForFollowup = toolQuery;
+                    result = webSearch(toolQuery);
+                    rememberSearchResult(toolQuery, result);
                 }
-                if (finalAnswer.length() == 0) finalAnswer = "I searched, but couldn't form an answer from the results.";
+                if (result == null) result = "";
+                if (result.length() > 0) {
+                    assistant.searchSources.clear();
+                    assistant.searchSources.addAll(extractSearchSources(result));
+                }
+                finalAnswer = answerAfterWebSearch(key, source, model, queryForFollowup, result, userText);
             }
             String memoryNote = memoryToolNote(finalAnswer);
             ArrayList<String> removeNotes = memoryRemoveToolNotes(finalAnswer);
@@ -3030,6 +3042,8 @@ public class MainActivity extends Activity {
 
     private String buildSearchContext(String userText) throws Exception {
         lastSearchSources.clear();
+        lastSearchResult = "";
+        lastSearchQuery = "";
         boolean forceSearch = prefs.getBoolean("searchNext", false);
         if (forceSearch) prefs.edit().remove("searchNext").apply();
         String query = searchQuery(userText);
@@ -3040,11 +3054,28 @@ public class MainActivity extends Activity {
         if (webSearchChat && (query == null || query.length() == 0)) query = userText == null ? "" : userText.trim();
         if (forceSearch && (query == null || query.length() == 0)) query = userText == null ? "" : userText.trim();
         if (query.length() == 0) return "";
-        String result = webSearch(query);
+        String result = webSearch(datedSearchQuery(query));
         if (result.length() == 0) return "";
-        lastSearchSources.addAll(extractSearchSources(result));
-        if (result.length() > 6000) result = result.substring(0, 6000);
-        return "Web search has already been performed by the app. Do not emit tool calls, XML, function calls, or requests to search. Use the sources below to answer the user's question directly, interpreting relative times with the phone's current local date/time. Cite plain URLs only when useful; do not emit bracketed line citations like [1%L1-L9].\n\nQuery: " + query + "\n\n" + cleanSearchArtifacts(result);
+        rememberSearchResult(query, result);
+        String clipped = result.length() > 6000 ? result.substring(0, 6000) : result;
+        return "Web search has already been performed by the app. Do not emit tool calls, XML, function calls, or requests to search. Use the sources below to answer the user's question directly, interpreting relative times with the phone's current local date/time. Cite plain URLs only when useful; do not emit bracketed line citations like [1%L1-L9].\n\nQuery: " + query + "\n\n" + cleanSearchArtifacts(clipped);
+    }
+
+    private void rememberSearchResult(String query, String result) {
+        lastSearchQuery = query == null ? "" : query.trim();
+        lastSearchResult = result == null ? "" : result;
+        lastSearchSources.clear();
+        lastSearchSources.addAll(extractSearchSources(lastSearchResult));
+    }
+
+    private String datedSearchQuery(String query) {
+        String q = query == null ? "" : query.trim();
+        if (q.length() == 0) return q;
+        String lower = q.toLowerCase(Locale.US);
+        if (lower.contains("yesterday") || lower.contains("today") || lower.contains("last night") || lower.matches(".*\\b20\\d{2}\\b.*")) {
+            return q + " " + currentDateString();
+        }
+        return q;
     }
 
     private String cleanSearchArtifacts(String s) {
@@ -3085,25 +3116,51 @@ public class MainActivity extends Activity {
         return "";
     }
 
-    private String followupAfterWebSearch(String key, String source, String model, String query, String result, boolean retry) throws Exception {
+    private String answerAfterWebSearch(String key, String source, String model, String query, String result, String userText) {
+        String cleaned = result == null ? "" : cleanSearchArtifacts(result);
+        String q = query == null || query.trim().length() == 0 ? (userText == null ? "" : userText.trim()) : query.trim();
+        try {
+            String out = sanitizeAssistantText(followupAfterWebSearch(key, source, model, q, cleaned, userText, false));
+            if (out.length() == 0 || looksLikeToolResidue(out)) {
+                out = sanitizeAssistantText(followupAfterWebSearch(key, source, model, q, cleaned, userText, true));
+            }
+            if (out.length() > 0 && !looksLikeToolResidue(out)) return out;
+        } catch (Exception ignored) { }
+        if (assistantSearchFallback(cleaned).length() > 0) return assistantSearchFallback(cleaned);
+        return "I gathered sources, but couldn't form a clear answer from them.";
+    }
+
+    private String assistantSearchFallback(String result) {
+        if (result == null || result.trim().length() == 0) return "";
+        // Last resort: surface the first useful snippet so the turn is never blank after a search.
+        String[] lines = result.replace('\r', '\n').split("\n");
+        StringBuilder b = new StringBuilder();
+        for (String line : lines) {
+            String t = line.trim();
+            if (t.length() < 28) continue;
+            if (t.startsWith("http://") || t.startsWith("https://")) continue;
+            if (t.matches("^\\d+\\.\\s*.*") && t.length() < 40) continue;
+            b.append(t);
+            break;
+        }
+        if (b.length() == 0) return "";
+        return "From the gathered sources: " + b.toString();
+    }
+
+    private String followupAfterWebSearch(String key, String source, String model, String query, String result, String userText, boolean retry) throws Exception {
         if (result.length() > 6000) result = result.substring(0, 6000);
         JSONObject body = new JSONObject();
         body.put("model", model);
         JSONArray arr = new JSONArray();
         String system = retry
-                ? "Your previous reply was only a tool call or empty. The web search already ran. Answer the user's question now in plain text using the results below. Do not output tool calls, XML, function calls, google(...), or <|tool_call|> markers.\n\nQuery: " + query + "\n\n" + cleanSearchArtifacts(result)
-                : "The previous assistant response requested a web search tool. The app already executed it. Do not output tool calls, XML, function calls, google(...), or <|tool_call|> markers. Answer the user's question directly using these search results, citing URLs when helpful.\n\nQuery: " + query + "\n\n" + cleanSearchArtifacts(result);
+                ? "Your previous reply was only a tool call or empty. The web search already ran. Answer the user's question now in plain text using the results below. Do not output tool calls, XML, function calls, google(...), or <|tool_call|> markers.\n\n"
+                : "Web search results are provided below. Answer the user's question directly in plain text. Do not output tool calls, XML, function calls, google(...), or <|tool_call|> markers. Prefer concrete facts (scores, dates, final results) from the snippets; cite a URL only when helpful.\n\n";
+        system += buildCurrentTimeContext() + "\n\nQuery: " + query + "\n\n" + cleanSearchArtifacts(result);
         arr.put(new JSONObject().put("role", "system").put("content", system));
-        arr.put(new JSONObject().put("role", "system").put("content", buildCurrentTimeContext()));
         String folderInstruction = buildFolderInstructionContext();
         if (folderInstruction.length() > 0) arr.put(new JSONObject().put("role", "system").put("content", folderInstruction));
-        for (Msg m : messages) {
-            if (isBusyStats(m.stats)) continue;
-            JSONObject one = new JSONObject();
-            one.put("role", m.role);
-            one.put("content", requestText(m));
-            arr.put(one);
-        }
+        String ask = userText == null || userText.trim().length() == 0 ? query : userText.trim();
+        arr.put(new JSONObject().put("role", "user").put("content", ask));
         body.put("messages", arr);
         body.put("stream", false);
         HttpURLConnection c = (HttpURLConnection) new URL(chatCompletionsUrl(source, model)).openConnection();
@@ -3118,7 +3175,30 @@ public class MainActivity extends Activity {
         int code = c.getResponseCode();
         String raw = readAll(code >= 400 ? c.getErrorStream() : c.getInputStream());
         if (code >= 400) throw new RuntimeException(raw);
-        return extractMessageText(new JSONObject(raw));
+        return extractFollowupAnswerText(new JSONObject(raw));
+    }
+
+    private String extractFollowupAnswerText(JSONObject resp) throws Exception {
+        String direct = extractMessageText(resp);
+        if (direct.length() > 0 && !looksLikeToolResidue(direct)) return direct;
+        JSONArray choices = resp.optJSONArray("choices");
+        if (choices == null || choices.length() == 0) return direct;
+        JSONObject msg = choices.getJSONObject(0).optJSONObject("message");
+        if (msg == null) return direct;
+        // Some reasoning models leave content empty and park usable text elsewhere.
+        String[] keys = new String[]{"content", "reasoning", "reasoning_content", "thinking", "output_text"};
+        for (String key : keys) {
+            String v = cleanJsonString(msg, key);
+            v = sanitizeAssistantText(stripReasoningTags(v));
+            if (v.length() > 0 && !looksLikeToolResidue(v) && v.length() < 4000) {
+                // Avoid dumping long private chain-of-thought as the user-visible answer.
+                if ("reasoning".equals(key) || "reasoning_content".equals(key) || "thinking".equals(key)) {
+                    if (v.length() > 600) continue;
+                }
+                return v;
+            }
+        }
+        return sanitizeAssistantText(direct);
     }
 
     private String followupAfterMemoryTool(String key, String source, String model, String userText) {
@@ -3663,13 +3743,13 @@ public class MainActivity extends Activity {
         if (lower.startsWith("/search ")) return trimmed.substring(8).trim();
         if (!prefs.getBoolean("autoSearch", false)) return "";
         if (!isLikelyQuestion(lower)) return "";
-        if (lower.contains("right now") || lower.contains("currently") || lower.contains("at the moment") || lower.contains("as of now") || lower.contains("today") || lower.contains("latest") || lower.contains("recent") || lower.contains("newest") || lower.contains("current ") || lower.contains("current-") || lower.contains("news") || lower.contains("this week") || lower.contains("this month") || lower.contains("2025") || lower.contains("2026")) return trimmed;
+        if (lower.contains("right now") || lower.contains("currently") || lower.contains("at the moment") || lower.contains("as of now") || lower.contains("today") || lower.contains("yesterday") || lower.contains("last night") || lower.contains("latest") || lower.contains("recent") || lower.contains("newest") || lower.contains("current ") || lower.contains("current-") || lower.contains("news") || lower.contains("score") || lower.contains("this week") || lower.contains("this month") || lower.contains("2025") || lower.contains("2026")) return trimmed;
         return "";
     }
 
     private boolean shouldVoiceAutoSearch(String text) {
         String lower = text == null ? "" : text.toLowerCase(Locale.US);
-        return lower.contains("search for") || lower.contains("search the web") || lower.contains("web search") || lower.contains("look up") || lower.contains("google") || lower.contains("today") || lower.contains("right now") || lower.contains("current") || lower.contains("latest") || lower.contains("news") || lower.contains("this week") || lower.contains("this month");
+        return lower.contains("search for") || lower.contains("search the web") || lower.contains("web search") || lower.contains("look up") || lower.contains("google") || lower.contains("today") || lower.contains("yesterday") || lower.contains("last night") || lower.contains("right now") || lower.contains("current") || lower.contains("latest") || lower.contains("news") || lower.contains("score") || lower.contains("this week") || lower.contains("this month");
     }
 
     private boolean isLikelyQuestion(String lower) {
@@ -3677,7 +3757,8 @@ public class MainActivity extends Activity {
     }
 
     private String webSearch(String query) throws Exception {
-        return "brave".equals(searchProvider()) ? braveSearch(query) : jinaSearch(query);
+        String q = datedSearchQuery(query);
+        return "brave".equals(searchProvider()) ? braveSearch(q) : jinaSearch(q);
     }
 
     private String jinaSearch(String query) throws Exception {
