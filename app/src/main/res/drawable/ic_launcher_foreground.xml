@@ -4,22 +4,18 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- Full-bleed black field -->
-    <path
-        android:fillColor="#FF000000"
-        android:pathData="M0,0h108v108h-108z" />
-    <!-- Large white panel -->
+    <!-- Large white panel — fills most of the adaptive safe zone -->
     <path
         android:fillColor="#FFFFFFFF"
-        android:pathData="M16,16h76v76h-76z" />
+        android:pathData="M22,22h64v64h-64z" />
     <!-- Bold chat lines -->
     <path
         android:fillColor="#FF000000"
-        android:pathData="M30,34h48v10h-48z" />
+        android:pathData="M34,38h40v8h-40z" />
     <path
         android:fillColor="#FF000000"
-        android:pathData="M30,52h48v10h-48z" />
+        android:pathData="M34,52h40v8h-40z" />
     <path
         android:fillColor="#FF000000"
-        android:pathData="M30,70h28v10h-28z" />
+        android:pathData="M34,66h24v8h-24z" />
 </vector>

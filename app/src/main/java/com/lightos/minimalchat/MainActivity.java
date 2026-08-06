@@ -102,7 +102,7 @@ public class MainActivity extends Activity {
     private static final int MESSAGE_PAGE = 30;
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
-    private static final String APP_VERSION = "1.0.11";
+    private static final String APP_VERSION = "1.0.12";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 64;
