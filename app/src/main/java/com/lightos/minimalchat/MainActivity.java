@@ -28,6 +28,7 @@ import android.media.MediaPlayer;
 import android.media.MediaRecorder;
 import android.net.Uri;
 import android.provider.ContactsContract;
+import android.provider.Settings;
 import android.os.Bundle;
 import android.os.Build;
 import android.os.Handler;
@@ -101,21 +102,29 @@ public class MainActivity extends Activity {
     private static final int MESSAGE_PAGE = 30;
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
-    private static final String APP_VERSION = "1.0.5";
+    private static final String APP_VERSION = "1.0.6";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 64;
     private static final long MODEL_AUTO_REFRESH_MS = 60L * 60L * 1000L;
+    private static final long VERSION_CHECK_MS = 3L * 60L * 60L * 1000L;
     private static final int CONTACTS_PERM = 12;
+    private static final int INSTALL_PERM = 14;
     private static final String PHONE_UTTERANCE = "phone-command";
+    private static final String GITHUB_RELEASES_LATEST = "https://api.github.com/repos/awpsec/lightui/releases/latest";
     private SharedPreferences prefs;
     private Runnable pendingPersist;
     private Runnable pendingStreamRender;
     private long lastStreamRenderAt = 0;
     private boolean chatsDirty = false;
     private boolean modelsRefreshing = false;
+    private boolean updateDialogShowing = false;
+    private boolean updateDownloading = false;
     private Intent pendingLaunchIntent;
     private PhoneCommand pendingPhoneCommand;
+    private String pendingInstallVersion = "";
+    private String pendingInstallApkUrl = "";
+    private Dialog updateDialog;
     private FrameLayout screen;
     private LinearLayout root, messageList, folderList, chatList;
     private ScrollView scroll, settingsScrollView;
@@ -186,11 +195,23 @@ public class MainActivity extends Activity {
         handleIncoming(getIntent());
         if (hookVoiceMode && !voiceMode) startVoice(true);
         maybeAutoRefreshModels(false);
+        if (!hookVoiceMode) maybeCheckLatestVersion(true);
     }
 
     @Override protected void onResume() {
         super.onResume();
         maybeAutoRefreshModels(false);
+        if (!hookVoiceMode) {
+            maybeShowUpdateDialog();
+            maybeCheckLatestVersion(true);
+            if (pendingInstallApkUrl.length() > 0 && canInstallPackages()) {
+                String url = pendingInstallApkUrl;
+                String ver = pendingInstallVersion;
+                pendingInstallApkUrl = "";
+                pendingInstallVersion = "";
+                downloadAndInstallUpdate(ver, url);
+            }
+        }
     }
 
     @Override protected void onNewIntent(Intent intent) { super.onNewIntent(intent); handleIncoming(intent); }
@@ -521,35 +542,195 @@ public class MainActivity extends Activity {
     }
 
     private void addVersionFooter(LinearLayout settings) {
-        maybeCheckLatestVersion();
+        maybeCheckLatestVersion(false);
         TextView v = text(versionFooterText(), 11, Color.rgb(130,130,130));
         v.setGravity(Gravity.CENTER_VERTICAL);
-        settings.addView(v, new LinearLayout.LayoutParams(-1, dp(22)));
+        v.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View view) {
+            String latest = prefs.getString("latestGitHubVersion", "");
+            String apk = prefs.getString("latestGitHubApkUrl", "");
+            if (latest.length() > 0 && apk.length() > 0 && compareVersions(latest, APP_VERSION) > 0) showUpdateDialog(latest, apk);
+            else { prefs.edit().remove("latestVersionCheckedAt").apply(); maybeCheckLatestVersion(true); toast("checking for updates"); }
+        } });
+        settings.addView(v, new LinearLayout.LayoutParams(-1, dp(28)));
     }
 
     private String versionFooterText() {
         String latest = prefs == null ? "" : prefs.getString("latestGitHubVersion", "");
         boolean outdated = latest.length() > 0 && compareVersions(latest, APP_VERSION) > 0;
-        return "version " + APP_VERSION + (outdated ? " - outdated!" : "");
+        return "version " + APP_VERSION + (outdated ? " - update available" : "");
     }
 
-    private void maybeCheckLatestVersion() {
-        if (prefs == null) return;
+    private void maybeCheckLatestVersion(final boolean prompt) {
+        if (prefs == null || hookVoiceMode) return;
         long now = System.currentTimeMillis();
-        if (now - prefs.getLong("latestVersionCheckedAt", 0) < 6L * 60L * 60L * 1000L) return;
+        long last = prefs.getLong("latestVersionCheckedAt", 0);
+        if (now - last < VERSION_CHECK_MS) {
+            if (prompt) maybeShowUpdateDialog();
+            return;
+        }
         prefs.edit().putLong("latestVersionCheckedAt", now).apply();
         new Thread(new Runnable() { @Override public void run() {
             try {
-                HttpURLConnection c = (HttpURLConnection) new URL("https://api.github.com/repos/awpsec/lightui/releases/latest").openConnection();
-                c.setConnectTimeout(10000); c.setReadTimeout(10000); c.setRequestProperty("Accept", "application/vnd.github+json"); c.setRequestProperty("User-Agent", "lightui-android");
+                HttpURLConnection c = (HttpURLConnection) new URL(GITHUB_RELEASES_LATEST).openConnection();
+                c.setConnectTimeout(10000);
+                c.setReadTimeout(15000);
+                c.setRequestProperty("Accept", "application/vnd.github+json");
+                c.setRequestProperty("User-Agent", "lightui-android");
                 if (c.getResponseCode() >= 400) return;
-                final String tag = new JSONObject(readAll(c.getInputStream())).optString("tag_name", "").replaceFirst("^[vV]", "").trim();
-                if (tag.length() > 0) {
-                    prefs.edit().putString("latestGitHubVersion", tag).apply();
-                    runOnUiThread(new Runnable() { @Override public void run() { if (pane == 2 && settingsPage.length() == 0) showSettingsPane(); } });
-                }
+                JSONObject release = new JSONObject(readAll(c.getInputStream()));
+                final String tag = release.optString("tag_name", "").replaceFirst("^[vV]", "").trim();
+                final String apkUrl = findReleaseApkUrl(release);
+                if (tag.length() == 0) return;
+                prefs.edit().putString("latestGitHubVersion", tag).putString("latestGitHubApkUrl", apkUrl).apply();
+                runOnUiThread(new Runnable() { @Override public void run() {
+                    if (pane == 2 && settingsPage.length() == 0) showSettingsPane();
+                    if (prompt) maybeShowUpdateDialog();
+                } });
             } catch (Exception ignored) { }
         } }).start();
+    }
+
+    private String findReleaseApkUrl(JSONObject release) {
+        JSONArray assets = release == null ? null : release.optJSONArray("assets");
+        if (assets == null) return "";
+        String fallback = "";
+        for (int i = 0; i < assets.length(); i++) {
+            JSONObject a = assets.optJSONObject(i);
+            if (a == null) continue;
+            String name = a.optString("name", "").toLowerCase(Locale.US);
+            String url = a.optString("browser_download_url", "");
+            if (url.length() == 0 || !name.endsWith(".apk")) continue;
+            if ("lightui-release.apk".equals(name) || name.contains("lightui")) return url;
+            if (fallback.length() == 0) fallback = url;
+        }
+        return fallback;
+    }
+
+    private void maybeShowUpdateDialog() {
+        if (hookVoiceMode || prefs == null || updateDialogShowing || updateDownloading || voiceMode) return;
+        String latest = prefs.getString("latestGitHubVersion", "");
+        String apkUrl = prefs.getString("latestGitHubApkUrl", "");
+        if (latest.length() == 0 || apkUrl.length() == 0) return;
+        if (compareVersions(latest, APP_VERSION) <= 0) return;
+        if (latest.equals(prefs.getString("silencedUpdateVersion", ""))) return;
+        showUpdateDialog(latest, apkUrl);
+    }
+
+    private void showUpdateDialog(final String version, final String apkUrl) {
+        if (updateDialogShowing || version == null || version.length() == 0 || apkUrl == null || apkUrl.length() == 0) return;
+        if (updateDialog != null) try { updateDialog.dismiss(); } catch (Exception ignored) { }
+        updateDialogShowing = true;
+        final Dialog d = panel("update");
+        updateDialog = d;
+        d.setCancelable(true);
+        d.setOnDismissListener(new android.content.DialogInterface.OnDismissListener() {
+            @Override public void onDismiss(android.content.DialogInterface dialog) {
+                updateDialogShowing = false;
+                if (updateDialog == d) updateDialog = null;
+            }
+        });
+        LinearLayout box = panelBox();
+        box.addView(panelTitle("version " + version + " is available!"));
+        TextView msg = text("a newer lightui build is on github. update now, dismiss for later, or silence this version.", 13, Color.LTGRAY);
+        msg.setPadding(0, 0, 0, dp(16));
+        box.addView(msg);
+        TextView update = panelAction("update");
+        TextView dismiss = panelAction("dismiss");
+        TextView silence = panelAction("silence");
+        update.setTextColor(Color.WHITE);
+        update.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
+            d.dismiss();
+            beginUpdateInstall(version, apkUrl);
+        } });
+        dismiss.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); } });
+        silence.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
+            prefs.edit().putString("silencedUpdateVersion", version).apply();
+            d.dismiss();
+            toast("silenced " + version);
+        } });
+        box.addView(update, new LinearLayout.LayoutParams(-1, dp(48)));
+        box.addView(dismiss, new LinearLayout.LayoutParams(-1, dp(48)));
+        box.addView(silence, new LinearLayout.LayoutParams(-1, dp(48)));
+        showPanel(d, box);
+    }
+
+    private void beginUpdateInstall(String version, String apkUrl) {
+        if (updateDownloading) { toast("download already running"); return; }
+        if (!canInstallPackages()) {
+            pendingInstallVersion = version == null ? "" : version;
+            pendingInstallApkUrl = apkUrl == null ? "" : apkUrl;
+            toast("allow app installs");
+            try {
+                Intent i = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName()));
+                startActivity(i);
+            } catch (Exception e) {
+                toast("enable install unknown apps in settings");
+            }
+            return;
+        }
+        downloadAndInstallUpdate(version, apkUrl);
+    }
+
+    private boolean canInstallPackages() {
+        if (Build.VERSION.SDK_INT < 26) return true;
+        try { return getPackageManager().canRequestPackageInstalls(); } catch (Exception e) { return true; }
+    }
+
+    private void downloadAndInstallUpdate(final String version, final String apkUrl) {
+        if (apkUrl == null || apkUrl.length() == 0) { toast("no apk url"); return; }
+        if (updateDownloading) return;
+        updateDownloading = true;
+        toast("downloading " + version + "...");
+        new Thread(new Runnable() { @Override public void run() {
+            File out = null;
+            try {
+                HttpURLConnection c = (HttpURLConnection) new URL(apkUrl).openConnection();
+                c.setConnectTimeout(20000);
+                c.setReadTimeout(120000);
+                c.setInstanceFollowRedirects(true);
+                c.setRequestProperty("User-Agent", "lightui-android");
+                c.setRequestProperty("Accept", "application/octet-stream,*/*");
+                int code = c.getResponseCode();
+                if (code >= 400) throw new RuntimeException("download failed (" + code + ")");
+                out = new File(getCacheDir(), "lightui-update.apk");
+                InputStream in = c.getInputStream();
+                FileOutputStream fos = new FileOutputStream(out);
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) >= 0) fos.write(buf, 0, n);
+                fos.getFD().sync();
+                fos.close();
+                in.close();
+                if (out.length() < 1024) throw new RuntimeException("download too small");
+                final File apk = out;
+                runOnUiThread(new Runnable() { @Override public void run() {
+                    updateDownloading = false;
+                    toast("installing " + version);
+                    installUpdateApk(apk);
+                } });
+            } catch (Exception e) {
+                if (out != null) try { out.delete(); } catch (Exception ignored) { }
+                final String msg = friendlyError(e);
+                runOnUiThread(new Runnable() { @Override public void run() {
+                    updateDownloading = false;
+                    toast("update failed: " + msg);
+                } });
+            }
+        } }).start();
+    }
+
+    private void installUpdateApk(File apk) {
+        if (apk == null || !apk.exists()) { toast("apk missing"); return; }
+        try {
+            Uri uri = ApkProvider.uriForFile(this, apk);
+            Intent i = new Intent(Intent.ACTION_VIEW);
+            i.setDataAndType(uri, "application/vnd.android.package-archive");
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+        } catch (Exception e) {
+            toast("install failed: " + friendlyError(e));
+        }
     }
 
     private int compareVersions(String a, String b) {
