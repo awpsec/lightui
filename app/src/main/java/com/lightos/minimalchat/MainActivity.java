@@ -102,14 +102,16 @@ public class MainActivity extends Activity {
     private static final int MESSAGE_PAGE = 30;
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
-    private static final String APP_VERSION = "1.0.6";
+    private static final String APP_VERSION = "1.0.7";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 64;
     private static final long MODEL_AUTO_REFRESH_MS = 60L * 60L * 1000L;
     private static final long VERSION_CHECK_MS = 3L * 60L * 60L * 1000L;
     private static final int CONTACTS_PERM = 12;
+    private static final int CALL_PERM = 13;
     private static final int INSTALL_PERM = 14;
+    private boolean forceDialFallback = false;
     private static final String PHONE_UTTERANCE = "phone-command";
     private static final String GITHUB_RELEASES_LATEST = "https://api.github.com/repos/awpsec/lightui/releases/latest";
     private SharedPreferences prefs;
@@ -1815,6 +1817,10 @@ public class MainActivity extends Activity {
             TextView body = text("", 16, Color.WHITE);
             body.setText(markdownText(m.text + (m.imageBase64.length() == 0 ? "" : "\n[image attached]")));
             body.setLineSpacing(dp(2), 1.0f);
+            if (m.role.equals("user")) {
+                body.setPadding(dp(10), dp(8), dp(10), dp(8));
+                body.setBackground(userMessageBorder());
+            }
             final Msg selectedMessage = m;
             body.setOnLongClickListener(new View.OnLongClickListener() { @Override public boolean onLongClick(View v) { showMessageActions(selectedMessage); return true; } });
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2); lp.setMargins(0, dp(8), 0, 0);
@@ -1853,7 +1859,7 @@ public class MainActivity extends Activity {
             }
             if (hasSearchRow) {
                 final Msg searchMessage = m;
-                TextView searched = text("searched " + m.searchSources.size() + " sources" + (m.searchExpanded ? " -------------" : ""), 11, Color.rgb(135,135,135));
+                TextView searched = text("searched " + m.searchSources.size() + " sources" + (m.searchExpanded ? " ˅" : " ›"), 11, Color.rgb(135,135,135));
                 searched.setGravity(Gravity.CENTER_VERTICAL);
                 searched.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { searchMessage.searchExpanded = !searchMessage.searchExpanded; renderMessages(); } });
                 messageList.addView(searched, new LinearLayout.LayoutParams(-1, dp(24)));
@@ -1864,12 +1870,14 @@ public class MainActivity extends Activity {
                     messageList.addView(src, new LinearLayout.LayoutParams(-1, -2));
                 }
             }
-            messageList.addView(body, new LinearLayout.LayoutParams(-1, -2));
+            LinearLayout.LayoutParams bodyLp = new LinearLayout.LayoutParams(-1, -2);
+            if (m.role.equals("user")) bodyLp.setMargins(0, dp(2), 0, dp(2));
+            messageList.addView(body, bodyLp);
             if (hasMemoryRow) {
                 final Msg memoryMessage = m;
                 boolean removedMemory = m.memorySavedText.startsWith("__REMOVED__\n");
                 String label = removedMemory ? "memory removed" : "memory saved";
-                TextView saved = text(label + (m.memoryExpanded ? " -------------" : ""), 11, Color.rgb(135,135,135));
+                TextView saved = text(label + (m.memoryExpanded ? " ˅" : " ›"), 11, Color.rgb(135,135,135));
                 saved.setGravity(Gravity.CENTER_VERTICAL);
                 saved.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { memoryMessage.memoryExpanded = !memoryMessage.memoryExpanded; renderMessages(); } });
                 messageList.addView(saved, new LinearLayout.LayoutParams(-1, dp(24)));
@@ -2294,10 +2302,17 @@ public class MainActivity extends Activity {
             String finalAnswer = answer.toString();
             String toolQuery = webSearchToolQuery(finalAnswer);
             if (toolQuery.length() > 0) {
+                runOnUiThread(new Runnable() { @Override public void run() {
+                    assistant.text = "searching...";
+                    assistant.stats = "";
+                    forceAutoScrollBottom = userAtChatBottom;
+                    renderMessages();
+                } });
                 final String result = webSearch(toolQuery);
                 assistant.searchSources.clear();
                 assistant.searchSources.addAll(extractSearchSources(result));
-                finalAnswer = followupAfterWebSearch(key, source, model, toolQuery, result);
+                finalAnswer = followupAfterWebSearch(key, source, model, toolQuery, cleanSearchArtifacts(result));
+                finalAnswer = cleanAfterToolStrip(stripToolCalls(finalAnswer));
             }
             String memoryNote = memoryToolNote(finalAnswer);
             ArrayList<String> removeNotes = memoryRemoveToolNotes(finalAnswer);
@@ -2459,7 +2474,7 @@ public class MainActivity extends Activity {
         String cleaned = stripToolCalls(s);
         String lower = cleaned.toLowerCase(Locale.US);
         int cut = -1;
-        String[] markers = new String[]{"<tool_call", "<function", "save_memory", "remove_memory"};
+        String[] markers = new String[]{"<tool_call", "<function", "save_memory", "remove_memory", "web_search"};
         for (String marker : markers) {
             int at = lower.indexOf(marker);
             if (at >= 0) cut = cut < 0 ? at : Math.min(cut, at);
@@ -2479,7 +2494,9 @@ public class MainActivity extends Activity {
         stopVoiceThinking();
         assistant.stats = stats;
         assistant.streamDone = true;
-        assistant.text = cleanSearchArtifacts(finalAnswer.length() == 0 ? assistant.text : finalAnswer);
+        String cleanedFinal = cleanSearchArtifacts(cleanAfterToolStrip(stripToolCalls(finalAnswer.length() == 0 ? assistant.text : finalAnswer)));
+        if ("searching...".equals(cleanedFinal.trim())) cleanedFinal = "";
+        assistant.text = cleanedFinal;
         if (reasoning.length() > 0) { assistant.reasoning = reasoning; if (assistant.thoughtMs == 0) assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt); }
         else if (assistant.thoughtMs == 0 && assistant.reasoningCapable) assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt);
         if (assistant.slowVoice && isModelRefusal(assistant.text)) {
@@ -2773,6 +2790,11 @@ public class MainActivity extends Activity {
         String s = text == null ? "" : text.trim();
         String lower = s.toLowerCase(Locale.US);
         if (!lower.contains("web_search") && !lower.contains("<tool_call")) return "";
+        java.util.regex.Matcher param = java.util.regex.Pattern.compile("(?is)<parameter(?:\\s+name\\s*=\\s*[\"']?query[\"']?|\\s*=\\s*query)[^>]*>(.*?)</parameter>").matcher(s);
+        if (param.find()) {
+            String q = param.group(1).replace("\"", "").replace("'", "").trim();
+            if (q.length() > 0) return q;
+        }
         String[] markers = new String[]{"<parameter=query>", "query:", "query=", "\"query\":"};
         for (String marker : markers) {
             int at = lower.indexOf(marker);
@@ -2792,7 +2814,7 @@ public class MainActivity extends Activity {
         JSONObject body = new JSONObject();
         body.put("model", model);
         JSONArray arr = new JSONArray();
-        arr.put(new JSONObject().put("role", "system").put("content", "The previous assistant response requested a web_search tool. The app executed it. Do not output tool calls. Answer the user's question directly using these search results, citing URLs when helpful.\n\nQuery: " + query + "\n\n" + result));
+        arr.put(new JSONObject().put("role", "system").put("content", "The previous assistant response requested a web_search tool. The app executed it. Do not output tool calls. Answer the user's question directly using these search results, citing URLs when helpful.\n\nQuery: " + query + "\n\n" + cleanSearchArtifacts(result)));
         String folderInstruction = buildFolderInstructionContext();
         if (folderInstruction.length() > 0) arr.put(new JSONObject().put("role", "system").put("content", folderInstruction));
         for (Msg m : messages) {
@@ -3287,7 +3309,13 @@ public class MainActivity extends Activity {
         return (note == null ? "" : note).replace("&quot;", "\"").replace("&apos;", "'").replace("\"", "").replace("'", "").trim();
     }
 
-    private String stripToolCalls(String text) { return (text == null ? "" : text).replaceAll("(?is)<tool_call>.*?</tool_call>", "").replaceAll("(?is)<function\\s*=\\s*(?:save_memory|remove_memory)[^>]*>.*?</function>", "").trim(); }
+    private String stripToolCalls(String text) {
+        return (text == null ? "" : text)
+                .replaceAll("(?is)<tool_call>.*?</tool_call>", "")
+                .replaceAll("(?is)<function\\s*=\\s*(?:save_memory|remove_memory|web_search)[^>]*>.*?</function>", "")
+                .replaceAll("(?is)<\\|?tool[_\\s-]?call\\|?>.*?<\\|?/tool[_\\s-]?call\\|?>", "")
+                .trim();
+    }
     private String cleanAfterToolStrip(String text) { return (text == null ? "" : text).replaceAll("(?is)(?:i(?:'|’)ll|i will|i(?:'|’)m going to|i am going to|i(?:'|’)ve|i have)\\s+(?:save|saved|remove|removed|delete|deleted|forget|forgot)[^.!?\n]{0,100}[:,-]?\\s*$", "").replaceAll("[\\s:,-]+$", "").trim(); }
 
     private String searchQuery(String text) {
@@ -3718,6 +3746,17 @@ public class MainActivity extends Activity {
                 setVoiceText("contacts permission needed to call or text by name");
                 if (voiceFullMode && voiceReply != null) voiceReply.setVisibility(View.VISIBLE);
             }
+        } else if (requestCode == CALL_PERM) {
+            PhoneCommand cmd = pendingPhoneCommand;
+            pendingPhoneCommand = null;
+            if (cmd == null) return;
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                forceDialFallback = false;
+                executePhoneCommand(cmd);
+            } else {
+                forceDialFallback = true;
+                executePhoneCommand(cmd);
+            }
         }
     }
 
@@ -3881,8 +3920,22 @@ public class MainActivity extends Activity {
             launch.putExtra("sms_body", cmd.message.trim());
             spoken = "texting " + match.name;
         } else {
-            launch = new Intent(Intent.ACTION_DIAL, Uri.parse("tel:" + Uri.encode(match.number)));
-            spoken = "calling " + match.name;
+            boolean canCall = !forceDialFallback && checkSelfPermission(Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED;
+            if (!canCall && !forceDialFallback) {
+                pendingPhoneCommand = cmd;
+                updateVoiceStatus("need phone access");
+                setVoiceText("allow phone permission to place the call");
+                requestPermissions(new String[]{Manifest.permission.CALL_PHONE}, CALL_PERM);
+                return;
+            }
+            forceDialFallback = false;
+            if (canCall) {
+                launch = new Intent(Intent.ACTION_CALL, Uri.parse("tel:" + Uri.encode(match.number)));
+                spoken = "calling " + match.name;
+            } else {
+                launch = new Intent(Intent.ACTION_DIAL, Uri.parse("tel:" + Uri.encode(match.number)));
+                spoken = "dialing " + match.name;
+            }
         }
         speakPhoneConfirm(spoken, launch);
     }
@@ -4751,6 +4804,7 @@ public class MainActivity extends Activity {
         voiceFullMode = false;
         pendingLaunchIntent = null;
         pendingPhoneCommand = null;
+        forceDialFallback = false;
         abandonVoiceAudioFocus();
         applyVoiceWindowBlur(false);
         if (!prefs.getBoolean("keepScreenAwake", false)) getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -6152,6 +6206,12 @@ public class MainActivity extends Activity {
     private android.graphics.drawable.Drawable grayBorder() { android.graphics.drawable.GradientDrawable g = new android.graphics.drawable.GradientDrawable(); g.setColor(Color.BLACK); g.setStroke(dp(1), Color.rgb(130,130,130)); return g; }
     private android.graphics.drawable.Drawable cardBorder() { android.graphics.drawable.GradientDrawable g = new android.graphics.drawable.GradientDrawable(); g.setColor(Color.BLACK); g.setStroke(dp(1), Color.rgb(92,92,92)); return g; }
     private android.graphics.drawable.Drawable selectedBorder() { android.graphics.drawable.GradientDrawable g = new android.graphics.drawable.GradientDrawable(); g.setColor(Color.BLACK); g.setStroke(dp(2), Color.WHITE); return g; }
+    private android.graphics.drawable.Drawable userMessageBorder() {
+        android.graphics.drawable.GradientDrawable g = new android.graphics.drawable.GradientDrawable();
+        g.setColor(Color.BLACK);
+        g.setStroke(1, Color.rgb(72, 72, 72));
+        return g;
+    }
 
     public class MicButton extends View { Paint p = new Paint(Paint.ANTI_ALIAS_FLAG); public MicButton(Context c) { super(c); setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { startVoice(); } }); } @Override protected void onDraw(Canvas c) { p.setColor(Color.WHITE); p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(dp(2)); p.setStrokeCap(Paint.Cap.ROUND); float cx=getWidth()/2f, cy=getHeight()/2f; c.drawRoundRect(cx-dp(4), cy-dp(10), cx+dp(4), cy+dp(4), dp(4), dp(4), p); c.drawLine(cx-dp(10), cy-dp(2), cx-dp(10), cy+dp(3), p); c.drawArc(cx-dp(10), cy-dp(2), cx+dp(10), cy+dp(16), 0, 180, false, p); c.drawLine(cx+dp(10), cy-dp(2), cx+dp(10), cy+dp(3), p); c.drawLine(cx, cy+dp(15), cx, cy+dp(20), p); c.drawLine(cx-dp(6), cy+dp(20), cx+dp(6), cy+dp(20), p); } }
     public class SendButton extends View { Paint p = new Paint(Paint.ANTI_ALIAS_FLAG); public SendButton(Context c) { super(c); setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { send(); } }); } @Override protected void onDraw(Canvas c) { p.setColor(Color.WHITE); p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(dp(2)); p.setStrokeCap(Paint.Cap.ROUND); p.setStrokeJoin(Paint.Join.ROUND); float cy=getHeight()/2f; c.drawLine(dp(12), cy, getWidth()-dp(12), cy, p); c.drawLine(getWidth()-dp(12), cy, getWidth()-dp(22), cy-dp(10), p); c.drawLine(getWidth()-dp(12), cy, getWidth()-dp(22), cy+dp(10), p); } }
@@ -6203,7 +6263,30 @@ public class MainActivity extends Activity {
             postDelayed(tick, pos >= w.length() ? 260 : 135);
         }
     }
-    public static class ContextMeter extends View { Paint p = new Paint(Paint.ANTI_ALIAS_FLAG); float percent = 0; public ContextMeter(Context c) { super(c); } @Override protected void onDraw(Canvas c) { int w=getWidth(), h=getHeight(), r=Math.min(w,h)/2-2; p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(2); p.setColor(Color.WHITE); c.drawCircle(w/2f,h/2f,r,p); p.setStyle(Paint.Style.FILL); c.drawArc(w/2f-r,h/2f-r,w/2f+r,h/2f+r,-90,percent*3.6f,true,p); p.setColor(Color.BLACK); c.drawCircle(w/2f,h/2f,Math.max(1,r-5),p); } }
+    public static class ContextMeter extends View {
+        Paint track = new Paint(Paint.ANTI_ALIAS_FLAG);
+        Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
+        float percent = 0;
+        public ContextMeter(Context c) {
+            super(c);
+            track.setStyle(Paint.Style.STROKE);
+            track.setColor(Color.rgb(55, 55, 55));
+            fill.setStyle(Paint.Style.STROKE);
+            fill.setStrokeCap(Paint.Cap.BUTT);
+            fill.setColor(Color.WHITE);
+        }
+        @Override protected void onDraw(Canvas c) {
+            int w = getWidth(), h = getHeight();
+            float stroke = Math.max(1.4f, Math.min(w, h) / 11f);
+            float r = Math.min(w, h) / 2f - stroke;
+            float cx = w / 2f, cy = h / 2f;
+            track.setStrokeWidth(stroke);
+            fill.setStrokeWidth(stroke);
+            c.drawCircle(cx, cy, r, track);
+            float sweep = Math.max(0f, Math.min(360f, percent * 3.6f));
+            if (sweep > 0.5f) c.drawArc(cx - r, cy - r, cx + r, cy + r, -90, sweep, false, fill);
+        }
+    }
     public static class Msg {
         String role, text, imageBase64, imageMime, stats, model, replyQuote, reasoning = "", memorySavedText = "";
         boolean slowVoice = false, reasoningCapable = false, thinkingExpanded = false, searchExpanded = false, memorySaved = false, memoryExpanded = false, ttsRequested = false, ttsPrefetching = false, ttsStarted = false, ttsPlaying = false, ttsStartDelayDone = false, streamDone = false;
