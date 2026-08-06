@@ -8,18 +8,14 @@
     <path
         android:fillColor="#FF000000"
         android:pathData="M0,0h108v108h-108z" />
-    <!-- Large white panel -->
+    <!-- Bold white chat lines -->
     <path
         android:fillColor="#FFFFFFFF"
-        android:pathData="M16,16h76v76h-76z" />
-    <!-- Bold chat lines -->
+        android:pathData="M18,32h72v12h-72z" />
     <path
-        android:fillColor="#FF000000"
-        android:pathData="M30,34h48v10h-48z" />
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M18,50h72v12h-72z" />
     <path
-        android:fillColor="#FF000000"
-        android:pathData="M30,52h48v10h-48z" />
-    <path
-        android:fillColor="#FF000000"
-        android:pathData="M30,70h28v10h-28z" />
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M18,68h42v12h-42z" />
 </vector>

@@ -4,18 +4,14 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- Large white panel — fills most of the adaptive safe zone -->
+    <!-- Bold white chat lines on transparent (black adaptive background) -->
     <path
         android:fillColor="#FFFFFFFF"
-        android:pathData="M22,22h64v64h-64z" />
-    <!-- Bold chat lines -->
+        android:pathData="M24,34h60v10h-60z" />
     <path
-        android:fillColor="#FF000000"
-        android:pathData="M34,38h40v8h-40z" />
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M24,50h60v10h-60z" />
     <path
-        android:fillColor="#FF000000"
-        android:pathData="M34,52h40v8h-40z" />
-    <path
-        android:fillColor="#FF000000"
-        android:pathData="M34,66h24v8h-24z" />
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M24,66h36v10h-36z" />
 </vector>
