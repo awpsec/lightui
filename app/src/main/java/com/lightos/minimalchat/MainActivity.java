@@ -27,6 +27,7 @@ import android.graphics.drawable.ColorDrawable;
 import android.media.MediaPlayer;
 import android.media.MediaRecorder;
 import android.net.Uri;
+import android.provider.ContactsContract;
 import android.os.Bundle;
 import android.os.Build;
 import android.os.Handler;
@@ -100,17 +101,21 @@ public class MainActivity extends Activity {
     private static final int MESSAGE_PAGE = 30;
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
-    private static final String APP_VERSION = "1.0.4";
+    private static final String APP_VERSION = "1.0.5";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 64;
     private static final long MODEL_AUTO_REFRESH_MS = 60L * 60L * 1000L;
+    private static final int CONTACTS_PERM = 12;
+    private static final String PHONE_UTTERANCE = "phone-command";
     private SharedPreferences prefs;
     private Runnable pendingPersist;
     private Runnable pendingStreamRender;
     private long lastStreamRenderAt = 0;
     private boolean chatsDirty = false;
     private boolean modelsRefreshing = false;
+    private Intent pendingLaunchIntent;
+    private PhoneCommand pendingPhoneCommand;
     private FrameLayout screen;
     private LinearLayout root, messageList, folderList, chatList;
     private ScrollView scroll, settingsScrollView;
@@ -3473,24 +3478,32 @@ public class MainActivity extends Activity {
                 tts.setLanguage(Locale.getDefault());
                 tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
                     @Override public void onStart(String id) { runOnUiThread(new Runnable() { @Override public void run() { updateVoiceStatus("speaking"); } }); }
-                    @Override public void onDone(String id) { runOnUiThread(new Runnable() { @Override public void run() {
-                        if (activeTtsOwner != null) {
-                            Msg owner = activeTtsOwner;
-                            owner.ttsPlaying = false;
-                            owner.ttsRequested = false;
-                            if (owner.ttsQueue.size() > 0) playNextQueuedSpeech(owner);
-                            else maybeFinishVoiceAfterTts(owner);
-                        } else finishVoiceResponse();
-                    } }); }
-                    @Override public void onError(String id) { runOnUiThread(new Runnable() { @Override public void run() {
-                        if (activeTtsOwner != null) {
-                            Msg owner = activeTtsOwner;
-                            owner.ttsPlaying = false;
-                            owner.ttsRequested = false;
-                            if (owner.ttsQueue.size() > 0) playNextQueuedSpeech(owner);
-                            else { updateVoiceStatus("speech failed"); maybeFinishVoiceAfterTts(owner); }
-                        } else updateVoiceStatus("speech failed");
-                    } }); }
+                    @Override public void onDone(String id) {
+                        final String utteranceId = id;
+                        runOnUiThread(new Runnable() { @Override public void run() {
+                            if (PHONE_UTTERANCE.equals(utteranceId)) { launchPendingPhoneIntent(); return; }
+                            if (activeTtsOwner != null) {
+                                Msg owner = activeTtsOwner;
+                                owner.ttsPlaying = false;
+                                owner.ttsRequested = false;
+                                if (owner.ttsQueue.size() > 0) playNextQueuedSpeech(owner);
+                                else maybeFinishVoiceAfterTts(owner);
+                            } else finishVoiceResponse();
+                        } });
+                    }
+                    @Override public void onError(String id) {
+                        final String utteranceId = id;
+                        runOnUiThread(new Runnable() { @Override public void run() {
+                            if (PHONE_UTTERANCE.equals(utteranceId)) { launchPendingPhoneIntent(); return; }
+                            if (activeTtsOwner != null) {
+                                Msg owner = activeTtsOwner;
+                                owner.ttsPlaying = false;
+                                owner.ttsRequested = false;
+                                if (owner.ttsQueue.size() > 0) playNextQueuedSpeech(owner);
+                                else { updateVoiceStatus("speech failed"); maybeFinishVoiceAfterTts(owner); }
+                            } else updateVoiceStatus("speech failed");
+                        } });
+                    }
                 });
             }
         } });
@@ -3515,6 +3528,16 @@ public class MainActivity extends Activity {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == VOICE && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) beginListening();
         else if (requestCode == VOICE) updateVoiceStatus("mic permission denied");
+        else if (requestCode == CONTACTS_PERM) {
+            PhoneCommand cmd = pendingPhoneCommand;
+            pendingPhoneCommand = null;
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED && cmd != null) executePhoneCommand(cmd);
+            else {
+                updateVoiceStatus("contacts permission denied");
+                setVoiceText("contacts permission needed to call or text by name");
+                if (voiceFullMode && voiceReply != null) voiceReply.setVisibility(View.VISIBLE);
+            }
+        }
     }
 
     private void beginListening() {
@@ -3606,6 +3629,13 @@ public class MainActivity extends Activity {
         if (isModelRefusal(clean)) { pauseVoiceAfterProviderFailure("model refused", "model refused\n" + clean); return; }
         if (voiceFullMode && isBogusVoiceTranscript(clean)) { handleVoiceMiss(); return; }
         setVoiceText(voiceFullMode ? "you\n" + clean : clean);
+        PhoneCommand phone = parseVoicePhoneCommand(clean);
+        if (phone != null) {
+            fadeVoiceWaves();
+            closeCompactVoiceOverlay();
+            handleVoicePhoneCommand(phone);
+            return;
+        }
         pendingVoiceText = clean;
         if (input != null) input.setText(clean);
         updateVoiceStatus("thinking");
@@ -3621,6 +3651,298 @@ public class MainActivity extends Activity {
         if (t.equals("you") || t.equals("thank you") || t.equals("thank you very much") || t.equals("thanks for watching") || t.equals("bye") || t.equals("goodbye")) return true;
         String[] words = t.split(" ");
         return words.length <= 1 && t.length() < 5;
+    }
+
+    private static class PhoneCommand {
+        boolean textMessage;
+        String contactQuery = "";
+        String message = "";
+    }
+
+    private void handleVoicePhoneCommand(PhoneCommand cmd) {
+        if (cmd == null) return;
+        if (checkSelfPermission(Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) {
+            pendingPhoneCommand = cmd;
+            updateVoiceStatus("need contacts access");
+            setVoiceText("allow contacts to call or text by name");
+            requestPermissions(new String[]{Manifest.permission.READ_CONTACTS}, CONTACTS_PERM);
+            return;
+        }
+        executePhoneCommand(cmd);
+    }
+
+    private void executePhoneCommand(PhoneCommand cmd) {
+        stopVoiceThinking();
+        String query = cmd.contactQuery == null ? "" : cmd.contactQuery.trim();
+        if (query.length() == 0) {
+            updateVoiceStatus(cmd.textMessage ? "who should i text?" : "who should i call?");
+            setVoiceText(cmd.textMessage ? "who should i text?" : "who should i call?");
+            if (voiceFullMode && voiceReply != null) voiceReply.setVisibility(View.VISIBLE);
+            return;
+        }
+        if (cmd.textMessage && (cmd.message == null || cmd.message.trim().length() == 0)) {
+            updateVoiceStatus("what should i say?");
+            setVoiceText("what should the text say?");
+            if (voiceFullMode && voiceReply != null) voiceReply.setVisibility(View.VISIBLE);
+            return;
+        }
+        ContactMatch match = resolveContact(query);
+        if (match == null || match.number.length() == 0) {
+            updateVoiceStatus("no contact found");
+            setVoiceText("couldn't find " + query + " in contacts");
+            if (voiceFullMode && voiceReply != null) voiceReply.setVisibility(View.VISIBLE);
+            return;
+        }
+        Intent launch;
+        String spoken;
+        if (cmd.textMessage) {
+            launch = new Intent(Intent.ACTION_SENDTO, Uri.parse("smsto:" + Uri.encode(match.number)));
+            launch.putExtra("sms_body", cmd.message.trim());
+            spoken = "texting " + match.name;
+        } else {
+            launch = new Intent(Intent.ACTION_DIAL, Uri.parse("tel:" + Uri.encode(match.number)));
+            spoken = "calling " + match.name;
+        }
+        speakPhoneConfirm(spoken, launch);
+    }
+
+    private void speakPhoneConfirm(String spoken, Intent launch) {
+        pendingLaunchIntent = launch;
+        stopAllVoiceAudio();
+        updateVoiceStatus(spoken);
+        setVoiceText(spoken);
+        fadeVoiceWaves();
+        final int session = voiceSession;
+        final int safetyMs = Math.max(1100, Math.min(3500, 700 + spoken.length() * 70));
+        if (tts != null && ttsReady) {
+            try {
+                activeTtsOwner = null;
+                tts.speak(spoken, TextToSpeech.QUEUE_FLUSH, null, PHONE_UTTERANCE);
+                ui.postDelayed(new Runnable() { @Override public void run() {
+                    if (pendingLaunchIntent != null && voiceSessionActive(session)) launchPendingPhoneIntent();
+                } }, safetyMs);
+                return;
+            } catch (Exception ignored) { }
+        }
+        ui.postDelayed(new Runnable() { @Override public void run() {
+            if (pendingLaunchIntent != null && voiceSessionActive(session)) launchPendingPhoneIntent();
+        } }, 650);
+    }
+
+    private void launchPendingPhoneIntent() {
+        Intent launch = pendingLaunchIntent;
+        pendingLaunchIntent = null;
+        if (launch == null) return;
+        try {
+            startActivity(launch);
+        } catch (Exception e) {
+            toast("couldn't open " + (launch.getAction() == null ? "app" : "phone"));
+            updateVoiceStatus("couldn't open phone");
+            if (voiceFullMode && voiceReply != null) voiceReply.setVisibility(View.VISIBLE);
+            return;
+        }
+        stopVoiceMode();
+    }
+
+    private PhoneCommand parseVoicePhoneCommand(String text) {
+        String raw = text == null ? "" : text.trim();
+        if (raw.length() == 0) return null;
+        String s = stripVoiceCommandFiller(raw);
+        if (s.length() == 0) return null;
+        String lower = s.toLowerCase(Locale.US);
+
+        java.util.regex.Matcher textMarker = java.util.regex.Pattern.compile(
+                "(?i)^(?:send\\s+(?:a\\s+)?(?:text|message|sms)(?:\\s+message)?\\s+to|text|message|sms|send)\\s+(.+)$").matcher(s);
+        if (textMarker.find() || lower.startsWith("send a text") || lower.startsWith("send text") || lower.startsWith("send message") || lower.startsWith("send an sms")) {
+            PhoneCommand textCmd = parseVoiceTextCommand(s);
+            if (textCmd != null) return textCmd;
+        }
+
+        java.util.regex.Matcher call = java.util.regex.Pattern.compile(
+                "(?i)^(?:(?:start|make|place|begin)\\s+(?:a\\s+)?(?:phone\\s+)?call\\s+(?:to\\s+|with\\s+)?|(?:phone\\s+)?call(?:\\s+up)?\\s+(?:to\\s+|with\\s+)?|phone\\s+|dial\\s+|ring\\s+)(.+?)(?:\\s+please)?[.!?]*$").matcher(s);
+        if (call.find()) {
+            String who = cleanContactQuery(call.group(1));
+            if (who.length() == 0) return null;
+            if (who.matches("(?i)^(me|you|someone|anybody|anyone)$")) return null;
+            PhoneCommand cmd = new PhoneCommand();
+            cmd.textMessage = false;
+            cmd.contactQuery = who;
+            return cmd;
+        }
+        return null;
+    }
+
+    private PhoneCommand parseVoiceTextCommand(String s) {
+        String lower = s.toLowerCase(Locale.US);
+        java.util.regex.Matcher m;
+        m = java.util.regex.Pattern.compile("(?i)^(?:send\\s+(?:a\\s+)?(?:text|message|sms)(?:\\s+message)?\\s+to)\\s+(.+?)\\s+(?:saying|that|about)\\s+(.+)$").matcher(s);
+        if (m.find()) return textCommand(m.group(1), m.group(2));
+        m = java.util.regex.Pattern.compile("(?i)^(?:text|message|sms)\\s+(.+?)\\s+(?:saying|that|about)\\s+(.+)$").matcher(s);
+        if (m.find()) return textCommand(m.group(1), m.group(2));
+        m = java.util.regex.Pattern.compile("(?i)^send\\s+(.+?)\\s+a\\s+(?:text|message|sms)(?:\\s+message)?(?:\\s+(?:saying|that))?\\s+(.+)$").matcher(s);
+        if (m.find()) return textCommand(m.group(1), m.group(2));
+        m = java.util.regex.Pattern.compile("(?i)^(?:text|message|sms)\\s+(.+)$").matcher(s);
+        if (m.find()) {
+            String rest = m.group(1).trim();
+            String[] parts = splitContactAndMessage(rest);
+            if (parts != null) return textCommand(parts[0], parts[1]);
+        }
+        if (lower.startsWith("send a text to ") || lower.startsWith("send text to ") || lower.startsWith("send message to ") || lower.startsWith("send an sms to ")) {
+            int to = lower.indexOf(" to ");
+            String rest = s.substring(to + 4).trim();
+            String[] parts = splitContactAndMessage(rest);
+            if (parts != null) return textCommand(parts[0], parts[1]);
+            m = java.util.regex.Pattern.compile("(?i)^(.+?)\\s+(?:saying|that|about)\\s+(.+)$").matcher(rest);
+            if (m.find()) return textCommand(m.group(1), m.group(2));
+        }
+        return null;
+    }
+
+    private PhoneCommand textCommand(String contact, String message) {
+        String who = cleanContactQuery(contact);
+        String body = message == null ? "" : message.trim();
+        body = body.replaceAll("(?i)^(?:that\\s+|saying\\s+)", "").trim();
+        if (who.length() == 0 || body.length() == 0) return null;
+        PhoneCommand cmd = new PhoneCommand();
+        cmd.textMessage = true;
+        cmd.contactQuery = who;
+        cmd.message = body;
+        return cmd;
+    }
+
+    private String[] splitContactAndMessage(String rest) {
+        String s = rest == null ? "" : rest.trim();
+        if (s.length() == 0) return null;
+        java.util.regex.Matcher marked = java.util.regex.Pattern.compile("(?i)^(.+?)\\s+(?:saying|that|about)\\s+(.+)$").matcher(s);
+        if (marked.find()) return new String[]{marked.group(1).trim(), marked.group(2).trim()};
+        String[] words = s.split("\\s+");
+        if (words.length < 2) return null;
+        // Prefer longer contact names when contacts are available; otherwise first word + rest.
+        if (checkSelfPermission(Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED) {
+            for (int n = Math.min(4, words.length - 1); n >= 1; n--) {
+                StringBuilder name = new StringBuilder();
+                for (int i = 0; i < n; i++) {
+                    if (i > 0) name.append(' ');
+                    name.append(words[i]);
+                }
+                ContactMatch match = resolveContact(name.toString());
+                if (match != null && match.score >= 70) {
+                    StringBuilder body = new StringBuilder();
+                    for (int i = n; i < words.length; i++) {
+                        if (body.length() > 0) body.append(' ');
+                        body.append(words[i]);
+                    }
+                    return new String[]{name.toString(), body.toString()};
+                }
+            }
+        }
+        StringBuilder body = new StringBuilder();
+        for (int i = 1; i < words.length; i++) {
+            if (body.length() > 0) body.append(' ');
+            body.append(words[i]);
+        }
+        return new String[]{words[0], body.toString()};
+    }
+
+    private String stripVoiceCommandFiller(String text) {
+        String s = text == null ? "" : text.trim();
+        String prev;
+        do {
+            prev = s;
+            s = s.replaceFirst("(?i)^(hey|hi|okay|ok|please|yo)[,\\s]+", "").trim();
+            s = s.replaceFirst("(?i)^(can you|could you|would you|will you|please)\\s+", "").trim();
+            s = s.replaceFirst("(?i)^(i want to|i need to|i'd like to|id like to|let's|lets)\\s+", "").trim();
+        } while (!s.equals(prev));
+        return s.replaceAll("[.!?]+$", "").trim();
+    }
+
+    private String cleanContactQuery(String raw) {
+        String s = raw == null ? "" : raw.trim();
+        s = s.replaceAll("(?i)^(my\\s+)?(contact\\s+)?", "");
+        s = s.replaceAll("(?i)\\s+(please|now|for me)$", "");
+        s = s.replaceAll("[\"']", "").trim();
+        return s;
+    }
+
+    private static class ContactMatch {
+        String name = "";
+        String number = "";
+        int score = 0;
+    }
+
+    private ContactMatch resolveContact(String query) {
+        String q = query == null ? "" : query.trim();
+        if (q.length() == 0) return null;
+        String digits = q.replaceAll("[^0-9+]", "");
+        if (digits.length() >= 7 && q.matches("(?i)^[\\d\\s()+.-]+$")) {
+            ContactMatch direct = new ContactMatch();
+            direct.name = q;
+            direct.number = digits;
+            direct.score = 100;
+            return direct;
+        }
+        if (checkSelfPermission(Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) return null;
+        ContactMatch best = null;
+        android.database.Cursor c = null;
+        try {
+            c = getContentResolver().query(
+                    ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                    new String[]{
+                            ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                            ContactsContract.CommonDataKinds.Phone.NUMBER,
+                            ContactsContract.CommonDataKinds.Phone.TYPE
+                    },
+                    null, null, ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " ASC");
+            if (c == null) return null;
+            String qKey = normalizeContactKey(q);
+            while (c.moveToNext()) {
+                String name = c.getString(0);
+                String number = c.getString(1);
+                int type = c.getInt(2);
+                if (name == null || number == null) continue;
+                int score = contactScore(q, qKey, name);
+                if (score <= 0) continue;
+                if (type == ContactsContract.CommonDataKinds.Phone.TYPE_MOBILE) score += 3;
+                else if (type == ContactsContract.CommonDataKinds.Phone.TYPE_MAIN) score += 1;
+                if (best == null || score > best.score) {
+                    best = new ContactMatch();
+                    best.name = name.trim();
+                    best.number = number.replaceAll("[^0-9+]", "");
+                    best.score = score;
+                }
+            }
+        } catch (Exception ignored) {
+            return null;
+        } finally {
+            if (c != null) try { c.close(); } catch (Exception ignored) { }
+        }
+        return best != null && best.score >= 45 ? best : null;
+    }
+
+    private int contactScore(String query, String qKey, String name) {
+        String n = name == null ? "" : name.trim();
+        if (n.length() == 0) return 0;
+        String nKey = normalizeContactKey(n);
+        if (nKey.length() == 0 || qKey.length() == 0) return 0;
+        if (n.equalsIgnoreCase(query) || nKey.equals(qKey)) return 100;
+        if (nKey.startsWith(qKey) || qKey.startsWith(nKey)) return 85;
+        String[] qTokens = qKey.split(" ");
+        String[] nTokens = nKey.split(" ");
+        int hits = 0;
+        for (String qt : qTokens) {
+            if (qt.length() == 0) continue;
+            boolean found = false;
+            for (String nt : nTokens) if (nt.equals(qt) || nt.startsWith(qt) || qt.startsWith(nt)) { found = true; break; }
+            if (found) hits++;
+        }
+        if (hits > 0 && hits == qTokens.length) return 75;
+        if (nKey.contains(qKey)) return 55;
+        if (hits > 0 && hits >= Math.max(1, qTokens.length - 1)) return 50;
+        return 0;
+    }
+
+    private String normalizeContactKey(String s) {
+        return (s == null ? "" : s).toLowerCase(Locale.US).replaceAll("[^a-z0-9]+", " ").replaceAll("\\s+", " ").trim();
     }
 
     private void beginFallbackRecording() {
@@ -4246,6 +4568,8 @@ public class MainActivity extends Activity {
         voiceAwaitingSpeechResult = false;
         voiceMode = false;
         voiceFullMode = false;
+        pendingLaunchIntent = null;
+        pendingPhoneCommand = null;
         abandonVoiceAudioFocus();
         applyVoiceWindowBlur(false);
         if (!prefs.getBoolean("keepScreenAwake", false)) getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);

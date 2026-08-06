@@ -11,6 +11,7 @@ Minimal black-and-white Android chat client built for small Android devices (spe
 - Project-based instructions injected privately into chats in that project
 - Local chat/project history stored on device
 - STT/TTS voice flows with endpoint/OpenRouter support
+- Voice-only call/text shortcuts (e.g. "call Mom", "text Dad I'm on the way") that confirm, dismiss the overlay, and open the dialer/SMS composer
 - Android assistant/voice-command overlay support
 - Pure black/white UI designed around the lightOS style
 
@@ -86,6 +87,13 @@ The app exposes an assistant overlay activity for Android assistant/voice-comman
 - `android.intent.action.VOICE_COMMAND`
 
 The main activity can also receive shared text through Android `ACTION_SEND`.
+
+In fullscreen/assistant voice mode only (not typed chat), local shortcuts can place a call or open a text without involving the LLM:
+
+- "call Mom" / "start a call to Mom" → speaks "calling Mom", closes the overlay, opens the dialer
+- "text Dad I'm running late" / "text Mom saying I'll be home soon" → speaks "texting Dad", opens the SMS composer
+
+These use `READ_CONTACTS` to resolve names, then `ACTION_DIAL` / `ACTION_SENDTO` so the system phone/messages apps complete the action.
 
 ## Project Layout
 
