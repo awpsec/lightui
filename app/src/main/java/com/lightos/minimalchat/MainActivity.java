@@ -185,7 +185,9 @@ public class MainActivity extends Activity {
     private String lastSearchQuery = "";
     private final HashSet<String> selectedChats = new HashSet<String>();
     private final Handler ui = new Handler(Looper.getMainLooper());
-    private String currentChatId = "", selectedFolder = "Inbox", projectView = "", expandedFolder = "", imageBase64 = "", imageMime = "image/jpeg", pendingVoiceText = "", replyQuote = "", voiceThinkingWord = "thinking", settingsPage = "";
+    private String currentChatId = "", selectedFolder = "Inbox", projectView = "", expandedFolder = "", pendingVoiceText = "", replyQuote = "", voiceThinkingWord = "thinking", settingsPage = "";
+    private final ArrayList<AttachedImage> pendingImages = new ArrayList<AttachedImage>();
+    private static final int MAX_PENDING_IMAGES = 6;
     private int pane = 1, messageStart = 0, messageEnd = 0, savedChatScrollY = 0, savedSettingsScrollY = 0, emptyPromptRun = 0, voiceThinkingRun = 0, voiceListenRun = 0, recorderSpeechFrames = 0, voiceSession = 0;
     private long recordingStartedAt = 0, quietSince = 0;
     private float downX, downY;
@@ -1974,7 +1976,7 @@ public class MainActivity extends Activity {
     private String chatPreviewText(Msg m) {
         String s = cleanSearchArtifacts(m.text == null ? "" : m.text).trim();
         int artifacts = 0;
-        if (m.imageBase64 != null && m.imageBase64.length() > 0) artifacts++;
+        if (messageImageCount(m) > 0) artifacts++;
         if (s.contains("```")) artifacts++;
         String[] lines = s.replace("\r", "").split("\n");
         for (String line : lines) if (isTableLine(line)) { artifacts++; break; }
@@ -2058,7 +2060,7 @@ public class MainActivity extends Activity {
             final boolean hasMemoryRow = m.role.equals("assistant") && m.streamDone && m.memorySaved;
             TextView body = text("", 16, Color.WHITE);
             String bodyText = "assistant".equals(m.role) ? sanitizeAssistantText(m.text) : (m.text == null ? "" : m.text);
-            boolean hasImage = m.imageBase64 != null && m.imageBase64.length() > 0;
+            boolean hasImage = messageImageCount(m) > 0;
             boolean hasText = bodyText.trim().length() > 0;
             body.setText(hasText ? markdownText(bodyText) : "");
             body.setLineSpacing(dp(2), 1.0f);
@@ -2072,10 +2074,10 @@ public class MainActivity extends Activity {
                 lp.setMargins(0, dp(8), 0, 0);
                 messageList.addView(role, lp);
                 if (hasImage) {
-                    LinearLayout.LayoutParams imageLp = new LinearLayout.LayoutParams(dp(64), dp(64));
+                    LinearLayout.LayoutParams imageLp = new LinearLayout.LayoutParams(-1, -2);
                     imageLp.topMargin = dp(4);
                     imageLp.bottomMargin = hasText ? dp(8) : dp(2);
-                    messageList.addView(messageImageThumb(m), imageLp);
+                    messageList.addView(messageImageRow(m), imageLp);
                 }
             }
             if (hasThinkingRow) {
@@ -2394,11 +2396,20 @@ public class MainActivity extends Activity {
         if (intent == null || input == null && pane != 1) return;
         String action = intent.getAction();
         if (hookVoiceMode && (Intent.ACTION_ASSIST.equals(action) || Intent.ACTION_VOICE_COMMAND.equals(action))) { startVoice(true); return; }
-        if (Intent.ACTION_SEND.equals(action)) {
+        if (Intent.ACTION_SEND.equals(action) || Intent.ACTION_SEND_MULTIPLE.equals(action)) {
             CharSequence text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
             Uri u = intent.getParcelableExtra(Intent.EXTRA_STREAM);
-            if (u != null) attachUri(u);
-            if (text != null) input.setText(limitIncomingText(text.toString()));
+            if (u != null) attachUri(u, true);
+            ArrayList<Uri> many = intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
+            if (many != null) for (Uri cu : many) if (cu != null) attachUri(cu, false);
+            ClipData clip = intent.getClipData();
+            if (clip != null) for (int i = 0; i < clip.getItemCount(); i++) {
+                Uri cu = clip.getItemAt(i).getUri();
+                if (cu != null) attachUri(cu, false);
+            }
+            updateAttachChip();
+            updateComposerAction();
+            if (text != null && input != null) input.setText(limitIncomingText(text.toString()));
         } else if ("com.minimalchat.ASK".equals(action) || "com.lightos.minimalchat.ASK".equals(action)) {
             pane = 1;
             if (!hookVoiceMode) renderPane();
@@ -2461,11 +2472,14 @@ public class MainActivity extends Activity {
         if (model.length() == 0) { toast("select a model first"); return false; }
         if (source.equals("openrouter") && key.length() == 0) { toast("add openrouter key"); return false; }
         if (source.equals("custom") && endpoint.length() == 0) { toast("add endpoint"); return false; }
-        if (text.length() == 0 && imageBase64.length() == 0) return false;
+        if (text.length() == 0 && pendingImages.size() == 0) return false;
         if (input != null) hideKeyboardFrom(input);
         if (input != null) input.clearFocus();
         userAtChatBottom = true;
-        messages.add(new Msg("user", text, imageBase64, imageMime, "", "", replyQuote));
+        Msg userMsg = new Msg("user", text, "", "", "", "", replyQuote);
+        for (AttachedImage img : pendingImages) userMsg.images.add(new AttachedImage(img.base64, img.mime));
+        userMsg.syncLegacyImageFields();
+        messages.add(userMsg);
         final Msg assistant = new Msg("assistant", ".", "", "", LOADING, shortModel(model));
         assistant.slowVoice = voiceMode && voiceFullMode;
         assistant.voiceSessionId = assistant.slowVoice ? voiceSession : 0;
@@ -2475,7 +2489,7 @@ public class MainActivity extends Activity {
         saveCurrentChat();
         resetMessageWindowToLatest();
         forceAutoScrollBottom = userAtChatBottom;
-        if (input != null) input.setText(""); pendingVoiceText = ""; replyQuote = ""; updateReplyChip(); imageBase64 = ""; imageMime = "image/jpeg"; updateComposerAction(); updateAttachChip(); renderMessages();
+        if (input != null) input.setText(""); pendingVoiceText = ""; replyQuote = ""; updateReplyChip(); clearPendingAttachment(); renderMessages();
         animateLoading(assistant, 0);
         final String userText = text;
         final String sendKey = key;
@@ -2499,10 +2513,14 @@ public class MainActivity extends Activity {
             for (Msg m : messages) {
                 if (isBusyStats(m.stats)) continue;
                 JSONObject one = new JSONObject(); one.put("role", m.role);
-                if (m.imageBase64.length() > 0) {
+                ArrayList<AttachedImage> imgs = requestImages(m);
+                if (imgs.size() > 0) {
                     JSONArray content = new JSONArray();
                     content.put(new JSONObject().put("type", "text").put("text", requestText(m)));
-                    content.put(new JSONObject().put("type", "image_url").put("image_url", new JSONObject().put("url", "data:" + m.imageMime + ";base64," + m.imageBase64)));
+                    for (AttachedImage img : imgs) {
+                        String mime = img.mime == null || img.mime.length() == 0 ? "image/jpeg" : img.mime;
+                        content.put(new JSONObject().put("type", "image_url").put("image_url", new JSONObject().put("url", "data:" + mime + ";base64," + img.base64)));
+                    }
                     one.put("content", content);
                 } else one.put("content", requestText(m));
                 arr.put(one);
@@ -2612,8 +2630,56 @@ public class MainActivity extends Activity {
             runOnUiThread(new Runnable() { @Override public void run() { finishStreamingAssistant(assistant, finishedAnswer, reasoning.toString(), stats, key, source, model); } });
         } catch (Exception e) {
             final String msg = friendlyError(e);
-            runOnUiThread(new Runnable() { @Override public void run() { stopVoiceThinking(); assistant.stats = ""; assistant.text = isModelRefusal(msg) ? "model refused\n" + msg : "failed to load model\n" + msg; setVoiceText(assistant.text); updateVoiceStatus(isModelRefusal(msg) ? "model refused" : "failed"); renderMessages(); } });
+            runOnUiThread(new Runnable() { @Override public void run() {
+                stopVoiceThinking();
+                assistant.stats = "";
+                assistant.streamDone = true;
+                assistant.text = isModelRefusal(msg) ? "model refused\n" + msg : "failed to load model\n" + msg;
+                if (isImageInputUnsupported(msg)) markPriorUserImagesSkipped(assistant);
+                setVoiceText(assistant.text);
+                updateVoiceStatus(isModelRefusal(msg) ? "model refused" : "failed");
+                saveCurrentChat();
+                renderMessages();
+            } });
         }
+    }
+
+    private boolean isImageInputUnsupported(String msg) {
+        String l = msg == null ? "" : msg.toLowerCase(Locale.US);
+        return l.contains("image input") || l.contains("image_url") || l.contains("does not support image")
+                || l.contains("doesn't support image") || l.contains("images are not supported")
+                || (l.contains("vision") && (l.contains("not support") || l.contains("unsupported")))
+                || (l.contains("image") && (l.contains("not support") || l.contains("unsupported") || l.contains("not supported")));
+    }
+
+    private void markPriorUserImagesSkipped(Msg assistant) {
+        int idx = messages.indexOf(assistant);
+        if (idx <= 0) return;
+        for (int i = idx - 1; i >= 0; i--) {
+            Msg m = messages.get(i);
+            if (!"user".equals(m.role)) continue;
+            if (messageImageCount(m) > 0) {
+                m.skipImagesInRequest = true;
+                toast("photo kept in chat, skipped for this model");
+            }
+            break;
+        }
+    }
+
+    private ArrayList<AttachedImage> requestImages(Msg m) {
+        ArrayList<AttachedImage> out = new ArrayList<AttachedImage>();
+        if (m == null || m.skipImagesInRequest) return out;
+        m.ensureImagesFromLegacy();
+        for (AttachedImage img : m.images) {
+            if (img != null && img.base64 != null && img.base64.length() > 0) out.add(img);
+        }
+        return out;
+    }
+
+    private int messageImageCount(Msg m) {
+        if (m == null) return 0;
+        m.ensureImagesFromLegacy();
+        return m.images.size();
     }
 
     private String reasoningDelta(JSONObject delta) {
@@ -5975,8 +6041,19 @@ public class MainActivity extends Activity {
             return;
         }
         if (req == PICK_IMAGE) {
+            ClipData clip = data.getClipData();
+            if (clip != null && clip.getItemCount() > 0) {
+                for (int i = 0; i < clip.getItemCount(); i++) {
+                    Uri cu = clip.getItemAt(i).getUri();
+                    if (cu != null) attachUri(cu, false);
+                }
+                updateAttachChip();
+                updateComposerAction();
+                toast(pendingImages.size() == 1 ? "image attached" : ("image attached (" + pendingImages.size() + ")"));
+                return;
+            }
             Uri u = data.getData();
-            if (u != null) attachUri(u);
+            if (u != null) attachUri(u, true);
         }
     }
 
@@ -6359,18 +6436,18 @@ public class MainActivity extends Activity {
     private String expandShortModel(String label) { for (String m : models) if (shortModel(m).equals(label) || m.equals(label)) return m; return label; }
 
     private void attachClipboardImageIfPresent() {
-        if (imageBase64.length() > 0) return;
+        if (pendingImages.size() > 0) return;
         ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
         if (cm == null || !cm.hasPrimaryClip()) return;
         ClipData clip = cm.getPrimaryClip(); if (clip == null || clip.getItemCount() == 0) return;
-        Uri u = clip.getItemAt(0).getUri(); if (u != null) attachUri(u);
+        Uri u = clip.getItemAt(0).getUri(); if (u != null) attachUri(u, true);
     }
     private String clipboardText() { try { ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE); if (cm == null || !cm.hasPrimaryClip()) return ""; ClipData clip = cm.getPrimaryClip(); if (clip == null || clip.getItemCount() == 0) return ""; CharSequence text = clip.getItemAt(0).coerceToText(this); return text == null ? "" : text.toString().trim(); } catch (Exception e) { return ""; } }
     private void copyText(String s) { ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE); if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("message", s)); }
 
     private boolean composerHasOutgoing() {
         boolean hasText = input != null && input.getText() != null && input.getText().toString().trim().length() > 0;
-        return hasText || imageBase64.length() > 0;
+        return hasText || pendingImages.size() > 0;
     }
 
     private void updateComposerAction() {
@@ -6380,14 +6457,16 @@ public class MainActivity extends Activity {
 
     private void updateAttachChip() {
         if (attachText == null) return;
-        boolean show = imageBase64.length() > 0;
+        int n = pendingImages.size();
+        boolean show = n > 0;
         attachText.setVisibility(show ? View.VISIBLE : View.GONE);
-        attachText.setText(show ? "photo attached  x" : "");
+        if (!show) attachText.setText("");
+        else if (n == 1) attachText.setText("image attached  x");
+        else attachText.setText("image attached (" + n + ")  x");
     }
 
     private void clearPendingAttachment() {
-        imageBase64 = "";
-        imageMime = "image/jpeg";
+        pendingImages.clear();
         updateAttachChip();
         updateComposerAction();
     }
@@ -6427,28 +6506,35 @@ public class MainActivity extends Activity {
             Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
             intent.addCategory(Intent.CATEGORY_OPENABLE);
             intent.setType("image/*");
-            startActivityForResult(Intent.createChooser(intent, "photo"), PICK_IMAGE);
+            intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+            startActivityForResult(Intent.createChooser(intent, "photos"), PICK_IMAGE);
         } catch (Exception e) {
             toast("no photo picker");
         }
     }
 
-    private void attachUri(Uri uri) {
+    private void attachUri(Uri uri, boolean announce) {
         try {
+            if (pendingImages.size() >= MAX_PENDING_IMAGES) {
+                if (announce) toast("max " + MAX_PENDING_IMAGES + " images");
+                return;
+            }
             String type = getContentResolver().getType(uri);
-            if (type == null || !type.toLowerCase(Locale.US).startsWith("image/")) { toast("image only"); return; }
+            if (type == null || !type.toLowerCase(Locale.US).startsWith("image/")) {
+                if (announce) toast("image only");
+                return;
+            }
             InputStream in = getContentResolver().openInputStream(uri);
             if (in == null) throw new RuntimeException("unreadable image");
             byte[] b;
             try { b = bytesLimited(in, 8 * 1024 * 1024); }
             finally { try { in.close(); } catch (Exception ignored) { } }
-            imageBase64 = Base64.encodeToString(b, Base64.NO_WRAP);
-            imageMime = type;
+            pendingImages.add(new AttachedImage(Base64.encodeToString(b, Base64.NO_WRAP), type));
             updateAttachChip();
             updateComposerAction();
-            toast("photo attached");
-        } catch (TooLargeException e) { toast("image too large"); }
-        catch (Exception e) { toast("attach failed"); }
+            if (announce) toast(pendingImages.size() == 1 ? "image attached" : ("image attached (" + pendingImages.size() + ")"));
+        } catch (TooLargeException e) { if (announce) toast("image too large"); }
+        catch (Exception e) { if (announce) toast("attach failed"); }
     }
 
     private void loadState() {
@@ -6710,7 +6796,16 @@ public class MainActivity extends Activity {
         }
         return t;
     }
-    private int contextTokens() { int t = 0; for (Msg m : messages) if (!isBusyStats(m.stats)) t += 14 + estimateTokens(m.role) + estimateTokens(requestText(m)) + estimateTokens(m.replyQuote) + (m.reasoning.length() == 0 ? 0 : estimateTokens(m.reasoning)) + (m.imageBase64.length() == 0 ? 0 : 1200); return t + 24; }
+    private int contextTokens() {
+        int t = 0;
+        for (Msg m : messages) {
+            if (isBusyStats(m.stats)) continue;
+            t += 14 + estimateTokens(m.role) + estimateTokens(requestText(m)) + estimateTokens(m.replyQuote)
+                    + (m.reasoning.length() == 0 ? 0 : estimateTokens(m.reasoning))
+                    + requestImages(m).size() * 1200;
+        }
+        return t + 24;
+    }
     private int contextMaxTokens() { Integer max = modelContexts.get(selectedModel()); return max == null ? 0 : max; }
     private float contextPercent() { int max = contextMaxTokens(); return max <= 0 ? 0f : Math.min(100f, (float) (contextTokens() * 100.0 / max)); }
     private String contextPercentText() { return String.format(Locale.US, "%.1f%%", contextPercent()); }
@@ -6927,11 +7022,10 @@ public class MainActivity extends Activity {
         box.setOrientation(LinearLayout.VERTICAL);
         box.setBackground(userMessageBorder());
         box.setPadding(dp(10), dp(12), dp(10), dp(8));
-        boolean hasImage = m != null && m.imageBase64 != null && m.imageBase64.length() > 0;
-        if (hasImage) {
-            LinearLayout.LayoutParams imageLp = new LinearLayout.LayoutParams(dp(64), dp(64));
+        if (messageImageCount(m) > 0) {
+            LinearLayout.LayoutParams imageLp = new LinearLayout.LayoutParams(-1, -2);
             if (body != null) imageLp.bottomMargin = dp(8);
-            box.addView(messageImageThumb(m), imageLp);
+            box.addView(messageImageRow(m), imageLp);
         }
         if (body != null) {
             body.setPadding(0, 0, 0, 0);
@@ -6962,19 +7056,32 @@ public class MainActivity extends Activity {
         return wrap;
     }
 
-    private ImageView messageImageThumb(final Msg m) {
+    private LinearLayout messageImageRow(final Msg m) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setBackgroundColor(Color.TRANSPARENT);
+        int count = messageImageCount(m);
+        for (int i = 0; i < count; i++) {
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(64), dp(64));
+            if (i > 0) lp.leftMargin = dp(8);
+            row.addView(messageImageThumb(m, i), lp);
+        }
+        return row;
+    }
+
+    private ImageView messageImageThumb(final Msg m, final int index) {
         int size = dp(64);
         ImageView iv = new ImageView(this);
         iv.setScaleType(ImageView.ScaleType.CENTER_CROP);
         iv.setBackgroundColor(Color.rgb(28, 28, 28));
-        Bitmap thumb = ensureMessageThumb(m, size * 2);
+        Bitmap thumb = ensureMessageThumb(m, index, size * 2);
         if (thumb != null) iv.setImageBitmap(thumb);
         GradientDrawable frame = new GradientDrawable();
         frame.setColor(Color.rgb(28, 28, 28));
         frame.setStroke(1, Color.rgb(72, 72, 72));
         iv.setBackground(frame);
         iv.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) { showImagePreview(m); }
+            @Override public void onClick(View v) { showImagePreview(m, index); }
         });
         iv.setOnLongClickListener(new View.OnLongClickListener() {
             @Override public boolean onLongClick(View v) { showMessageActions(m); return true; }
@@ -6982,11 +7089,19 @@ public class MainActivity extends Activity {
         return iv;
     }
 
-    private Bitmap ensureMessageThumb(Msg m, int maxEdge) {
-        if (m == null || m.imageBase64 == null || m.imageBase64.length() == 0) return null;
-        if (m.imageThumb != null && !m.imageThumb.isRecycled()) return m.imageThumb;
-        m.imageThumb = decodeMessageBitmap(m.imageBase64, maxEdge);
-        return m.imageThumb;
+    private Bitmap ensureMessageThumb(Msg m, int index, int maxEdge) {
+        AttachedImage img = messageImageAt(m, index);
+        if (img == null || img.base64 == null || img.base64.length() == 0) return null;
+        if (img.thumb != null && !img.thumb.isRecycled()) return img.thumb;
+        img.thumb = decodeMessageBitmap(img.base64, maxEdge);
+        return img.thumb;
+    }
+
+    private AttachedImage messageImageAt(Msg m, int index) {
+        if (m == null) return null;
+        m.ensureImagesFromLegacy();
+        if (index < 0 || index >= m.images.size()) return null;
+        return m.images.get(index);
     }
 
     private Bitmap decodeMessageBitmap(String b64, int maxEdge) {
@@ -7008,11 +7123,14 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void showImagePreview(Msg m) {
-        if (m == null || m.imageBase64 == null || m.imageBase64.length() == 0 || screen == null) return;
+    private void showImagePreview(Msg m) { showImagePreview(m, 0); }
+
+    private void showImagePreview(Msg m, int index) {
+        AttachedImage attached = messageImageAt(m, index);
+        if (attached == null || attached.base64 == null || attached.base64.length() == 0 || screen == null) return;
         dismissImagePreview();
         int maxEdge = Math.max(getResources().getDisplayMetrics().widthPixels, getResources().getDisplayMetrics().heightPixels);
-        final Bitmap full = decodeMessageBitmap(m.imageBase64, maxEdge);
+        final Bitmap full = decodeMessageBitmap(attached.base64, maxEdge);
         if (full == null) { toast("couldn't open photo"); return; }
 
         final FrameLayout overlay = new FrameLayout(this);
@@ -7020,12 +7138,12 @@ public class MainActivity extends Activity {
         // Frosted dim chrome around the photo; tap outside the image to dismiss.
         overlay.setBackgroundColor(Color.argb(198, 0, 0, 0));
 
-        ImageView img = new ImageView(this);
-        img.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        img.setImageBitmap(full);
-        img.setClickable(true);
+        ImageView photo = new ImageView(this);
+        photo.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        photo.setImageBitmap(full);
+        photo.setClickable(true);
         // Consume taps on the photo itself so only frosted chrome dismisses.
-        img.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { } });
+        photo.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { } });
 
         int padH = dp(26);
         int padTop = dp(52);
@@ -7035,7 +7153,7 @@ public class MainActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 Gravity.CENTER);
         imgLp.setMargins(padH, padTop, padH, padBottom);
-        overlay.addView(img, imgLp);
+        overlay.addView(photo, imgLp);
 
         overlay.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) { dismissImagePreview(); }
@@ -7127,21 +7245,51 @@ public class MainActivity extends Activity {
             if (sweep > 0.5f) c.drawArc(cx - r, cy - r, cx + r, cy + r, -90, sweep, false, fill);
         }
     }
+    public static class AttachedImage {
+        String base64 = "", mime = "image/jpeg";
+        transient Bitmap thumb;
+        AttachedImage(String b64, String mimeType) {
+            base64 = b64 == null ? "" : b64;
+            mime = mimeType == null || mimeType.length() == 0 ? "image/jpeg" : mimeType;
+        }
+    }
     public static class Msg {
-        String role, text, imageBase64, imageMime, stats, model, replyQuote, reasoning = "", memorySavedText = "";
-        boolean slowVoice = false, reasoningCapable = false, thinkingExpanded = false, searchExpanded = false, memorySaved = false, memoryExpanded = false, ttsRequested = false, ttsPrefetching = false, ttsStarted = false, ttsPlaying = false, ttsStartDelayDone = false, streamDone = false;
+        String role, text, imageBase64 = "", imageMime = "", stats, model, replyQuote, reasoning = "", memorySavedText = "";
+        boolean slowVoice = false, reasoningCapable = false, thinkingExpanded = false, searchExpanded = false, memorySaved = false, memoryExpanded = false, ttsRequested = false, ttsPrefetching = false, ttsStarted = false, ttsPlaying = false, ttsStartDelayDone = false, streamDone = false, skipImagesInRequest = false;
         int spokenChars = 0, ttsPlaybackFailures = 0, voiceSessionId = 0, thinkingAnimStep = 0;
         long startedAt = System.currentTimeMillis(), thoughtMs = 0;
-        transient Bitmap imageThumb;
+        ArrayList<AttachedImage> images = new ArrayList<AttachedImage>();
         ArrayList<String> ttsQueue = new ArrayList<String>();
         ArrayList<String> searchSources = new ArrayList<String>();
         Msg(String r, String t, String i, String m, String s) { this(r,t,i,m,s,"",""); }
         Msg(String r, String t, String i, String m, String s, String modelName) { this(r,t,i,m,s,modelName,""); }
-        Msg(String r, String t, String i, String m, String s, String modelName, String reply) { role=r; text=t==null?"":t; imageBase64=i==null?"":i; imageMime=m==null?"":m; stats=s==null?"":s; model=modelName==null?"":modelName; replyQuote=reply==null?"":reply; }
+        Msg(String r, String t, String i, String m, String s, String modelName, String reply) {
+            role=r; text=t==null?"":t; imageBase64=i==null?"":i; imageMime=m==null?"":m; stats=s==null?"":s; model=modelName==null?"":modelName; replyQuote=reply==null?"":reply;
+            if (imageBase64.length() > 0) images.add(new AttachedImage(imageBase64, imageMime));
+        }
+        void ensureImagesFromLegacy() {
+            if (images == null) images = new ArrayList<AttachedImage>();
+            if (images.size() == 0 && imageBase64 != null && imageBase64.length() > 0) {
+                images.add(new AttachedImage(imageBase64, imageMime));
+            }
+        }
+        void syncLegacyImageFields() {
+            ensureImagesFromLegacy();
+            if (images.size() == 0) { imageBase64 = ""; imageMime = ""; return; }
+            AttachedImage first = images.get(0);
+            imageBase64 = first.base64 == null ? "" : first.base64;
+            imageMime = first.mime == null || first.mime.length() == 0 ? "image/jpeg" : first.mime;
+        }
         JSONObject toJson() throws Exception {
+            syncLegacyImageFields();
             JSONArray src = new JSONArray();
             for (String s : searchSources) src.put(s);
-            return new JSONObject().put("role",role).put("text",text).put("image",imageBase64).put("mime",imageMime).put("stats",stats).put("model",model).put("replyQuote",replyQuote).put("reasoning",reasoning).put("thoughtMs",thoughtMs).put("memorySaved",memorySaved).put("memorySavedText",memorySavedText).put("searchSources",src);
+            JSONArray imgs = new JSONArray();
+            for (AttachedImage img : images) {
+                if (img == null || img.base64 == null || img.base64.length() == 0) continue;
+                imgs.put(new JSONObject().put("data", img.base64).put("mime", img.mime == null || img.mime.length() == 0 ? "image/jpeg" : img.mime));
+            }
+            return new JSONObject().put("role",role).put("text",text).put("image",imageBase64).put("mime",imageMime).put("images",imgs).put("skipImagesInRequest",skipImagesInRequest).put("stats",stats).put("model",model).put("replyQuote",replyQuote).put("reasoning",reasoning).put("thoughtMs",thoughtMs).put("memorySaved",memorySaved).put("memorySavedText",memorySavedText).put("searchSources",src);
         }
         static Msg fromJson(JSONObject o) {
             Msg m = new Msg(o.optString("role"),o.optString("text"),o.optString("image"),o.optString("mime"),o.optString("stats"),o.optString("model"),o.optString("replyQuote"));
@@ -7149,6 +7297,21 @@ public class MainActivity extends Activity {
             m.thoughtMs = o.optLong("thoughtMs", 0);
             m.memorySaved = o.optBoolean("memorySaved", false);
             m.memorySavedText = o.optString("memorySavedText", "");
+            m.skipImagesInRequest = o.optBoolean("skipImagesInRequest", false);
+            JSONArray imgs = o.optJSONArray("images");
+            if (imgs != null && imgs.length() > 0) {
+                m.images.clear();
+                for (int i = 0; i < imgs.length(); i++) {
+                    JSONObject im = imgs.optJSONObject(i);
+                    if (im == null) continue;
+                    String data = im.optString("data", im.optString("image", ""));
+                    String mime = im.optString("mime", "image/jpeg");
+                    if (data.length() > 0) m.images.add(new AttachedImage(data, mime));
+                }
+                m.syncLegacyImageFields();
+            } else {
+                m.ensureImagesFromLegacy();
+            }
             JSONArray src = o.optJSONArray("searchSources");
             if (src != null) for (int i = 0; i < src.length(); i++) { String s = src.optString(i, ""); if (s.length() > 0) m.searchSources.add(s); }
             m.streamDone = !isBusyStats(m.stats);
