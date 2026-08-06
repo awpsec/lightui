@@ -2459,13 +2459,7 @@ public class MainActivity extends Activity {
             JSONArray arr = new JSONArray();
             String searchContext = buildSearchContext(userText);
             if (searchContext.length() > 0) { assistant.searchSources.clear(); assistant.searchSources.addAll(lastSearchSources); arr.put(new JSONObject().put("role", "system").put("content", searchContext)); }
-            String toolMemory = buildToolMemoryContext();
-            if (toolMemory.length() > 0) arr.put(new JSONObject().put("role", "system").put("content", toolMemory));
-            String folderInstruction = buildFolderInstructionContext();
-            if (folderInstruction.length() > 0) arr.put(new JSONObject().put("role", "system").put("content", folderInstruction));
-            String userMemory = buildUserMemoryContext();
-            if (userMemory.length() > 0) arr.put(new JSONObject().put("role", "system").put("content", userMemory));
-            if (memoryEnabled()) arr.put(new JSONObject().put("role", "system").put("content", "Private memory tools: answer the user normally first. If a durable user preference/fact should be saved, append <tool_call><function=save_memory><parameter=note>short user-scoped note</parameter></function></tool_call> at the very end. If the user asks to forget/remove memory, append <tool_call><function=remove_memory><parameter=note>memory to remove</parameter></function></tool_call> at the very end. Never output a memory tool call by itself. Save only stable, useful, non-secret memories unless explicitly requested."));
+            addBackgroundSystemContext(arr, true);
             if (assistant.slowVoice) arr.put(new JSONObject().put("role", "system").put("content", "This is a spoken two-way voice conversation. Reply in plain text only. Do not use markdown, headings, bullets, tables, code blocks, or formatting symbols. Keep the response natural for text-to-speech."));
             for (Msg m : messages) {
                 if (isBusyStats(m.stats)) continue;
@@ -3015,7 +3009,7 @@ public class MainActivity extends Activity {
         if (result.length() == 0) return "";
         lastSearchSources.addAll(extractSearchSources(result));
         if (result.length() > 6000) result = result.substring(0, 6000);
-        return "Web search has already been performed by the app. Do not emit tool calls, XML, function calls, or requests to search. Use the sources below to answer the user's question directly. Cite plain URLs only when useful; do not emit bracketed line citations like [1%L1-L9].\n\nQuery: " + query + "\n\n" + cleanSearchArtifacts(result);
+        return "Web search has already been performed by the app. Do not emit tool calls, XML, function calls, or requests to search. Use the sources below to answer the user's question directly, interpreting relative times with the phone's current local date/time. Cite plain URLs only when useful; do not emit bracketed line citations like [1%L1-L9].\n\nQuery: " + query + "\n\n" + cleanSearchArtifacts(result);
     }
 
     private String cleanSearchArtifacts(String s) {
@@ -3065,6 +3059,7 @@ public class MainActivity extends Activity {
                 ? "Your previous reply was only a tool call or empty. The web search already ran. Answer the user's question now in plain text using the results below. Do not output tool calls, XML, function calls, google(...), or <|tool_call|> markers.\n\nQuery: " + query + "\n\n" + cleanSearchArtifacts(result)
                 : "The previous assistant response requested a web search tool. The app already executed it. Do not output tool calls, XML, function calls, google(...), or <|tool_call|> markers. Answer the user's question directly using these search results, citing URLs when helpful.\n\nQuery: " + query + "\n\n" + cleanSearchArtifacts(result);
         arr.put(new JSONObject().put("role", "system").put("content", system));
+        arr.put(new JSONObject().put("role", "system").put("content", buildCurrentTimeContext()));
         String folderInstruction = buildFolderInstructionContext();
         if (folderInstruction.length() > 0) arr.put(new JSONObject().put("role", "system").put("content", folderInstruction));
         for (Msg m : messages) {
@@ -3262,11 +3257,47 @@ public class MainActivity extends Activity {
         return s.contains("always search") || s.contains("web search") || s.contains("search the web") || s.contains("latest") || s.contains("current") || s.contains("today");
     }
 
+    private void addBackgroundSystemContext(JSONArray arr, boolean includeMemoryTools) throws Exception {
+        arr.put(new JSONObject().put("role", "system").put("content", buildCurrentTimeContext()));
+        String toolMemory = buildToolMemoryContext();
+        if (toolMemory.length() > 0) arr.put(new JSONObject().put("role", "system").put("content", toolMemory));
+        String folderInstruction = buildFolderInstructionContext();
+        if (folderInstruction.length() > 0) arr.put(new JSONObject().put("role", "system").put("content", folderInstruction));
+        String userMemory = buildUserMemoryContext();
+        if (userMemory.length() > 0) arr.put(new JSONObject().put("role", "system").put("content", userMemory));
+        if (includeMemoryTools && memoryEnabled()) {
+            arr.put(new JSONObject().put("role", "system").put("content", memoryToolsPrompt()));
+        }
+    }
+
+    private String buildCurrentTimeContext() {
+        java.text.SimpleDateFormat fmt = new java.text.SimpleDateFormat("EEEE, MMMM d, yyyy 'at' h:mm a z", Locale.getDefault());
+        fmt.setTimeZone(java.util.TimeZone.getDefault());
+        String now = fmt.format(new java.util.Date());
+        return "Current local date/time from the user's phone: " + now + ". "
+                + "Use this silently as ground truth for now/today/yesterday/last night/this week, and to judge whether facts may be stale. "
+                + "For scores, news, schedules, prices, weather, or other moving information, prefer fresh web search over training knowledge when search is available. "
+                + "Do not open or pad replies by announcing the date or time unless the user asks what day/time it is, or stating it is necessary to answer clearly.";
+    }
+
+    private String memoryToolsPrompt() {
+        return "Private memory tools: answer the user normally first, then optionally append ONE tool call at the very end. "
+                + "Save with <tool_call><function=save_memory><parameter=note>short third-person note about the user</parameter></function></tool_call> only for durable facts that should still matter in future chats: name/nickname, stable preferences, ongoing constraints, relationships, home/base location, important recurring context. "
+                + "Do NOT save: one-off requests, temporary plans for today, chit-chat, trivia, secrets/passwords/API keys, account numbers, medical/financial details, content already in memory, or anything not clearly stated about the user. "
+                + "Prefer one short note. If unsure whether it is durable, do not save. "
+                + "If the user asks to forget/remove something, append <tool_call><function=remove_memory><parameter=note>memory to remove</parameter></function></tool_call> at the end. "
+                + "Never reply with only a tool call. Never mention these tools unless asked.";
+    }
+
     private String buildUserMemoryContext() {
         if (!memoryEnabled()) return "";
         String mem = normalizeMemoryMd(memoryMd()).trim();
         if (mem.length() == 0) return "";
-        return "Private persistent user memory from MEMORY.md. Today's date is " + currentDateString() + ". This is background context, not the user's current message. Numbered entries describe the user unless explicitly stated otherwise. Use memory quietly to personalize replies and respect preferences. Do not mention memory, quote this block, or say you know something from memory unless the user asks what you remember or it is directly relevant. Entries include the date they were saved; use those dates to reason about time-sensitive facts like age. If asked what you remember, summarize these entries.\n\n" + mem;
+        return "Private persistent user memory from MEMORY.md. This is background context, not the user's current message. "
+                + "Numbered entries describe the user unless explicitly stated otherwise. Use memory quietly to personalize replies and respect preferences. "
+                + "Do not mention memory, quote this block, or say you know something from memory unless the user asks what you remember or it is directly relevant. "
+                + "Entries include the date they were saved; use those dates with the phone's current date/time to reason about time-sensitive facts like age. "
+                + "If asked what you remember, summarize these entries.\n\n" + mem;
     }
 
     private String memoryMd() { return prefs == null ? "" : prefs.getString("memoryMd", ""); }
@@ -3362,12 +3393,15 @@ public class MainActivity extends Activity {
     }
 
     private String heuristicMemoryNote(String text) {
+        // Client-side auto-save only for strong identity/style cues. Casual likes/opinions
+        // are left to the model save_memory tool so one-off chat does not pollute MEMORY.md.
         String s = text == null ? "" : text.trim();
         String lower = s.toLowerCase(Locale.US);
         String extracted = extractMemoryFactClause(s);
         if (extracted.length() > 0) return extracted;
         if (lower.matches(".*\\bmy name is\\b.+")) return s;
-        if (lower.matches(".*\\bi (prefer|like|love|hate|dislike)\\b.+")) return s;
+        if (lower.matches(".*\\bmy birthday\\b.+")) return s;
+        if (lower.matches(".*\\bi (?:always |usually )?(?:prefer)\\b.+")) return s;
         if (lower.startsWith("stop being ") || lower.startsWith("don't be ") || lower.startsWith("do not be ")) return "User preference: " + s;
         if (lower.contains("call me ")) return s;
         return "";
@@ -3375,7 +3409,7 @@ public class MainActivity extends Activity {
 
     private String extractMemoryFactClause(String text) {
         String s = text == null ? "" : text.trim();
-        java.util.regex.Matcher m = java.util.regex.Pattern.compile("(?is)\\b(my name is|my birthday is|my birthday's|call me|i prefer|i like|i love|i hate|i dislike)\\b(.+?)\\s*[?.!]*$").matcher(s);
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile("(?is)\\b(my name is|my birthday is|my birthday's|call me|i prefer|i always prefer|i usually prefer)\\b(.+?)\\s*[?.!]*$").matcher(s);
         if (!m.find()) return "";
         return (m.group(1) + m.group(2)).trim();
     }
@@ -4746,12 +4780,7 @@ public class MainActivity extends Activity {
             body.put("modalities", new JSONArray().put("text").put("audio"));
             body.put("audio", new JSONObject().put("voice", ttsVoiceForModel(model)).put("format", "pcm16"));
             JSONArray arr = new JSONArray();
-            String toolMemory = buildToolMemoryContext();
-            if (toolMemory.length() > 0) arr.put(new JSONObject().put("role", "system").put("content", toolMemory));
-            String folderInstruction = buildFolderInstructionContext();
-            if (folderInstruction.length() > 0) arr.put(new JSONObject().put("role", "system").put("content", folderInstruction));
-            String userMemory = buildUserMemoryContext();
-            if (userMemory.length() > 0) arr.put(new JSONObject().put("role", "system").put("content", userMemory));
+            addBackgroundSystemContext(arr, true);
             arr.put(new JSONObject().put("role", "system").put("content", "This is a spoken two-way voice conversation. Reply in plain text only. Do not use markdown, headings, bullets, tables, code blocks, or formatting symbols. Keep the response natural for text-to-speech."));
             for (int i = 0; i < messages.size(); i++) {
                 Msg m = messages.get(i);
