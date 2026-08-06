@@ -102,7 +102,7 @@ public class MainActivity extends Activity {
     private static final int MESSAGE_PAGE = 30;
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
-    private static final String APP_VERSION = "1.0.10";
+    private static final String APP_VERSION = "1.0.11";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 64;
@@ -198,7 +198,10 @@ public class MainActivity extends Activity {
         handleIncoming(getIntent());
         if (hookVoiceMode && !voiceMode) startVoice(true);
         maybeAutoRefreshModels(false);
-        if (!hookVoiceMode) maybeCheckLatestVersion(true);
+        if (!hookVoiceMode) {
+            maybeShowWelcome();
+            maybeCheckLatestVersion(true);
+        }
     }
 
     @Override protected void onResume() {
@@ -546,6 +549,38 @@ public class MainActivity extends Activity {
         addVersionFooter(settings);
     }
 
+    private void maybeShowWelcome() {
+        if (hookVoiceMode || prefs == null || prefs.getBoolean("welcomeShown", false)) return;
+        if (updateDialogShowing || voiceMode) return;
+        showWelcomeDialog();
+    }
+
+    private void showWelcomeDialog() {
+        if (prefs == null) return;
+        final Dialog d = panel("welcome");
+        d.setCancelable(true);
+        d.setCanceledOnTouchOutside(true);
+        d.setOnDismissListener(new android.content.DialogInterface.OnDismissListener() {
+            @Override public void onDismiss(android.content.DialogInterface dialog) {
+                prefs.edit().putBoolean("welcomeShown", true).apply();
+                maybeShowUpdateDialog();
+            }
+        });
+        LinearLayout box = panelBox();
+        box.addView(panelTitle("welcome to lightui"));
+        TextView msg = text("configure openrouter or an openai compatible endpoint in settings, add models, and you're good to go.", 13, Color.LTGRAY);
+        msg.setPadding(0, 0, 0, dp(16));
+        box.addView(msg);
+        TextView ok = panelAction("got it");
+        ok.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); } });
+        box.addView(ok, new LinearLayout.LayoutParams(-1, dp(48)));
+        showPanel(d, box);
+    }
+
+    private boolean voicePhoneCommandsEnabled() {
+        return prefs == null || prefs.getBoolean("voicePhoneCommands", true);
+    }
+
     private void addVersionFooter(LinearLayout settings) {
         maybeCheckLatestVersion(false);
         boolean outdated = hasPendingUpdate();
@@ -649,6 +684,7 @@ public class MainActivity extends Activity {
         if (hookVoiceMode || prefs == null || updateDialogShowing || updateDownloading || (!fromUser && voiceMode)) {
             return;
         }
+        if (!fromUser && !prefs.getBoolean("welcomeShown", false)) return;
         String latest = prefs.getString("latestGitHubVersion", "");
         String apkUrl = prefs.getString("latestGitHubApkUrl", "");
         if (latest.length() == 0 || apkUrl.length() == 0) {
@@ -923,18 +959,24 @@ public class MainActivity extends Activity {
 
     private void addEndpointSettings(LinearLayout settings) {
         settings.addView(text("saved endpoints", 11, Color.LTGRAY));
-        if (customEndpoints.size() == 0) settings.addView(text("none", 13, Color.rgb(120,120,120)), new LinearLayout.LayoutParams(-1, dp(30)));
+        if (customEndpoints.size() == 0) {
+            TextView none = text("none", 17, Color.rgb(120, 120, 120));
+            none.setGravity(Gravity.CENTER_VERTICAL);
+            settings.addView(none, new LinearLayout.LayoutParams(-1, dp(42)));
+        }
         for (int i = 0; i < customEndpoints.size(); i++) {
             final String endpoint = customEndpoints.get(i);
             LinearLayout line = row();
-            TextView name = text(endpointLabelWithKey(endpoint), 12, Color.WHITE);
+            line.setGravity(Gravity.CENTER_VERTICAL);
+            TextView name = text(endpointLabelWithKey(endpoint), 17, Color.WHITE);
             name.setSingleLine(true);
             name.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
-            TextView more = text("···", 16, Color.LTGRAY);
+            name.setGravity(Gravity.CENTER_VERTICAL);
+            TextView more = text("···", 17, Color.LTGRAY);
             more.setGravity(Gravity.CENTER);
             more.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { showEndpointActions(endpoint); } });
-            line.addView(name, new LinearLayout.LayoutParams(0, dp(34), 1));
-            line.addView(more, new LinearLayout.LayoutParams(dp(40), dp(34)));
+            line.addView(name, new LinearLayout.LayoutParams(0, dp(42), 1));
+            line.addView(more, new LinearLayout.LayoutParams(dp(42), dp(42)));
             settings.addView(line);
         }
         settings.addView(text("endpoint", 11, Color.LTGRAY));
@@ -1073,6 +1115,21 @@ public class MainActivity extends Activity {
         speakToggle.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { boolean next = !prefs.getBoolean("voiceSpeak", true); prefs.edit().putBoolean("voiceSpeak", next).apply(); speakToggle.checked = next; speakToggle.invalidate(); } });
         speak.addView(speakToggle, new LinearLayout.LayoutParams(dp(48), dp(28)));
         settings.addView(speak);
+
+        LinearLayout phone = row();
+        phone.addView(text("call & text shortcuts", 14, Color.WHITE), new LinearLayout.LayoutParams(0, dp(38), 1));
+        final TogglePill phoneToggle = new TogglePill(this);
+        phoneToggle.checked = voicePhoneCommandsEnabled();
+        phoneToggle.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
+            boolean next = !voicePhoneCommandsEnabled();
+            prefs.edit().putBoolean("voicePhoneCommands", next).apply();
+            phoneToggle.checked = next;
+            phoneToggle.invalidate();
+            toast(next ? "call & text on" : "call & text off");
+        } });
+        phone.addView(phoneToggle, new LinearLayout.LayoutParams(dp(48), dp(28)));
+        settings.addView(phone);
+        settings.addView(text("voice-only: call Mom, text Dad I'm late", 10, Color.rgb(120, 120, 120)), new LinearLayout.LayoutParams(-1, dp(24)));
 
         settings.addView(sectionHeader("voice assistant / two way voice"));
         settings.addView(settingChoice("web search", voiceWebSearchMode(), new View.OnClickListener() { @Override public void onClick(View v) { chooseVoiceProvider("voiceWebSearchMode", new String[]{"off", "auto", "on"}); } }));
@@ -4051,12 +4108,14 @@ public class MainActivity extends Activity {
         if (isModelRefusal(clean)) { pauseVoiceAfterProviderFailure("model refused", "model refused\n" + clean); return; }
         if (voiceFullMode && isBogusVoiceTranscript(clean)) { handleVoiceMiss(); return; }
         setVoiceText(voiceFullMode ? "you\n" + clean : clean);
-        PhoneCommand phone = parseVoicePhoneCommand(clean);
-        if (phone != null) {
-            fadeVoiceWaves();
-            closeCompactVoiceOverlay();
-            handleVoicePhoneCommand(phone);
-            return;
+        if (voicePhoneCommandsEnabled()) {
+            PhoneCommand phone = parseVoicePhoneCommand(clean);
+            if (phone != null) {
+                fadeVoiceWaves();
+                closeCompactVoiceOverlay();
+                handleVoicePhoneCommand(phone);
+                return;
+            }
         }
         pendingVoiceText = clean;
         if (input != null) input.setText(clean);
