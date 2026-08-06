@@ -10,6 +10,20 @@ if [[ -z "$sdk" ]]; then
   exit 1
 fi
 
+# Prefer JDK 17 when available — d8 34.x can NPE on newer javac output.
+if [[ -z "${JAVA_HOME:-}" ]]; then
+  for candidate in \
+    /usr/lib/jvm/java-17-openjdk-amd64 \
+    /usr/lib/jvm/java-17-openjdk \
+    /Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home
+  do
+    if [[ -x "$candidate/bin/javac" ]]; then
+      export JAVA_HOME="$candidate"
+      break
+    fi
+  done
+fi
+
 build_tools="${BUILD_TOOLS:-$sdk/build-tools/34.0.0}"
 platform_jar="${PLATFORM_JAR:-$sdk/platforms/android-34/android.jar}"
 javac_bin="${JAVA_HOME:+$JAVA_HOME/bin/}javac"
