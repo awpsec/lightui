@@ -102,6 +102,7 @@ public class MainActivity extends Activity {
     private static final int MESSAGE_PAGE = 30;
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
+    private static final String SEARCHING = "__searching__";
     private static final String APP_VERSION = "1.0.16";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
@@ -440,26 +441,39 @@ public class MainActivity extends Activity {
         root.addView(separator());
 
         LinearLayout composer = row();
+        composer.setGravity(Gravity.BOTTOM);
         input = new EditText(this);
         input.setTextColor(Color.WHITE);
         input.setHintTextColor(Color.rgb(120, 120, 120));
         input.setHint("ask");
         setTextPx(input, 18);
+        input.setSingleLine(false);
         input.setMinLines(1);
-        input.setMaxLines(5);
-        input.setGravity(Gravity.CENTER_VERTICAL);
+        input.setMaxLines(3);
+        input.setHorizontallyScrolling(false);
+        input.setInputType(InputType.TYPE_CLASS_TEXT
+                | InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+                | InputType.TYPE_TEXT_FLAG_AUTO_CORRECT);
+        input.setGravity(Gravity.TOP | Gravity.START);
+        input.setVerticalScrollBarEnabled(true);
         input.setBackgroundColor(Color.BLACK);
-        input.setPadding(0, 0, 0, 0);
+        input.setMinHeight(dp(50));
+        input.setPadding(0, dp(14), 0, dp(14));
         input.setOnFocusChangeListener(new View.OnFocusChangeListener() {
             @Override public void onFocusChange(View v, boolean hasFocus) { input.setHint(hasFocus ? "" : "ask"); }
         });
-        composer.addView(input, new LinearLayout.LayoutParams(0, dp(50), 1));
+        composer.addView(input, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
         LinearLayout.LayoutParams micLp = new LinearLayout.LayoutParams(dp(30), dp(30));
-        micLp.setMargins(0, 0, dp(12), 0);
+        micLp.setMargins(0, 0, dp(12), dp(10));
+        micLp.gravity = Gravity.BOTTOM;
         ImageButton mic = iconButton(R.drawable.ic_mic, new View.OnClickListener() { @Override public void onClick(View v) { startVoice(false); } }, 5);
         mic.setOnLongClickListener(new View.OnLongClickListener() { @Override public boolean onLongClick(View v) { startVoice(true); return true; } });
         composer.addView(mic, micLp);
-        composer.addView(iconButton(R.drawable.ic_send, new View.OnClickListener() { @Override public void onClick(View v) { send(); } }, 4), new LinearLayout.LayoutParams(dp(32), dp(32)));
+        LinearLayout.LayoutParams sendLp = new LinearLayout.LayoutParams(dp(32), dp(32));
+        sendLp.gravity = Gravity.BOTTOM;
+        sendLp.bottomMargin = dp(9);
+        composer.addView(iconButton(R.drawable.ic_send, new View.OnClickListener() { @Override public void onClick(View v) { send(); } }, 4), sendLp);
         root.addView(composer);
         renderMessages();
     }
@@ -1921,7 +1935,7 @@ public class MainActivity extends Activity {
     private String chatPreview(Chat c) {
         for (int i = c.messages.size() - 1; i >= 0; i--) {
             Msg m = c.messages.get(i);
-            if (m.text == null || m.text.trim().length() == 0 || LOADING.equals(m.stats)) continue;
+            if (m.text == null || m.text.trim().length() == 0 || isBusyStats(m.stats)) continue;
             String text = chatPreviewText(m);
             if (text.length() > 72) text = text.substring(0, 72) + "...";
             return (m.role.equals("user") ? "you: " : "ai: ") + text;
@@ -1950,7 +1964,8 @@ public class MainActivity extends Activity {
         if (artifacts > 0) return (s.length() > 0 ? s + "  " : "") + artifacts + " artifact" + (artifacts == 1 ? "" : "s");
         return s;
     }
-    private boolean chatIsLoading(Chat c) { for (Msg m : c.messages) if (LOADING.equals(m.stats)) return true; if (c.id.equals(currentChatId)) for (Msg m : messages) if (LOADING.equals(m.stats)) return true; return false; }
+    private static boolean isBusyStats(String stats) { return LOADING.equals(stats) || SEARCHING.equals(stats); }
+    private boolean chatIsLoading(Chat c) { for (Msg m : c.messages) if (isBusyStats(m.stats)) return true; if (c.id.equals(currentChatId)) for (Msg m : messages) if (isBusyStats(m.stats)) return true; return false; }
 
     private void toggleChatSelection(Chat c) {
         if (selectedChats.contains(c.id)) selectedChats.remove(c.id); else selectedChats.add(c.id);
@@ -2008,11 +2023,13 @@ public class MainActivity extends Activity {
         if (messageStart > 0) messageList.addView(windowMarker("older messages above"));
         for (int i = messageStart; i < messageEnd; i++) {
             Msg m = messages.get(i);
+            final boolean isSearching = SEARCHING.equals(m.stats);
             final boolean hasThinkingRow = m.role.equals("assistant") && ((m.reasoning.length() > 0 && !m.reasoning.trim().equals("null")) || (LOADING.equals(m.stats) && m.reasoningCapable));
-            final boolean hasSearchRow = m.role.equals("assistant") && m.searchSources.size() > 0;
+            final boolean hasSearchRow = m.role.equals("assistant") && m.searchSources.size() > 0 && !isSearching;
             final boolean hasMemoryRow = m.role.equals("assistant") && m.streamDone && m.memorySaved;
             TextView body = text("", 16, Color.WHITE);
-            body.setText(markdownText(m.text + (m.imageBase64.length() == 0 ? "" : "\n[image attached]")));
+            String bodyText = "assistant".equals(m.role) ? sanitizeAssistantText(m.text) : (m.text == null ? "" : m.text);
+            body.setText(markdownText(bodyText + (m.imageBase64.length() == 0 ? "" : "\n[image attached]")));
             body.setLineSpacing(dp(2), 1.0f);
             final Msg selectedMessage = m;
             body.setOnLongClickListener(new View.OnLongClickListener() { @Override public boolean onLongClick(View v) { showMessageActions(selectedMessage); return true; } });
@@ -2029,12 +2046,12 @@ public class MainActivity extends Activity {
                 LinearLayout thinkRow = row();
                 thinkRow.setPadding(0, dp(4), 0, dp(4));
                 TextView thinking;
-                if (!m.streamDone && m.text.length() == 0) {
+                if (!m.streamDone && m.text.length() == 0 && !isSearching) {
                     JumpTextView jump = new JumpTextView(this);
                     jump.word = "thinking";
                     jump.bind(m);
                     thinking = jump;
-                } else if (!m.streamDone) {
+                } else if (!m.streamDone && !isSearching) {
                     long elapsed = m.thoughtMs > 0 ? m.thoughtMs : Math.max(1, System.currentTimeMillis() - m.startedAt);
                     thinking = text("thought for " + thoughtDuration(elapsed), 11, Color.rgb(135,135,135));
                 } else {
@@ -2056,7 +2073,20 @@ public class MainActivity extends Activity {
                     messageList.addView(reason, new LinearLayout.LayoutParams(-1, -2));
                 }
             }
-            if (hasSearchRow) {
+            if (isSearching) {
+                LinearLayout searchRow = row();
+                searchRow.setPadding(0, dp(4), 0, dp(4));
+                JumpTextView searching = new JumpTextView(this);
+                searching.word = "searching";
+                searching.bind(m);
+                searching.setTextColor(Color.rgb(135,135,135));
+                searching.setGravity(Gravity.CENTER_VERTICAL);
+                setTextPx(searching, 11);
+                searching.setMinHeight(dp(34));
+                searchRow.setMinimumHeight(dp(42));
+                searchRow.addView(searching, new LinearLayout.LayoutParams(-1, dp(34)));
+                messageList.addView(searchRow, new LinearLayout.LayoutParams(-1, -2));
+            } else if (hasSearchRow) {
                 final Msg searchMessage = m;
                 TextView searched = text("searched " + m.searchSources.size() + " sources" + (m.searchExpanded ? " ˅" : " ›"), 11, Color.rgb(135,135,135));
                 searched.setGravity(Gravity.CENTER_VERTICAL);
@@ -2069,7 +2099,7 @@ public class MainActivity extends Activity {
                     messageList.addView(src, new LinearLayout.LayoutParams(-1, -2));
                 }
             }
-            if (!m.role.equals("user")) {
+            if (!m.role.equals("user") && !isSearching) {
                 messageList.addView(body, new LinearLayout.LayoutParams(-1, -2));
             }
             if (hasMemoryRow) {
@@ -2088,7 +2118,7 @@ public class MainActivity extends Activity {
                     messageList.addView(memoryText, new LinearLayout.LayoutParams(-1, -2));
                 }
             }
-            if (m.role.equals("assistant") && m.stats.length() > 0 && !LOADING.equals(m.stats)) messageList.addView(text(m.stats, 10, Color.rgb(130,130,130)));
+            if (m.role.equals("assistant") && m.stats.length() > 0 && !isBusyStats(m.stats)) messageList.addView(text(m.stats, 10, Color.rgb(130,130,130)));
         }
         if (messageEnd < messages.size()) messageList.addView(windowMarker("newer messages below"));
         if (meter != null) { meter.percent = contextPercent(); meter.invalidate(); }
@@ -2438,7 +2468,7 @@ public class MainActivity extends Activity {
             if (memoryEnabled()) arr.put(new JSONObject().put("role", "system").put("content", "Private memory tools: answer the user normally first. If a durable user preference/fact should be saved, append <tool_call><function=save_memory><parameter=note>short user-scoped note</parameter></function></tool_call> at the very end. If the user asks to forget/remove memory, append <tool_call><function=remove_memory><parameter=note>memory to remove</parameter></function></tool_call> at the very end. Never output a memory tool call by itself. Save only stable, useful, non-secret memories unless explicitly requested."));
             if (assistant.slowVoice) arr.put(new JSONObject().put("role", "system").put("content", "This is a spoken two-way voice conversation. Reply in plain text only. Do not use markdown, headings, bullets, tables, code blocks, or formatting symbols. Keep the response natural for text-to-speech."));
             for (Msg m : messages) {
-                if (LOADING.equals(m.stats)) continue;
+                if (isBusyStats(m.stats)) continue;
                 JSONObject one = new JSONObject(); one.put("role", m.role);
                 if (m.imageBase64.length() > 0) {
                     JSONArray content = new JSONArray();
@@ -2503,16 +2533,19 @@ public class MainActivity extends Activity {
             String toolQuery = webSearchToolQuery(finalAnswer);
             if (toolQuery.length() > 0) {
                 runOnUiThread(new Runnable() { @Override public void run() {
-                    assistant.text = "searching...";
-                    assistant.stats = "";
+                    assistant.text = "";
+                    assistant.stats = SEARCHING;
                     forceAutoScrollBottom = userAtChatBottom;
                     renderMessages();
                 } });
                 final String result = webSearch(toolQuery);
                 assistant.searchSources.clear();
                 assistant.searchSources.addAll(extractSearchSources(result));
-                finalAnswer = followupAfterWebSearch(key, source, model, toolQuery, cleanSearchArtifacts(result));
-                finalAnswer = cleanAfterToolStrip(stripToolCalls(finalAnswer));
+                finalAnswer = sanitizeAssistantText(followupAfterWebSearch(key, source, model, toolQuery, cleanSearchArtifacts(result), false));
+                if (finalAnswer.length() == 0 || looksLikeToolResidue(finalAnswer)) {
+                    finalAnswer = sanitizeAssistantText(followupAfterWebSearch(key, source, model, toolQuery, cleanSearchArtifacts(result), true));
+                }
+                if (finalAnswer.length() == 0) finalAnswer = "I searched, but couldn't form an answer from the results.";
             }
             String memoryNote = memoryToolNote(finalAnswer);
             ArrayList<String> removeNotes = memoryRemoveToolNotes(finalAnswer);
@@ -2674,16 +2707,25 @@ public class MainActivity extends Activity {
         String cleaned = stripToolCalls(s);
         String lower = cleaned.toLowerCase(Locale.US);
         int cut = -1;
-        String[] markers = new String[]{"<tool_call", "<function", "save_memory", "remove_memory", "web_search"};
+        String[] markers = new String[]{
+                "<|tool_call", "<|tool_calls", "tool_call_started", "tool_call_ended",
+                "<tool_call", "<function", "[google(", "[web_search", "[search(",
+                "save_memory", "remove_memory", "web_search"
+        };
         for (String marker : markers) {
             int at = lower.indexOf(marker);
             if (at >= 0) cut = cut < 0 ? at : Math.min(cut, at);
         }
         if (cut < 0) {
-            int start = Math.max(0, lower.length() - 32);
+            String[] prefixes = new String[]{"<|tool_call", "<|tool_calls", "<tool_call", "<function", "[google", "[web_search", "[search"};
+            int start = Math.max(0, lower.length() - 40);
             for (int i = start; i < lower.length(); i++) {
                 String tail = lower.substring(i);
-                if (tail.length() > 0 && ("<tool_call".startsWith(tail) || "<function".startsWith(tail))) { cut = i; break; }
+                if (tail.length() == 0) continue;
+                for (String prefix : prefixes) {
+                    if (prefix.startsWith(tail)) { cut = i; break; }
+                }
+                if (cut >= 0) break;
             }
         }
         if (cut >= 0) cleaned = cleaned.substring(0, cut);
@@ -2694,8 +2736,8 @@ public class MainActivity extends Activity {
         stopVoiceThinking();
         assistant.stats = stats;
         assistant.streamDone = true;
-        String cleanedFinal = cleanSearchArtifacts(cleanAfterToolStrip(stripToolCalls(finalAnswer.length() == 0 ? assistant.text : finalAnswer)));
-        if ("searching...".equals(cleanedFinal.trim())) cleanedFinal = "";
+        String cleanedFinal = sanitizeAssistantText(finalAnswer.length() == 0 ? assistant.text : finalAnswer);
+        if ("searching...".equals(cleanedFinal.trim()) || looksLikeToolResidue(cleanedFinal)) cleanedFinal = "";
         assistant.text = cleanedFinal;
         if (reasoning.length() > 0) { assistant.reasoning = reasoning; if (assistant.thoughtMs == 0) assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt); }
         else if (assistant.thoughtMs == 0 && assistant.reasoningCapable) assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt);
@@ -2989,7 +3031,12 @@ public class MainActivity extends Activity {
     private String webSearchToolQuery(String text) {
         String s = text == null ? "" : text.trim();
         String lower = s.toLowerCase(Locale.US);
-        if (!lower.contains("web_search") && !lower.contains("<tool_call")) return "";
+        if (!lower.contains("web_search") && !lower.contains("tool_call") && !lower.contains("[google(") && !lower.contains("google(query")) return "";
+        java.util.regex.Matcher google = java.util.regex.Pattern.compile("(?is)\\[?\\s*google\\s*\\(\\s*query\\s*=\\s*[\"']?([^\"'\\)\\]\\n]+)[\"']?\\s*\\)\\s*\\]?").matcher(s);
+        if (google.find()) {
+            String q = google.group(1).replace("\"", "").replace("'", "").trim();
+            if (q.length() > 0) return q;
+        }
         java.util.regex.Matcher param = java.util.regex.Pattern.compile("(?is)<parameter(?:\\s+name\\s*=\\s*[\"']?query[\"']?|\\s*=\\s*query)[^>]*>(.*?)</parameter>").matcher(s);
         if (param.find()) {
             String q = param.group(1).replace("\"", "").replace("'", "").trim();
@@ -3001,7 +3048,7 @@ public class MainActivity extends Activity {
             if (at < 0) continue;
             int start = at + marker.length();
             int end = s.length();
-            String[] stops = new String[]{"</parameter>", "</function>", "</tool_call>", "\n"};
+            String[] stops = new String[]{"</parameter>", "</function>", "</tool_call>", "</|tool_call|>", "<|tool_call_ended|>", "\n", ")", "]"};
             for (String stop : stops) { int cut = lower.indexOf(stop, start); if (cut >= 0) end = Math.min(end, cut); }
             String q = s.substring(start, end).replace("\"", "").replace("'", "").trim();
             if (q.length() > 0) return q;
@@ -3009,16 +3056,19 @@ public class MainActivity extends Activity {
         return "";
     }
 
-    private String followupAfterWebSearch(String key, String source, String model, String query, String result) throws Exception {
+    private String followupAfterWebSearch(String key, String source, String model, String query, String result, boolean retry) throws Exception {
         if (result.length() > 6000) result = result.substring(0, 6000);
         JSONObject body = new JSONObject();
         body.put("model", model);
         JSONArray arr = new JSONArray();
-        arr.put(new JSONObject().put("role", "system").put("content", "The previous assistant response requested a web_search tool. The app executed it. Do not output tool calls. Answer the user's question directly using these search results, citing URLs when helpful.\n\nQuery: " + query + "\n\n" + cleanSearchArtifacts(result)));
+        String system = retry
+                ? "Your previous reply was only a tool call or empty. The web search already ran. Answer the user's question now in plain text using the results below. Do not output tool calls, XML, function calls, google(...), or <|tool_call|> markers.\n\nQuery: " + query + "\n\n" + cleanSearchArtifacts(result)
+                : "The previous assistant response requested a web search tool. The app already executed it. Do not output tool calls, XML, function calls, google(...), or <|tool_call|> markers. Answer the user's question directly using these search results, citing URLs when helpful.\n\nQuery: " + query + "\n\n" + cleanSearchArtifacts(result);
+        arr.put(new JSONObject().put("role", "system").put("content", system));
         String folderInstruction = buildFolderInstructionContext();
         if (folderInstruction.length() > 0) arr.put(new JSONObject().put("role", "system").put("content", folderInstruction));
         for (Msg m : messages) {
-            if (LOADING.equals(m.stats)) continue;
+            if (isBusyStats(m.stats)) continue;
             JSONObject one = new JSONObject();
             one.put("role", m.role);
             one.put("content", requestText(m));
@@ -3038,8 +3088,7 @@ public class MainActivity extends Activity {
         int code = c.getResponseCode();
         String raw = readAll(code >= 400 ? c.getErrorStream() : c.getInputStream());
         if (code >= 400) throw new RuntimeException(raw);
-        String out = extractMessageText(new JSONObject(raw));
-        return out.length() == 0 ? raw.trim() : out;
+        return extractMessageText(new JSONObject(raw));
     }
 
     private String followupAfterMemoryTool(String key, String source, String model, String userText) {
@@ -3098,7 +3147,7 @@ public class MainActivity extends Activity {
 
     private boolean shouldGenerateTitle(Chat c) {
         int users = 0, assistants = 0;
-        for (Msg m : c.messages) { if ("user".equals(m.role) && m.text.length() > 0) users++; else if ("assistant".equals(m.role) && m.text.length() > 0 && !LOADING.equals(m.stats)) assistants++; }
+        for (Msg m : c.messages) { if ("user".equals(m.role) && m.text.length() > 0) users++; else if ("assistant".equals(m.role) && m.text.length() > 0 && !isBusyStats(m.stats)) assistants++; }
         return !c.titleGenerated && users > 0 && assistants > 0;
     }
 
@@ -3111,7 +3160,7 @@ public class MainActivity extends Activity {
         StringBuilder transcript = new StringBuilder();
         int included = 0;
         for (Msg m : titleMessages) {
-            if (included >= 6 || LOADING.equals(m.stats)) continue;
+            if (included >= 6 || isBusyStats(m.stats)) continue;
             if (m.text.length() == 0 || "[voice input]".equals(m.text)) continue;
             transcript.append(m.role).append(": ").append(m.text.replace('\n', ' ')).append('\n');
             included++;
@@ -3510,12 +3559,33 @@ public class MainActivity extends Activity {
     }
 
     private String stripToolCalls(String text) {
-        return (text == null ? "" : text)
-                .replaceAll("(?is)<tool_call>.*?</tool_call>", "")
-                .replaceAll("(?is)<function\\s*=\\s*(?:save_memory|remove_memory|web_search)[^>]*>.*?</function>", "")
-                .replaceAll("(?is)<\\|?tool[_\\s-]?call\\|?>.*?<\\|?/tool[_\\s-]?call\\|?>", "")
-                .trim();
+        if (text == null || text.length() == 0) return "";
+        String s = text;
+        s = s.replaceAll("(?is)<tool_call\\b[^>]*>.*?</tool_call>", "");
+        s = s.replaceAll("(?is)<function\\s*=\\s*(?:save_memory|remove_memory|web_search)[^>]*>.*?</function>", "");
+        // Pipe-token blocks: <|tool_call|>…</|tool_call|>, <|tool_call_started|>…<|tool_call_ended|>, etc.
+        s = s.replaceAll("(?is)<\\|/?tool[_\\s-]?calls?(?:_section)?(?:_started|_ended|_begin|_end)?\\|>.*?<\\|/?tool[_\\s-]?calls?(?:_section)?(?:_started|_ended|_begin|_end)?\\|>", "");
+        s = s.replaceAll("(?is)\\[(?:google|web[_\\s-]?search|search|bing|brave)\\s*\\([^\\]]*\\)\\]", "");
+        s = s.replaceAll("(?is)<\\|/?tool[_\\s-]?calls?(?:_section)?(?:_started|_ended|_begin|_end)?\\|>[\\s\\S]*$", "");
+        s = s.replaceAll("(?is)<tool_call\\b[^>]*>[\\s\\S]*$", "");
+        s = s.replaceAll("(?is)<function\\s*=\\s*(?:save_memory|remove_memory|web_search)[^>]*>[\\s\\S]*$", "");
+        s = s.replaceAll("(?is)\\[(?:google|web[_\\s-]?search|search)\\s*\\([^\\]]*$", "");
+        return s.trim();
     }
+
+    private boolean looksLikeToolResidue(String text) {
+        String lower = text == null ? "" : text.toLowerCase(Locale.US).trim();
+        if (lower.length() == 0) return false;
+        return lower.contains("<tool_call") || lower.contains("<|tool_call") || lower.contains("tool_call_started")
+                || lower.contains("tool_call_ended") || lower.contains("[google(") || lower.contains("<function=web_search")
+                || lower.contains("<function=save_memory") || lower.contains("<function=remove_memory")
+                || (lower.contains("web_search") && lower.contains("<"));
+    }
+
+    private String sanitizeAssistantText(String text) {
+        return cleanSearchArtifacts(cleanAfterToolStrip(stripToolCalls(text))).trim();
+    }
+
     private String cleanAfterToolStrip(String text) { return (text == null ? "" : text).replaceAll("(?is)(?:i(?:'|’)ll|i will|i(?:'|’)m going to|i am going to|i(?:'|’)ve|i have)\\s+(?:save|saved|remove|removed|delete|deleted|forget|forgot)[^.!?\n]{0,100}[:,-]?\\s*$", "").replaceAll("[\\s:,-]+$", "").trim(); }
 
     private String searchQuery(String text) {
@@ -4685,7 +4755,7 @@ public class MainActivity extends Activity {
             arr.put(new JSONObject().put("role", "system").put("content", "This is a spoken two-way voice conversation. Reply in plain text only. Do not use markdown, headings, bullets, tables, code blocks, or formatting symbols. Keep the response natural for text-to-speech."));
             for (int i = 0; i < messages.size(); i++) {
                 Msg m = messages.get(i);
-                if (m == assistant || LOADING.equals(m.stats) || "[voice input]".equals(m.text)) continue;
+                if (m == assistant || isBusyStats(m.stats) || "[voice input]".equals(m.text)) continue;
                 JSONObject one = new JSONObject(); one.put("role", m.role); one.put("content", requestText(m)); arr.put(one);
             }
             JSONArray content = new JSONArray();
@@ -5225,7 +5295,7 @@ public class MainActivity extends Activity {
         int start = Math.max(0, messages.size() - 8);
         for (int i = start; i < messages.size(); i++) {
             Msg m = messages.get(i);
-            if (m.text.length() == 0 || LOADING.equals(m.stats) && ".".equals(m.text)) continue;
+            if (m.text.length() == 0 || isBusyStats(m.stats) && ".".equals(m.text)) continue;
             if (b.length() > 0) b.append("\n\n");
             b.append(m.role.equals("user") ? "you" : "assistant");
             if (m.role.equals("assistant") && m.streamDone && m.memorySaved) b.append("\nmemory saved");
@@ -6326,8 +6396,15 @@ public class MainActivity extends Activity {
         int byWords = (int)Math.ceil(words * 1.35);
         return Math.max(1, Math.max(byChars, byWords));
     }
-    private String requestText(Msg m) { return m.role.equals("user") && m.replyQuote.length() > 0 ? "In reply to: \"" + m.replyQuote + "\"\n\n" + m.text : m.text; }
-    private int contextTokens() { int t = 0; for (Msg m : messages) if (!LOADING.equals(m.stats)) t += 14 + estimateTokens(m.role) + estimateTokens(requestText(m)) + estimateTokens(m.replyQuote) + (m.reasoning.length() == 0 ? 0 : estimateTokens(m.reasoning)) + (m.imageBase64.length() == 0 ? 0 : 1200); return t + 24; }
+    private String requestText(Msg m) {
+        String t = m.text == null ? "" : m.text;
+        if ("assistant".equals(m.role)) t = sanitizeAssistantText(t);
+        if ("user".equals(m.role) && m.replyQuote != null && m.replyQuote.length() > 0) {
+            return "In reply to: \"" + m.replyQuote + "\"\n\n" + t;
+        }
+        return t;
+    }
+    private int contextTokens() { int t = 0; for (Msg m : messages) if (!isBusyStats(m.stats)) t += 14 + estimateTokens(m.role) + estimateTokens(requestText(m)) + estimateTokens(m.replyQuote) + (m.reasoning.length() == 0 ? 0 : estimateTokens(m.reasoning)) + (m.imageBase64.length() == 0 ? 0 : 1200); return t + 24; }
     private int contextMaxTokens() { Integer max = modelContexts.get(selectedModel()); return max == null ? 0 : max; }
     private float contextPercent() { int max = contextMaxTokens(); return max <= 0 ? 0f : Math.min(100f, (float) (contextTokens() * 100.0 / max)); }
     private String contextPercentText() { return String.format(Locale.US, "%.1f%%", contextPercent()); }
@@ -6654,7 +6731,7 @@ public class MainActivity extends Activity {
             m.memorySavedText = o.optString("memorySavedText", "");
             JSONArray src = o.optJSONArray("searchSources");
             if (src != null) for (int i = 0; i < src.length(); i++) { String s = src.optString(i, ""); if (s.length() > 0) m.searchSources.add(s); }
-            m.streamDone = !LOADING.equals(m.stats);
+            m.streamDone = !isBusyStats(m.stats);
             return m;
         }
     }
