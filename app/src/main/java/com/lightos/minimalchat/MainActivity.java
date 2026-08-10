@@ -9,6 +9,8 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.database.Cursor;
+import android.provider.DocumentsContract;
 import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioFormat;
@@ -117,6 +119,7 @@ public class MainActivity extends Activity {
     private static final int CALL_PERM = 13;
     private static final int INSTALL_PERM = 14;
     private static final int PICK_IMAGE = 15;
+    private static final int PICK_OBSIDIAN_VAULT = 16;
     private boolean forceDialFallback = false;
     private static final String PHONE_UTTERANCE = "phone-command";
     private static final String GITHUB_RELEASES_LATEST = "https://api.github.com/repos/awpsec/lightui/releases/latest";
@@ -535,6 +538,7 @@ public class MainActivity extends Activity {
         else if ("voice".equals(settingsPage)) addVoiceSettings(settings);
         else if ("display".equals(settingsPage)) addDisplaySettings(settings);
         else if ("memory".equals(settingsPage)) addMemorySettings(settings);
+        else if ("obsidian".equals(settingsPage)) addObsidianSettings(settings);
         else if ("models".equals(settingsPage)) addModelsSettings(settings);
         root.addView(settingsScroll, new LinearLayout.LayoutParams(-1, 0, 1));
         settingsScroll.post(new Runnable() { @Override public void run() { settingsScroll.scrollTo(0, settingsPage.length() == 0 ? savedSettingsScrollY : 0); } });
@@ -574,6 +578,7 @@ public class MainActivity extends Activity {
         if ("model source".equals(page)) return "model source";
         if ("search".equals(page)) return "web search";
         if ("memory".equals(page)) return "memory";
+        if ("obsidian".equals(page)) return "obsidian";
         return page;
     }
 
@@ -587,6 +592,8 @@ public class MainActivity extends Activity {
         settings.addView(settingsLink("display", "display"));
         settings.addView(separator());
         settings.addView(settingsLink("memory", "memory"));
+        settings.addView(separator());
+        settings.addView(settingsLink("obsidian", "obsidian"));
         settings.addView(separator());
         settings.addView(settingsLink("models", "models"));
         addVersionFooter(settings);
@@ -946,6 +953,51 @@ public class MainActivity extends Activity {
         actions.addView(yes, new LinearLayout.LayoutParams(0, dp(52), 1));
         box.addView(actions);
         showPanel(d, box);
+    }
+
+    private void addObsidianSettings(LinearLayout settings) {
+        LinearLayout rowToggle = row();
+        TextView label = text("obsidian notes", 16, Color.WHITE);
+        label.setGravity(Gravity.CENTER_VERTICAL);
+        rowToggle.addView(label, new LinearLayout.LayoutParams(0, dp(42), 1));
+        final TogglePill toggle = new TogglePill(this);
+        toggle.checked = obsidianEnabled();
+        toggle.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                boolean next = !obsidianEnabled();
+                prefs.edit().putBoolean("obsidianEnabled", next).apply();
+                toggle.checked = next;
+                toggle.invalidate();
+                toast(next ? "obsidian on" : "obsidian off");
+                showSettingsPane();
+            }
+        });
+        rowToggle.addView(toggle, new LinearLayout.LayoutParams(dp(48), dp(28)));
+        settings.addView(rowToggle);
+        settings.addView(separator());
+
+        TextView status = text(obsidianStatusText(), 12, Color.rgb(150, 150, 150));
+        status.setPadding(0, dp(6), 0, dp(6));
+        settings.addView(status, new LinearLayout.LayoutParams(-1, -2));
+
+        TextView hint = text("Pick your Obsidian vault folder so the model can create and update notes (grocery lists, todos, etc).", 12, Color.rgb(120, 120, 120));
+        hint.setPadding(0, dp(4), 0, dp(10));
+        settings.addView(hint, new LinearLayout.LayoutParams(-1, -2));
+
+        LinearLayout actions = row();
+        TextView choose = panelAction("choose vault");
+        choose.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { pickObsidianVault(); } });
+        TextView clear = panelAction("clear");
+        clear.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                clearObsidianVault();
+                toast("vault cleared");
+                showSettingsPane();
+            }
+        });
+        actions.addView(choose, new LinearLayout.LayoutParams(0, dp(50), 1));
+        actions.addView(clear, new LinearLayout.LayoutParams(0, dp(50), 1));
+        settings.addView(actions);
     }
 
     private View settingsLink(final String title, final String page) {
@@ -2058,6 +2110,7 @@ public class MainActivity extends Activity {
             // Only show gathered sources after the turn finishes — mid-stream URL lists feel like a premature "search done".
             final boolean hasSearchRow = m.role.equals("assistant") && m.searchSources.size() > 0 && m.streamDone && !isSearching;
             final boolean hasMemoryRow = m.role.equals("assistant") && m.streamDone && m.memorySaved;
+            final boolean hasObsidianRow = m.role.equals("assistant") && m.streamDone && m.obsidianSaved;
             TextView body = text("", 16, Color.WHITE);
             String bodyText = "assistant".equals(m.role) ? sanitizeAssistantText(m.text) : (m.text == null ? "" : m.text);
             boolean hasImage = messageImageCount(m) > 0;
@@ -2152,6 +2205,19 @@ public class MainActivity extends Activity {
                     memoryText.setLineSpacing(dp(1), 1.0f);
                     memoryText.setPadding(0, 0, 0, dp(8));
                     messageList.addView(memoryText, new LinearLayout.LayoutParams(-1, -2));
+                }
+            }
+            if (hasObsidianRow) {
+                final Msg obsidianMessage = m;
+                TextView note = text("obsidian note" + (m.obsidianExpanded ? " ˅" : " ›"), 11, Color.rgb(135,135,135));
+                note.setGravity(Gravity.CENTER_VERTICAL);
+                note.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { obsidianMessage.obsidianExpanded = !obsidianMessage.obsidianExpanded; renderMessages(); } });
+                messageList.addView(note, new LinearLayout.LayoutParams(-1, dp(24)));
+                if (m.obsidianExpanded && m.obsidianSavedText.length() > 0) {
+                    TextView details = text(m.obsidianSavedText, 12, Color.rgb(160,160,160));
+                    details.setLineSpacing(dp(1), 1.0f);
+                    details.setPadding(0, 0, 0, dp(8));
+                    messageList.addView(details, new LinearLayout.LayoutParams(-1, -2));
                 }
             }
             if (m.role.equals("assistant") && m.stats.length() > 0 && !isBusyStats(m.stats)) messageList.addView(text(m.stats, 10, Color.rgb(130,130,130)));
@@ -2624,6 +2690,40 @@ public class MainActivity extends Activity {
                 String savedMemory = appendMemory(pendingUserMemoryNote, "user");
                 if (savedMemory.length() > 0) { assistant.memorySaved = true; assistant.memorySavedText = savedMemory; }
             }
+            String obsidianReadPath = obsidianReadToolPath(finalAnswer);
+            if (obsidianReady() && obsidianReadPath.length() > 0) {
+                String noteBody = readObsidianNote(obsidianReadPath);
+                assistant.obsidianSaved = true;
+                assistant.obsidianSavedText = noteBody.startsWith("ERROR:")
+                        ? noteBody.substring(6).trim()
+                        : ("read " + normalizeObsidianPath(obsidianReadPath));
+                finalAnswer = cleanAfterToolStrip(stripToolCalls(finalAnswer));
+                String answered = answerAfterObsidianRead(key, source, model, obsidianReadPath, noteBody, userText);
+                if (answered.length() > 0) finalAnswer = answered;
+                else if (finalAnswer.trim().length() == 0) finalAnswer = noteBody.startsWith("ERROR:") ? noteBody.substring(6).trim() : "Here's that note:\n\n" + noteBody;
+            } else if (obsidianReady()) {
+                String writePath = obsidianWriteToolPath(finalAnswer);
+                String writeContent = obsidianWriteToolContent(finalAnswer);
+                String appendPath = obsidianAppendToolPath(finalAnswer);
+                String appendContent = obsidianAppendToolContent(finalAnswer);
+                boolean usedObsidian = false;
+                if (writePath.length() > 0) {
+                    String result = writeObsidianNote(writePath, writeContent, false);
+                    assistant.obsidianSaved = true;
+                    assistant.obsidianSavedText = result;
+                    usedObsidian = true;
+                } else if (appendPath.length() > 0) {
+                    String result = writeObsidianNote(appendPath, appendContent, true);
+                    assistant.obsidianSaved = true;
+                    assistant.obsidianSavedText = result;
+                    usedObsidian = true;
+                }
+                if (usedObsidian) {
+                    finalAnswer = cleanAfterToolStrip(stripToolCalls(finalAnswer));
+                    if (finalAnswer.trim().length() == 0) finalAnswer = followupAfterObsidianTool(key, source, model, userText, assistant.obsidianSavedText);
+                    if (finalAnswer.trim().length() == 0) finalAnswer = assistant.obsidianSavedText;
+                }
+            }
             final String finishedAnswer = finalAnswer;
             int completionTokens = estimateTokens(finishedAnswer) + (reasoning.length() == 0 ? 0 : estimateTokens(reasoning.toString()));
             final String stats = String.format(Locale.US, "%.1f tok/s", completionTokens / Math.max(0.001, (end - start) / 1e9));
@@ -2817,7 +2917,8 @@ public class MainActivity extends Activity {
         String[] markers = new String[]{
                 "<|tool_call", "<|tool_calls", "tool_call_started", "tool_call_ended",
                 "<tool_call", "<function", "[google(", "[web_search", "[search(",
-                "save_memory", "remove_memory", "web_search"
+                "save_memory", "remove_memory", "web_search",
+                "obsidian_write", "obsidian_append", "obsidian_read"
         };
         for (String marker : markers) {
             int at = lower.indexOf(marker);
@@ -3449,6 +3550,11 @@ public class MainActivity extends Activity {
         if (includeMemoryTools && memoryEnabled()) {
             arr.put(new JSONObject().put("role", "system").put("content", memoryToolsPrompt()));
         }
+        if (includeMemoryTools && obsidianReady()) {
+            String noteIndex = buildObsidianNoteIndex();
+            if (noteIndex.length() > 0) arr.put(new JSONObject().put("role", "system").put("content", noteIndex));
+            arr.put(new JSONObject().put("role", "system").put("content", obsidianToolsPrompt()));
+        }
     }
 
     private String buildCurrentTimeContext() {
@@ -3468,6 +3574,414 @@ public class MainActivity extends Activity {
                 + "Prefer one short note. If unsure whether it is durable, do not save. "
                 + "If the user asks to forget/remove something, append <tool_call><function=remove_memory><parameter=note>memory to remove</parameter></function></tool_call> at the end. "
                 + "Never reply with only a tool call. Never mention these tools unless asked.";
+    }
+
+    private String obsidianToolsPrompt() {
+        return "Obsidian vault tools: the user linked a local Obsidian vault. Answer normally first, then optionally append ONE tool call at the very end. "
+                + "Create or overwrite a note: <tool_call><function=obsidian_write><parameter=path>Grocery List.md</parameter><parameter=content># Grocery List\n\n- milk\n- eggs</parameter></function></tool_call> "
+                + "Append to a note (creates it if missing): <tool_call><function=obsidian_append><parameter=path>Grocery List.md</parameter><parameter=content>- butter</parameter></function></tool_call> "
+                + "Read a note before answering about its contents: <tool_call><function=obsidian_read><parameter=path>Grocery List.md</parameter></function></tool_call> "
+                + "Use short relative .md paths. Prefer clear titles like Grocery List.md or Lists/Todo.md. "
+                + "For lists, prefer bullet lines (- item). When the user asks to add items to an existing list, use obsidian_append with just the new lines. "
+                + "When they ask what is on a list or to summarize a note, use obsidian_read. "
+                + "Never reply with only a tool call. Never mention these tools unless asked.";
+    }
+
+    private boolean obsidianEnabled() { return prefs != null && prefs.getBoolean("obsidianEnabled", false); }
+
+    private Uri obsidianTreeUri() {
+        if (prefs == null) return null;
+        String s = prefs.getString("obsidianVaultUri", "");
+        return s.length() == 0 ? null : Uri.parse(s);
+    }
+
+    private boolean obsidianReady() { return obsidianEnabled() && obsidianTreeUri() != null; }
+
+    private String obsidianStatusText() {
+        if (obsidianTreeUri() == null) return "no vault linked. choose your Obsidian vault folder.";
+        String name = prefs.getString("obsidianVaultName", "");
+        if (name.length() == 0) name = "linked vault";
+        return (obsidianEnabled() ? "on" : "off") + " · vault: " + name;
+    }
+
+    private void pickObsidianVault() {
+        try {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
+            startActivityForResult(intent, PICK_OBSIDIAN_VAULT);
+        } catch (Exception e) {
+            toast("no folder picker");
+        }
+    }
+
+    private void clearObsidianVault() {
+        Uri tree = obsidianTreeUri();
+        if (tree != null) {
+            try { getContentResolver().releasePersistableUriPermission(tree, Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION); }
+            catch (Exception ignored) { }
+        }
+        prefs.edit().remove("obsidianVaultUri").remove("obsidianVaultName").putBoolean("obsidianEnabled", false).apply();
+    }
+
+    private String vaultDisplayName(Uri tree) {
+        try {
+            String docId = DocumentsContract.getTreeDocumentId(tree);
+            Uri docUri = DocumentsContract.buildDocumentUriUsingTree(tree, docId);
+            Cursor c = getContentResolver().query(docUri, new String[]{DocumentsContract.Document.COLUMN_DISPLAY_NAME}, null, null, null);
+            if (c != null) {
+                try {
+                    if (c.moveToFirst()) {
+                        String name = c.getString(0);
+                        if (name != null && name.trim().length() > 0) return name.trim();
+                    }
+                } finally { c.close(); }
+            }
+            if (docId != null) {
+                int slash = docId.lastIndexOf(':');
+                String tail = slash >= 0 ? docId.substring(slash + 1) : docId;
+                if (tail.length() > 0) return tail;
+            }
+        } catch (Exception ignored) { }
+        return "vault";
+    }
+
+    private String normalizeObsidianPath(String path) {
+        String p = path == null ? "" : path.trim().replace('\\', '/');
+        while (p.startsWith("/")) p = p.substring(1);
+        if (p.contains("..")) p = p.replace("..", "");
+        p = p.replaceAll("/+", "/");
+        if (p.length() == 0) return "";
+        if (!p.toLowerCase(Locale.US).endsWith(".md")) p = p + ".md";
+        return p;
+    }
+
+    private String buildObsidianNoteIndex() {
+        if (!obsidianReady()) return "";
+        ArrayList<String> notes = listObsidianNotes(40);
+        if (notes.size() == 0) {
+            return "Obsidian vault is linked but no markdown notes were found yet. You may create notes with obsidian_write / obsidian_append.";
+        }
+        StringBuilder b = new StringBuilder();
+        b.append("Notes available in the linked Obsidian vault (relative paths). Prefer these exact paths when updating existing notes:\n");
+        for (String n : notes) b.append("- ").append(n).append('\n');
+        return b.toString().trim();
+    }
+
+    private ArrayList<String> listObsidianNotes(int limit) {
+        ArrayList<String> out = new ArrayList<String>();
+        Uri tree = obsidianTreeUri();
+        if (tree == null) return out;
+        try {
+            String rootId = DocumentsContract.getTreeDocumentId(tree);
+            listObsidianNotesRec(tree, rootId, "", out, limit);
+        } catch (Exception ignored) { }
+        return out;
+    }
+
+    private void listObsidianNotesRec(Uri tree, String parentDocId, String prefix, ArrayList<String> out, int limit) {
+        if (out.size() >= limit) return;
+        Uri children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, parentDocId);
+        Cursor c = null;
+        try {
+            c = getContentResolver().query(children, new String[]{
+                    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                    DocumentsContract.Document.COLUMN_MIME_TYPE
+            }, null, null, null);
+            if (c == null) return;
+            while (c.moveToNext() && out.size() < limit) {
+                String id = c.getString(0);
+                String name = c.getString(1);
+                String mime = c.getString(2);
+                if (name == null || name.length() == 0) continue;
+                if (name.startsWith(".")) continue;
+                String path = prefix.length() == 0 ? name : (prefix + "/" + name);
+                if (DocumentsContract.Document.MIME_TYPE_DIR.equals(mime)) {
+                    if (".obsidian".equals(name)) continue;
+                    listObsidianNotesRec(tree, id, path, out, limit);
+                } else if (name.toLowerCase(Locale.US).endsWith(".md")) {
+                    out.add(path);
+                }
+            }
+        } catch (Exception ignored) {
+        } finally {
+            if (c != null) try { c.close(); } catch (Exception ignored) { }
+        }
+    }
+
+    private static class VaultDoc {
+        final Uri uri;
+        final String documentId;
+        final String mime;
+        VaultDoc(Uri uri, String documentId, String mime) {
+            this.uri = uri;
+            this.documentId = documentId;
+            this.mime = mime;
+        }
+        boolean isDir() { return DocumentsContract.Document.MIME_TYPE_DIR.equals(mime); }
+    }
+
+    private VaultDoc findChildDoc(Uri tree, String parentDocId, String name, boolean directory) {
+        Uri children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, parentDocId);
+        Cursor c = null;
+        try {
+            c = getContentResolver().query(children, new String[]{
+                    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                    DocumentsContract.Document.COLUMN_MIME_TYPE
+            }, null, null, null);
+            if (c == null) return null;
+            String want = name == null ? "" : name;
+            while (c.moveToNext()) {
+                String id = c.getString(0);
+                String display = c.getString(1);
+                String mime = c.getString(2);
+                if (display == null) continue;
+                boolean isDir = DocumentsContract.Document.MIME_TYPE_DIR.equals(mime);
+                if (directory != isDir) continue;
+                if (display.equalsIgnoreCase(want)) {
+                    return new VaultDoc(DocumentsContract.buildDocumentUriUsingTree(tree, id), id, mime);
+                }
+            }
+        } catch (Exception ignored) {
+        } finally {
+            if (c != null) try { c.close(); } catch (Exception ignored) { }
+        }
+        return null;
+    }
+
+    private VaultDoc findObsidianDoc(String relativePath) {
+        Uri tree = obsidianTreeUri();
+        String path = normalizeObsidianPath(relativePath);
+        if (tree == null || path.length() == 0) return null;
+        String[] parts = path.split("/");
+        String parentId = DocumentsContract.getTreeDocumentId(tree);
+        for (int i = 0; i < parts.length; i++) {
+            boolean last = i == parts.length - 1;
+            VaultDoc child = findChildDoc(tree, parentId, parts[i], !last);
+            if (child == null && last && parts[i].toLowerCase(Locale.US).endsWith(".md")) {
+                // Fuzzy: match title without worrying about exact casing / missing folder.
+                child = findNoteByTitle(tree, parts[i]);
+            }
+            if (child == null) return null;
+            if (last) return child;
+            parentId = child.documentId;
+        }
+        return null;
+    }
+
+    private VaultDoc findNoteByTitle(Uri tree, String fileName) {
+        ArrayList<String> notes = listObsidianNotes(80);
+        String want = fileName == null ? "" : fileName.toLowerCase(Locale.US);
+        String wantBase = want.endsWith(".md") ? want.substring(0, want.length() - 3) : want;
+        String best = "";
+        for (String n : notes) {
+            String lower = n.toLowerCase(Locale.US);
+            String base = lower;
+            int slash = base.lastIndexOf('/');
+            if (slash >= 0) base = base.substring(slash + 1);
+            if (base.endsWith(".md")) base = base.substring(0, base.length() - 3);
+            if (lower.equals(want) || base.equals(wantBase)) { best = n; break; }
+            if (best.length() == 0 && (base.contains(wantBase) || wantBase.contains(base))) best = n;
+        }
+        if (best.length() == 0) return null;
+        String[] parts = best.split("/");
+        String parentId = DocumentsContract.getTreeDocumentId(tree);
+        VaultDoc doc = null;
+        for (int i = 0; i < parts.length; i++) {
+            boolean last = i == parts.length - 1;
+            doc = findChildDoc(tree, parentId, parts[i], !last);
+            if (doc == null) return null;
+            parentId = doc.documentId;
+        }
+        return doc;
+    }
+
+    private VaultDoc ensureObsidianDoc(String relativePath) throws Exception {
+        Uri tree = obsidianTreeUri();
+        String path = normalizeObsidianPath(relativePath);
+        if (tree == null || path.length() == 0) throw new RuntimeException("no vault");
+        VaultDoc existing = findObsidianDoc(path);
+        if (existing != null && !existing.isDir()) return existing;
+        String[] parts = path.split("/");
+        String parentId = DocumentsContract.getTreeDocumentId(tree);
+        Uri parentUri = DocumentsContract.buildDocumentUriUsingTree(tree, parentId);
+        for (int i = 0; i < parts.length; i++) {
+            boolean last = i == parts.length - 1;
+            VaultDoc child = findChildDoc(tree, parentId, parts[i], !last);
+            if (child == null) {
+                String mime = last ? "text/plain" : DocumentsContract.Document.MIME_TYPE_DIR;
+                Uri created = DocumentsContract.createDocument(getContentResolver(), parentUri, mime, parts[i]);
+                if (created == null) throw new RuntimeException("couldn't create " + parts[i]);
+                String id = DocumentsContract.getDocumentId(created);
+                child = new VaultDoc(created, id, mime);
+            }
+            parentId = child.documentId;
+            parentUri = child.uri;
+            if (last) return child;
+        }
+        throw new RuntimeException("couldn't create note");
+    }
+
+    private String readObsidianNote(String relativePath) {
+        try {
+            VaultDoc doc = findObsidianDoc(relativePath);
+            if (doc == null || doc.isDir()) return "ERROR: note not found: " + normalizeObsidianPath(relativePath);
+            InputStream in = getContentResolver().openInputStream(doc.uri);
+            if (in == null) return "ERROR: couldn't open note";
+            try { return readAll(in); }
+            finally { try { in.close(); } catch (Exception ignored) { } }
+        } catch (Exception e) {
+            return "ERROR: " + (e.getMessage() == null ? "read failed" : e.getMessage());
+        }
+    }
+
+    private String writeObsidianNote(String relativePath, String content, boolean append) {
+        try {
+            String path = normalizeObsidianPath(relativePath);
+            if (path.length() == 0) return "ERROR: missing note path";
+            String body = content == null ? "" : content;
+            VaultDoc doc;
+            String mode;
+            if (append) {
+                VaultDoc existing = findObsidianDoc(path);
+                if (existing == null || existing.isDir()) {
+                    doc = ensureObsidianDoc(path);
+                    mode = "created";
+                    if (!body.endsWith("\n")) body = body + "\n";
+                } else {
+                    doc = existing;
+                    String prev = readObsidianNote(path);
+                    if (prev.startsWith("ERROR:")) return prev;
+                    StringBuilder merged = new StringBuilder(prev == null ? "" : prev);
+                    if (merged.length() > 0 && merged.charAt(merged.length() - 1) != '\n') merged.append('\n');
+                    merged.append(body);
+                    if (merged.charAt(merged.length() - 1) != '\n') merged.append('\n');
+                    body = merged.toString();
+                    mode = "updated";
+                }
+            } else {
+                doc = ensureObsidianDoc(path);
+                mode = "wrote";
+            }
+            OutputStream out = getContentResolver().openOutputStream(doc.uri, "wt");
+            if (out == null) return "ERROR: couldn't write note";
+            try { out.write(body.getBytes(StandardCharsets.UTF_8)); out.flush(); }
+            finally { try { out.close(); } catch (Exception ignored) { } }
+            return mode + " " + path;
+        } catch (Exception e) {
+            return "ERROR: " + (e.getMessage() == null ? "write failed" : e.getMessage());
+        }
+    }
+
+    private String toolParam(String text, String function, String param) {
+        if (text == null || function == null || param == null) return "";
+        String lower = text.toLowerCase(Locale.US);
+        if (!lower.contains(function.toLowerCase(Locale.US))) return "";
+        java.util.regex.Pattern[] patterns = new java.util.regex.Pattern[]{
+                java.util.regex.Pattern.compile("(?is)<parameter\\s*=\\s*" + param + "\\s*>(.*?)</parameter>"),
+                java.util.regex.Pattern.compile("(?is)<parameter\\s+name\\s*=\\s*[\"']?" + param + "[\"']?\\s*>(.*?)</parameter>"),
+                java.util.regex.Pattern.compile("(?is)[\"']?" + param + "[\"']?\\s*[:=]\\s*[\"']?(.*?)(?:[\"']?\\s*</parameter>|</function>|</tool_call>|\\n)")
+        };
+        for (java.util.regex.Pattern p : patterns) {
+            java.util.regex.Matcher m = p.matcher(text);
+            while (m.find()) {
+                // Prefer matches that sit near the requested function name.
+                int at = m.start();
+                int from = Math.max(0, at - 240);
+                String window = text.substring(from, Math.min(text.length(), at + 20)).toLowerCase(Locale.US);
+                if (!window.contains(function.toLowerCase(Locale.US)) && !lower.contains("<function=" + function.toLowerCase(Locale.US))) {
+                    // still accept if the function appears anywhere and this is the only param match
+                }
+                String val = cleanMemoryToolNote(m.group(1));
+                // For content, don't strip quotes as aggressively — restore a softer clean.
+                if ("content".equals(param)) {
+                    val = m.group(1) == null ? "" : m.group(1).replace("&quot;", "\"").replace("&apos;", "'").replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&").trim();
+                }
+                if (val.length() > 0) return val;
+            }
+        }
+        return "";
+    }
+
+    private String obsidianWriteToolPath(String text) {
+        String p = toolParam(text, "obsidian_write", "path");
+        if (p.length() == 0) p = toolParam(text, "obsidian_write", "note");
+        if (p.length() == 0) p = toolParam(text, "obsidian_write", "title");
+        return p;
+    }
+
+    private String obsidianWriteToolContent(String text) { return toolParam(text, "obsidian_write", "content"); }
+
+    private String obsidianAppendToolPath(String text) {
+        String p = toolParam(text, "obsidian_append", "path");
+        if (p.length() == 0) p = toolParam(text, "obsidian_append", "note");
+        if (p.length() == 0) p = toolParam(text, "obsidian_append", "title");
+        return p;
+    }
+
+    private String obsidianAppendToolContent(String text) { return toolParam(text, "obsidian_append", "content"); }
+
+    private String obsidianReadToolPath(String text) {
+        String p = toolParam(text, "obsidian_read", "path");
+        if (p.length() == 0) p = toolParam(text, "obsidian_read", "note");
+        if (p.length() == 0) p = toolParam(text, "obsidian_read", "title");
+        return p;
+    }
+
+    private String answerAfterObsidianRead(String key, String source, String model, String path, String noteBody, String userText) {
+        try {
+            String body = noteBody == null ? "" : noteBody;
+            if (body.startsWith("ERROR:")) return body.substring(6).trim();
+            if (body.length() > 8000) body = body.substring(0, 8000);
+            JSONObject req = new JSONObject();
+            req.put("model", model);
+            req.put("stream", false);
+            JSONArray arr = new JSONArray();
+            arr.put(new JSONObject().put("role", "system").put("content",
+                    "Obsidian note contents are provided below. Answer the user's request using this note. "
+                            + "Do not output tool calls. Be concise.\n\nNote path: " + normalizeObsidianPath(path) + "\n\n" + body));
+            arr.put(new JSONObject().put("role", "user").put("content", userText == null ? "" : userText));
+            req.put("messages", arr);
+            HttpURLConnection c = (HttpURLConnection) new URL(chatCompletionsUrl(source, model)).openConnection();
+            c.setRequestMethod("POST"); c.setConnectTimeout(20000); c.setReadTimeout(60000); c.setDoOutput(true);
+            if (key.length() > 0) c.setRequestProperty("Authorization", "Bearer " + key);
+            c.setRequestProperty("Content-Type", "application/json");
+            if (source.equals("openrouter")) { c.setRequestProperty("HTTP-Referer", "https://minimal.chat/android"); c.setRequestProperty("X-Title", "obsidian read"); }
+            OutputStream os = c.getOutputStream(); os.write(req.toString().getBytes(StandardCharsets.UTF_8)); os.close();
+            int code = c.getResponseCode();
+            String raw = readAll(code >= 400 ? c.getErrorStream() : c.getInputStream());
+            if (code >= 400) return "";
+            return sanitizeAssistantText(extractFollowupAnswerText(new JSONObject(raw)));
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private String followupAfterObsidianTool(String key, String source, String model, String userText, String result) {
+        try {
+            JSONObject body = new JSONObject();
+            body.put("model", model);
+            body.put("stream", false);
+            JSONArray arr = new JSONArray();
+            arr.put(new JSONObject().put("role", "system").put("content",
+                    "Your previous response contained only an Obsidian tool call that already ran (" + (result == null ? "" : result) + "). "
+                            + "Do not output any tool calls. Briefly confirm what you did for the user."));
+            arr.put(new JSONObject().put("role", "user").put("content", userText == null ? "" : userText));
+            body.put("messages", arr);
+            HttpURLConnection c = (HttpURLConnection) new URL(chatCompletionsUrl(source, model)).openConnection();
+            c.setRequestMethod("POST"); c.setConnectTimeout(20000); c.setReadTimeout(45000); c.setDoOutput(true);
+            if (key.length() > 0) c.setRequestProperty("Authorization", "Bearer " + key);
+            c.setRequestProperty("Content-Type", "application/json");
+            if (source.equals("openrouter")) { c.setRequestProperty("HTTP-Referer", "https://minimal.chat/android"); c.setRequestProperty("X-Title", "obsidian followup"); }
+            OutputStream os = c.getOutputStream(); os.write(body.toString().getBytes(StandardCharsets.UTF_8)); os.close();
+            int code = c.getResponseCode();
+            String raw = readAll(code >= 400 ? c.getErrorStream() : c.getInputStream());
+            if (code >= 400) return "";
+            return sanitizeAssistantText(extractFollowupAnswerText(new JSONObject(raw)));
+        } catch (Exception e) {
+            return "";
+        }
     }
 
     private String buildUserMemoryContext() {
@@ -3777,13 +4291,13 @@ public class MainActivity extends Activity {
         if (text == null || text.length() == 0) return "";
         String s = text;
         s = s.replaceAll("(?is)<tool_call\\b[^>]*>.*?</tool_call>", "");
-        s = s.replaceAll("(?is)<function\\s*=\\s*(?:save_memory|remove_memory|web_search)[^>]*>.*?</function>", "");
+        s = s.replaceAll("(?is)<function\\s*=\\s*(?:save_memory|remove_memory|web_search|obsidian_write|obsidian_append|obsidian_read)[^>]*>.*?</function>", "");
         // Pipe-token blocks: <|tool_call|>…</|tool_call|>, <|tool_call_started|>…<|tool_call_ended|>, etc.
         s = s.replaceAll("(?is)<\\|/?tool[_\\s-]?calls?(?:_section)?(?:_started|_ended|_begin|_end)?\\|>.*?<\\|/?tool[_\\s-]?calls?(?:_section)?(?:_started|_ended|_begin|_end)?\\|>", "");
         s = s.replaceAll("(?is)\\[(?:google|web[_\\s-]?search|search|bing|brave)\\s*\\([^\\]]*\\)\\]", "");
         s = s.replaceAll("(?is)<\\|/?tool[_\\s-]?calls?(?:_section)?(?:_started|_ended|_begin|_end)?\\|>[\\s\\S]*$", "");
         s = s.replaceAll("(?is)<tool_call\\b[^>]*>[\\s\\S]*$", "");
-        s = s.replaceAll("(?is)<function\\s*=\\s*(?:save_memory|remove_memory|web_search)[^>]*>[\\s\\S]*$", "");
+        s = s.replaceAll("(?is)<function\\s*=\\s*(?:save_memory|remove_memory|web_search|obsidian_write|obsidian_append|obsidian_read)[^>]*>[\\s\\S]*$", "");
         s = s.replaceAll("(?is)\\[(?:google|web[_\\s-]?search|search)\\s*\\([^\\]]*$", "");
         return s.trim();
     }
@@ -3794,7 +4308,9 @@ public class MainActivity extends Activity {
         return lower.contains("<tool_call") || lower.contains("<|tool_call") || lower.contains("tool_call_started")
                 || lower.contains("tool_call_ended") || lower.contains("[google(") || lower.contains("<function=web_search")
                 || lower.contains("<function=save_memory") || lower.contains("<function=remove_memory")
-                || (lower.contains("web_search") && lower.contains("<"));
+                || lower.contains("<function=obsidian_write") || lower.contains("<function=obsidian_append") || lower.contains("<function=obsidian_read")
+                || (lower.contains("web_search") && lower.contains("<"))
+                || (lower.contains("obsidian_") && lower.contains("<"));
     }
 
     private String sanitizeAssistantText(String text) {
@@ -6054,6 +6570,21 @@ public class MainActivity extends Activity {
             }
             Uri u = data.getData();
             if (u != null) attachUri(u, true);
+            return;
+        }
+        if (req == PICK_OBSIDIAN_VAULT) {
+            Uri u = data.getData();
+            if (u == null) return;
+            final int flags = data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            try { getContentResolver().takePersistableUriPermission(u, flags | Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION); }
+            catch (Exception ignored) {
+                try { getContentResolver().takePersistableUriPermission(u, Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION); }
+                catch (Exception e) { toast("couldn't keep vault access"); return; }
+            }
+            String name = vaultDisplayName(u);
+            prefs.edit().putString("obsidianVaultUri", u.toString()).putString("obsidianVaultName", name).putBoolean("obsidianEnabled", true).apply();
+            toast("vault linked");
+            if (pane == 2) showSettingsPane();
         }
     }
 
@@ -7254,8 +7785,8 @@ public class MainActivity extends Activity {
         }
     }
     public static class Msg {
-        String role, text, imageBase64 = "", imageMime = "", stats, model, replyQuote, reasoning = "", memorySavedText = "";
-        boolean slowVoice = false, reasoningCapable = false, thinkingExpanded = false, searchExpanded = false, memorySaved = false, memoryExpanded = false, ttsRequested = false, ttsPrefetching = false, ttsStarted = false, ttsPlaying = false, ttsStartDelayDone = false, streamDone = false, skipImagesInRequest = false;
+        String role, text, imageBase64 = "", imageMime = "", stats, model, replyQuote, reasoning = "", memorySavedText = "", obsidianSavedText = "";
+        boolean slowVoice = false, reasoningCapable = false, thinkingExpanded = false, searchExpanded = false, memorySaved = false, memoryExpanded = false, obsidianSaved = false, obsidianExpanded = false, ttsRequested = false, ttsPrefetching = false, ttsStarted = false, ttsPlaying = false, ttsStartDelayDone = false, streamDone = false, skipImagesInRequest = false;
         int spokenChars = 0, ttsPlaybackFailures = 0, voiceSessionId = 0, thinkingAnimStep = 0;
         long startedAt = System.currentTimeMillis(), thoughtMs = 0;
         ArrayList<AttachedImage> images = new ArrayList<AttachedImage>();
@@ -7289,7 +7820,7 @@ public class MainActivity extends Activity {
                 if (img == null || img.base64 == null || img.base64.length() == 0) continue;
                 imgs.put(new JSONObject().put("data", img.base64).put("mime", img.mime == null || img.mime.length() == 0 ? "image/jpeg" : img.mime));
             }
-            return new JSONObject().put("role",role).put("text",text).put("image",imageBase64).put("mime",imageMime).put("images",imgs).put("skipImagesInRequest",skipImagesInRequest).put("stats",stats).put("model",model).put("replyQuote",replyQuote).put("reasoning",reasoning).put("thoughtMs",thoughtMs).put("memorySaved",memorySaved).put("memorySavedText",memorySavedText).put("searchSources",src);
+            return new JSONObject().put("role",role).put("text",text).put("image",imageBase64).put("mime",imageMime).put("images",imgs).put("skipImagesInRequest",skipImagesInRequest).put("stats",stats).put("model",model).put("replyQuote",replyQuote).put("reasoning",reasoning).put("thoughtMs",thoughtMs).put("memorySaved",memorySaved).put("memorySavedText",memorySavedText).put("obsidianSaved",obsidianSaved).put("obsidianSavedText",obsidianSavedText).put("searchSources",src);
         }
         static Msg fromJson(JSONObject o) {
             Msg m = new Msg(o.optString("role"),o.optString("text"),o.optString("image"),o.optString("mime"),o.optString("stats"),o.optString("model"),o.optString("replyQuote"));
@@ -7297,6 +7828,8 @@ public class MainActivity extends Activity {
             m.thoughtMs = o.optLong("thoughtMs", 0);
             m.memorySaved = o.optBoolean("memorySaved", false);
             m.memorySavedText = o.optString("memorySavedText", "");
+            m.obsidianSaved = o.optBoolean("obsidianSaved", false);
+            m.obsidianSavedText = o.optString("obsidianSavedText", "");
             m.skipImagesInRequest = o.optBoolean("skipImagesInRequest", false);
             JSONArray imgs = o.optJSONArray("images");
             if (imgs != null && imgs.length() > 0) {
