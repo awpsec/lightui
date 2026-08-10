@@ -956,14 +956,20 @@ public class MainActivity extends Activity {
     }
 
     private void addObsidianSettings(LinearLayout settings) {
+        boolean installed = obsidianAppInstalled();
         LinearLayout rowToggle = row();
         TextView label = text("obsidian notes", 16, Color.WHITE);
         label.setGravity(Gravity.CENTER_VERTICAL);
         rowToggle.addView(label, new LinearLayout.LayoutParams(0, dp(42), 1));
         final TogglePill toggle = new TogglePill(this);
-        toggle.checked = obsidianEnabled();
+        toggle.checked = obsidianEnabled() && installed;
         toggle.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
+                if (!obsidianAppInstalled()) {
+                    toast(obsidianMissingMessage());
+                    showSettingsPane();
+                    return;
+                }
                 boolean next = !obsidianEnabled();
                 prefs.edit().putBoolean("obsidianEnabled", next).apply();
                 toggle.checked = next;
@@ -976,11 +982,13 @@ public class MainActivity extends Activity {
         settings.addView(rowToggle);
         settings.addView(separator());
 
-        TextView status = text(obsidianStatusText(), 12, Color.rgb(150, 150, 150));
+        TextView status = text(obsidianStatusText(), 12, installed ? Color.rgb(150, 150, 150) : Color.rgb(200, 160, 120));
         status.setPadding(0, dp(6), 0, dp(6));
         settings.addView(status, new LinearLayout.LayoutParams(-1, -2));
 
-        TextView hint = text("Pick your Obsidian vault folder so the model can create and update notes (grocery lists, todos, etc).", 12, Color.rgb(120, 120, 120));
+        TextView hint = text(installed
+                ? "Pick your Obsidian vault folder so the model can create and update notes (grocery lists, todos, etc)."
+                : obsidianMissingMessage(), 12, Color.rgb(120, 120, 120));
         hint.setPadding(0, dp(4), 0, dp(10));
         settings.addView(hint, new LinearLayout.LayoutParams(-1, -2));
 
@@ -2691,7 +2699,18 @@ public class MainActivity extends Activity {
                 if (savedMemory.length() > 0) { assistant.memorySaved = true; assistant.memorySavedText = savedMemory; }
             }
             String obsidianReadPath = obsidianReadToolPath(finalAnswer);
-            if (obsidianReady() && obsidianReadPath.length() > 0) {
+            String obsidianWritePath = obsidianWriteToolPath(finalAnswer);
+            String obsidianAppendPath = obsidianAppendToolPath(finalAnswer);
+            boolean hasObsidianTool = obsidianReadPath.length() > 0 || obsidianWritePath.length() > 0 || obsidianAppendPath.length() > 0
+                    || finalAnswer.toLowerCase(Locale.US).contains("obsidian_write")
+                    || finalAnswer.toLowerCase(Locale.US).contains("obsidian_append")
+                    || finalAnswer.toLowerCase(Locale.US).contains("obsidian_read");
+            if (hasObsidianTool && !obsidianReady()) {
+                assistant.obsidianSaved = true;
+                assistant.obsidianSavedText = obsidianNotReadyReason();
+                finalAnswer = cleanAfterToolStrip(stripToolCalls(finalAnswer));
+                if (finalAnswer.trim().length() == 0) finalAnswer = obsidianNotReadyReason();
+            } else if (obsidianReady() && obsidianReadPath.length() > 0) {
                 String noteBody = readObsidianNote(obsidianReadPath);
                 assistant.obsidianSaved = true;
                 assistant.obsidianSavedText = noteBody.startsWith("ERROR:")
@@ -2702,18 +2721,16 @@ public class MainActivity extends Activity {
                 if (answered.length() > 0) finalAnswer = answered;
                 else if (finalAnswer.trim().length() == 0) finalAnswer = noteBody.startsWith("ERROR:") ? noteBody.substring(6).trim() : "Here's that note:\n\n" + noteBody;
             } else if (obsidianReady()) {
-                String writePath = obsidianWriteToolPath(finalAnswer);
                 String writeContent = obsidianWriteToolContent(finalAnswer);
-                String appendPath = obsidianAppendToolPath(finalAnswer);
                 String appendContent = obsidianAppendToolContent(finalAnswer);
                 boolean usedObsidian = false;
-                if (writePath.length() > 0) {
-                    String result = writeObsidianNote(writePath, writeContent, false);
+                if (obsidianWritePath.length() > 0) {
+                    String result = writeObsidianNote(obsidianWritePath, writeContent, false);
                     assistant.obsidianSaved = true;
                     assistant.obsidianSavedText = result;
                     usedObsidian = true;
-                } else if (appendPath.length() > 0) {
-                    String result = writeObsidianNote(appendPath, appendContent, true);
+                } else if (obsidianAppendPath.length() > 0) {
+                    String result = writeObsidianNote(obsidianAppendPath, appendContent, true);
                     assistant.obsidianSaved = true;
                     assistant.obsidianSavedText = result;
                     usedObsidian = true;
@@ -3587,7 +3604,24 @@ public class MainActivity extends Activity {
                 + "Never reply with only a tool call. Never mention these tools unless asked.";
     }
 
+    private static final String OBSIDIAN_PACKAGE = "md.obsidian";
+
     private boolean obsidianEnabled() { return prefs != null && prefs.getBoolean("obsidianEnabled", false); }
+
+    private boolean obsidianAppInstalled() {
+        try {
+            getPackageManager().getPackageInfo(OBSIDIAN_PACKAGE, 0);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private String obsidianMissingMessage() { return ObsidianTools.MISSING_APP; }
+
+    private String obsidianNotReadyReason() {
+        return ObsidianTools.notReadyReason(obsidianAppInstalled(), obsidianEnabled(), obsidianTreeUri() != null);
+    }
 
     private Uri obsidianTreeUri() {
         if (prefs == null) return null;
@@ -3595,16 +3629,23 @@ public class MainActivity extends Activity {
         return s.length() == 0 ? null : Uri.parse(s);
     }
 
-    private boolean obsidianReady() { return obsidianEnabled() && obsidianTreeUri() != null; }
+    private boolean obsidianReady() {
+        return obsidianEnabled() && obsidianAppInstalled() && obsidianTreeUri() != null;
+    }
 
     private String obsidianStatusText() {
-        if (obsidianTreeUri() == null) return "no vault linked. choose your Obsidian vault folder.";
+        if (!obsidianAppInstalled()) return obsidianMissingMessage();
+        if (obsidianTreeUri() == null) return "Obsidian installed · no vault linked. choose your vault folder.";
         String name = prefs.getString("obsidianVaultName", "");
         if (name.length() == 0) name = "linked vault";
         return (obsidianEnabled() ? "on" : "off") + " · vault: " + name;
     }
 
     private void pickObsidianVault() {
+        if (!obsidianAppInstalled()) {
+            toast(obsidianMissingMessage());
+            return;
+        }
         try {
             Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
@@ -3645,15 +3686,7 @@ public class MainActivity extends Activity {
         return "vault";
     }
 
-    private String normalizeObsidianPath(String path) {
-        String p = path == null ? "" : path.trim().replace('\\', '/');
-        while (p.startsWith("/")) p = p.substring(1);
-        if (p.contains("..")) p = p.replace("..", "");
-        p = p.replaceAll("/+", "/");
-        if (p.length() == 0) return "";
-        if (!p.toLowerCase(Locale.US).endsWith(".md")) p = p + ".md";
-        return p;
-    }
+    private String normalizeObsidianPath(String path) { return ObsidianTools.normalizePath(path); }
 
     private String buildObsidianNoteIndex() {
         if (!obsidianReady()) return "";
@@ -3853,11 +3886,7 @@ public class MainActivity extends Activity {
                     doc = existing;
                     String prev = readObsidianNote(path);
                     if (prev.startsWith("ERROR:")) return prev;
-                    StringBuilder merged = new StringBuilder(prev == null ? "" : prev);
-                    if (merged.length() > 0 && merged.charAt(merged.length() - 1) != '\n') merged.append('\n');
-                    merged.append(body);
-                    if (merged.charAt(merged.length() - 1) != '\n') merged.append('\n');
-                    body = merged.toString();
+                    body = ObsidianTools.mergeAppend(prev, body);
                     mode = "updated";
                 }
             } else {
@@ -3874,60 +3903,11 @@ public class MainActivity extends Activity {
         }
     }
 
-    private String toolParam(String text, String function, String param) {
-        if (text == null || function == null || param == null) return "";
-        String lower = text.toLowerCase(Locale.US);
-        if (!lower.contains(function.toLowerCase(Locale.US))) return "";
-        java.util.regex.Pattern[] patterns = new java.util.regex.Pattern[]{
-                java.util.regex.Pattern.compile("(?is)<parameter\\s*=\\s*" + param + "\\s*>(.*?)</parameter>"),
-                java.util.regex.Pattern.compile("(?is)<parameter\\s+name\\s*=\\s*[\"']?" + param + "[\"']?\\s*>(.*?)</parameter>"),
-                java.util.regex.Pattern.compile("(?is)[\"']?" + param + "[\"']?\\s*[:=]\\s*[\"']?(.*?)(?:[\"']?\\s*</parameter>|</function>|</tool_call>|\\n)")
-        };
-        for (java.util.regex.Pattern p : patterns) {
-            java.util.regex.Matcher m = p.matcher(text);
-            while (m.find()) {
-                // Prefer matches that sit near the requested function name.
-                int at = m.start();
-                int from = Math.max(0, at - 240);
-                String window = text.substring(from, Math.min(text.length(), at + 20)).toLowerCase(Locale.US);
-                if (!window.contains(function.toLowerCase(Locale.US)) && !lower.contains("<function=" + function.toLowerCase(Locale.US))) {
-                    // still accept if the function appears anywhere and this is the only param match
-                }
-                String val = cleanMemoryToolNote(m.group(1));
-                // For content, don't strip quotes as aggressively — restore a softer clean.
-                if ("content".equals(param)) {
-                    val = m.group(1) == null ? "" : m.group(1).replace("&quot;", "\"").replace("&apos;", "'").replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&").trim();
-                }
-                if (val.length() > 0) return val;
-            }
-        }
-        return "";
-    }
-
-    private String obsidianWriteToolPath(String text) {
-        String p = toolParam(text, "obsidian_write", "path");
-        if (p.length() == 0) p = toolParam(text, "obsidian_write", "note");
-        if (p.length() == 0) p = toolParam(text, "obsidian_write", "title");
-        return p;
-    }
-
-    private String obsidianWriteToolContent(String text) { return toolParam(text, "obsidian_write", "content"); }
-
-    private String obsidianAppendToolPath(String text) {
-        String p = toolParam(text, "obsidian_append", "path");
-        if (p.length() == 0) p = toolParam(text, "obsidian_append", "note");
-        if (p.length() == 0) p = toolParam(text, "obsidian_append", "title");
-        return p;
-    }
-
-    private String obsidianAppendToolContent(String text) { return toolParam(text, "obsidian_append", "content"); }
-
-    private String obsidianReadToolPath(String text) {
-        String p = toolParam(text, "obsidian_read", "path");
-        if (p.length() == 0) p = toolParam(text, "obsidian_read", "note");
-        if (p.length() == 0) p = toolParam(text, "obsidian_read", "title");
-        return p;
-    }
+    private String obsidianWriteToolPath(String text) { return ObsidianTools.writePath(text); }
+    private String obsidianWriteToolContent(String text) { return ObsidianTools.writeContent(text); }
+    private String obsidianAppendToolPath(String text) { return ObsidianTools.appendPath(text); }
+    private String obsidianAppendToolContent(String text) { return ObsidianTools.appendContent(text); }
+    private String obsidianReadToolPath(String text) { return ObsidianTools.readPath(text); }
 
     private String answerAfterObsidianRead(String key, String source, String model, String path, String noteBody, String userText) {
         try {
