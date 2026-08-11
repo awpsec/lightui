@@ -107,7 +107,7 @@ public class MainActivity extends Activity {
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
     private static final String SEARCHING = "__searching__";
-    private static final String APP_VERSION = "1.0.19";
+    private static final String APP_VERSION = "1.0.20";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 64;
@@ -2054,7 +2054,9 @@ public class MainActivity extends Activity {
         for (int i = messageStart; i < messageEnd; i++) {
             Msg m = messages.get(i);
             final boolean isSearching = SEARCHING.equals(m.stats);
-            final boolean hasThinkingRow = m.role.equals("assistant") && ((m.reasoning.length() > 0 && !m.reasoning.trim().equals("null")) || (LOADING.equals(m.stats) && m.reasoningCapable));
+            // While searching, show only the searching wave — stacking "thought for X" + searching left a big empty gap.
+            final boolean hasThinkingRow = m.role.equals("assistant") && !isSearching
+                    && ((m.reasoning.length() > 0 && !m.reasoning.trim().equals("null")) || (LOADING.equals(m.stats) && m.reasoningCapable));
             // Only show gathered sources after the turn finishes — mid-stream URL lists feel like a premature "search done".
             final boolean hasSearchRow = m.role.equals("assistant") && m.searchSources.size() > 0 && m.streamDone && !isSearching;
             final boolean hasMemoryRow = m.role.equals("assistant") && m.streamDone && m.memorySaved;
@@ -2083,7 +2085,7 @@ public class MainActivity extends Activity {
             if (hasThinkingRow) {
                 final Msg thinkingMessage = m;
                 LinearLayout thinkRow = row();
-                thinkRow.setPadding(0, dp(4), 0, dp(4));
+                thinkRow.setPadding(0, dp(2), 0, dp(2));
                 TextView thinking;
                 if (!m.streamDone && m.text.length() == 0 && !isSearching) {
                     JumpTextView jump = new JumpTextView(this);
@@ -2096,9 +2098,8 @@ public class MainActivity extends Activity {
                 }
                 thinking.setTextColor(Color.rgb(135,135,135)); thinking.setGravity(Gravity.CENTER_VERTICAL); setTextPx(thinking, 11); thinking.setPadding(0, 0, 0, 0);
                 thinking.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { toggleThinking(thinkingMessage); } });
-                thinking.setMinHeight(dp(34));
-                thinkRow.setMinimumHeight(dp(42));
-                thinkRow.addView(thinking, new LinearLayout.LayoutParams(-1, dp(34)));
+                thinking.setMinHeight(dp(28));
+                thinkRow.addView(thinking, new LinearLayout.LayoutParams(-1, dp(28)));
                 thinkRow.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { toggleThinking(thinkingMessage); } });
                 messageList.addView(thinkRow, new LinearLayout.LayoutParams(-1, -2));
                 if (m.thinkingExpanded && m.reasoning.length() > 0) {
@@ -2111,16 +2112,15 @@ public class MainActivity extends Activity {
             }
             if (isSearching) {
                 LinearLayout searchRow = row();
-                searchRow.setPadding(0, dp(4), 0, dp(4));
+                searchRow.setPadding(0, dp(2), 0, dp(2));
                 JumpTextView searching = new JumpTextView(this);
                 searching.word = "searching";
                 searching.bind(m);
                 searching.setTextColor(Color.rgb(135,135,135));
                 searching.setGravity(Gravity.CENTER_VERTICAL);
                 setTextPx(searching, 11);
-                searching.setMinHeight(dp(34));
-                searchRow.setMinimumHeight(dp(42));
-                searchRow.addView(searching, new LinearLayout.LayoutParams(-1, dp(34)));
+                searching.setMinHeight(dp(28));
+                searchRow.addView(searching, new LinearLayout.LayoutParams(-1, dp(28)));
                 messageList.addView(searchRow, new LinearLayout.LayoutParams(-1, -2));
             } else if (hasSearchRow) {
                 final Msg searchMessage = m;
@@ -2589,6 +2589,9 @@ public class MainActivity extends Activity {
                     }
                     assistant.text = "";
                     assistant.stats = SEARCHING;
+                    // Fresh wave phase for "searching" (don't continue the thinking cycle mid-pause).
+                    assistant.jumpAnimStartMs = 0L;
+                    assistant.jumpAnimWord = "";
                     forceAutoScrollBottom = userAtChatBottom;
                     renderMessages();
                 } });
@@ -3138,25 +3141,12 @@ public class MainActivity extends Activity {
             }
             if (ToolText.isUsableFollowupAnswer(out)) return out;
         } catch (Exception ignored) { }
-        if (assistantSearchFallback(cleaned).length() > 0) return assistantSearchFallback(cleaned);
-        return "I gathered sources, but couldn't form a clear answer from them.";
-    }
-
-    private String assistantSearchFallback(String result) {
-        if (result == null || result.trim().length() == 0) return "";
-        // Last resort: surface the first useful snippet so the turn is never blank after a search.
-        String[] lines = result.replace('\r', '\n').split("\n");
-        StringBuilder b = new StringBuilder();
-        for (String line : lines) {
-            String t = line.trim();
-            if (t.length() < 28) continue;
-            if (t.startsWith("http://") || t.startsWith("https://")) continue;
-            if (t.matches("^\\d+\\.\\s*.*") && t.length() < 40) continue;
-            b.append(t);
-            break;
+        String snippet = ToolText.searchSnippetFallback(cleaned);
+        if (snippet.length() > 0) {
+            // Phrase as a partial note — never dump a raw "[1] Title:" line as the answer.
+            return "I couldn't form a clean summary from the sources. Closest detail I found:\n\n" + snippet;
         }
-        if (b.length() == 0) return "";
-        return "From the gathered sources: " + b.toString();
+        return "I gathered sources, but couldn't form a clear answer from them. Try asking again, or open one of the gathered links.";
     }
 
     private String followupAfterWebSearch(String key, String source, String model, String query, String result, String userText, boolean retry) throws Exception {
@@ -3164,14 +3154,15 @@ public class MainActivity extends Activity {
         JSONObject body = new JSONObject();
         body.put("model", model);
         JSONArray arr = new JSONArray();
-        String system = retry
-                ? "Your previous reply was only a tool call or empty. The web search already ran. Answer the user's question now in plain text using the results below. Do not output tool calls, XML, function calls, google(...), or <|tool_call|> markers.\n\n"
-                : "Web search results are provided below. Answer the user's question directly in plain text. Do not output tool calls, XML, function calls, google(...), or <|tool_call|> markers. Prefer concrete facts (scores, dates, final results) from the snippets; cite a URL only when helpful.\n\n";
+        String system = ToolText.webSearchFollowupSystem(retry);
         system += buildCurrentTimeContext() + "\n\nQuery: " + query + "\n\n" + cleanSearchArtifacts(result);
         arr.put(new JSONObject().put("role", "system").put("content", system));
         String folderInstruction = buildFolderInstructionContext();
         if (folderInstruction.length() > 0) arr.put(new JSONObject().put("role", "system").put("content", folderInstruction));
         String ask = userText == null || userText.trim().length() == 0 ? query : userText.trim();
+        if (retry) {
+            ask = ask + "\n\nRespond with concrete facts only (prices/numbers/dates if relevant). Do not return a title or citation header.";
+        }
         arr.put(new JSONObject().put("role", "user").put("content", ask));
         body.put("messages", arr);
         body.put("stream", false);
@@ -7123,7 +7114,6 @@ public class MainActivity extends Activity {
     public class GlobeButton extends View { Paint p = new Paint(Paint.ANTI_ALIAS_FLAG); boolean active = false; public GlobeButton(Context c) { super(c); } @Override protected void onDraw(Canvas c) { if (!active) return; int w=getWidth(), h=getHeight(); float r=Math.min(w,h)*0.25f, cx=w/2f, cy=h/2f; p.setColor(Color.WHITE); p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(Math.max(1f, dp(1))); p.setStrokeCap(Paint.Cap.ROUND); c.drawCircle(cx, cy, r, p); c.drawOval(cx-r*0.45f, cy-r, cx+r*0.45f, cy+r, p); c.drawArc(cx-r, cy-r*0.55f, cx+r, cy+r*0.55f, 0, 360, false, p); c.drawLine(cx-r*0.94f, cy, cx+r*0.94f, cy, p); } }
     public class JumpTextView extends TextView {
         String word = "thinking";
-        int step = 0;
         Msg bound;
         final Runnable tick = new Runnable() { @Override public void run() { animateJump(); } };
         public JumpTextView(Context c) {
@@ -7134,7 +7124,14 @@ public class MainActivity extends Activity {
         }
         void bind(Msg m) {
             bound = m;
-            if (m != null) step = Math.max(0, m.thinkingAnimStep);
+            String w = word == null || word.length() == 0 ? "thinking" : word;
+            if (m != null) {
+                // Time-based phase survives view recreate during streaming re-renders.
+                if (m.jumpAnimStartMs == 0L || m.jumpAnimWord == null || !w.equals(m.jumpAnimWord)) {
+                    m.jumpAnimWord = w;
+                    m.jumpAnimStartMs = android.os.SystemClock.uptimeMillis();
+                }
+            }
         }
         @Override protected void onAttachedToWindow() {
             super.onAttachedToWindow();
@@ -7143,24 +7140,36 @@ public class MainActivity extends Activity {
         }
         @Override protected void onDetachedFromWindow() {
             removeCallbacks(tick);
-            if (bound != null) bound.thinkingAnimStep = step;
             super.onDetachedFromWindow();
         }
         private void animateJump() {
             if (!isAttachedToWindow()) return;
             String w = word == null || word.length() == 0 ? "thinking" : word;
+            long start = bound != null && bound.jumpAnimStartMs > 0L
+                    ? bound.jumpAnimStartMs : android.os.SystemClock.uptimeMillis();
+            if (bound != null && bound.jumpAnimStartMs == 0L) {
+                bound.jumpAnimStartMs = start;
+                bound.jumpAnimWord = w;
+            }
+            final int letterMs = 110;
+            final int pauseMs = 160;
+            int cycleMs = Math.max(letterMs, w.length() * letterMs + pauseMs);
+            long elapsed = Math.max(0L, android.os.SystemClock.uptimeMillis() - start);
+            int posInCycle = (int) (elapsed % cycleMs);
+            int pos = posInCycle / letterMs;
+            int peak = Math.min(pos, w.length() - 1);
+            boolean inPause = pos >= w.length();
             SpannableString span = new SpannableString(w);
-            int cycle = w.length() + 4, pos = step++ % cycle, peak = Math.min(pos, w.length() - 1);
-            if (bound != null) bound.thinkingAnimStep = step;
             for (int i = 0; i < w.length(); i++) {
                 final int dist = Math.abs(i - peak);
-                final int shift = pos >= w.length() ? 0 : dist == 0 ? dp(3) : dist == 1 ? dp(1) : 0;
+                final int shift = inPause ? 0 : dist == 0 ? dp(3) : dist == 1 ? dp(1) : 0;
                 if (shift > 0) span.setSpan(new android.text.style.CharacterStyle() {
                     @Override public void updateDrawState(android.text.TextPaint tp) { tp.baselineShift += shift; }
                 }, i, i + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
             }
             setText(span);
-            postDelayed(tick, pos >= w.length() ? 260 : 135);
+            // Steady cadence; time-based phase keeps motion smooth across rebinds.
+            postDelayed(tick, 50);
         }
     }
     public static class ContextMeter extends View {
@@ -7199,7 +7208,8 @@ public class MainActivity extends Activity {
         String role, text, imageBase64 = "", imageMime = "", stats, model, replyQuote, reasoning = "", memorySavedText = "";
         boolean slowVoice = false, reasoningCapable = false, thinkingExpanded = false, searchExpanded = false, memorySaved = false, memoryExpanded = false, ttsRequested = false, ttsPrefetching = false, ttsStarted = false, ttsPlaying = false, ttsStartDelayDone = false, streamDone = false, skipImagesInRequest = false;
         int spokenChars = 0, ttsPlaybackFailures = 0, voiceSessionId = 0, thinkingAnimStep = 0;
-        long startedAt = System.currentTimeMillis(), thoughtMs = 0;
+        long startedAt = System.currentTimeMillis(), thoughtMs = 0, jumpAnimStartMs = 0;
+        String jumpAnimWord = "";
         ArrayList<AttachedImage> images = new ArrayList<AttachedImage>();
         ArrayList<String> ttsQueue = new ArrayList<String>();
         ArrayList<String> searchSources = new ArrayList<String>();

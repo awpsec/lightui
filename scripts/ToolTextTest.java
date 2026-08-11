@@ -70,6 +70,22 @@ public class ToolTextTest {
 
         assertTrue("prompt teaches format", ToolText.webSearchToolsPrompt().contains("<function=web_search>"));
 
+        // DDR5-style Jina dump must not become the chat answer.
+        String jina = "[1] Title: The DDR5 Price Crisis: Why RAM Costs So Much in 2026 and How to Buy Smart\n"
+                + "URL Source: https://example.com/ddr5\n"
+                + "Published Date: 2026-08-01\n"
+                + "Description: DDR5-6000 CL30 2x32GB kits are commonly listing around $280-$360 this week, with some spikes higher during shortages.\n"
+                + "\n"
+                + "[2] Title: Another headline without a body\n"
+                + "URL Source: https://example.com/other\n";
+        String titleOnly = "From the gathered sources: [1] Title: The DDR5 Price Crisis: Why RAM Costs So Much in 2026 and How to Buy Smart";
+        assertTrue("title dump unusable", !ToolText.isUsableFollowupAnswer(titleOnly));
+        assertTrue("raw title line is meta", ToolText.isSourceMetaLine("[1] Title: The DDR5 Price Crisis: Why RAM Costs So Much in 2026 and How to Buy Smart"));
+        String snippet = ToolText.searchSnippetFallback(jina);
+        assertTrue("fallback prefers description", snippet.toLowerCase().contains("280") || snippet.toLowerCase().contains("ddr5"));
+        assertTrue("fallback is not a title", !snippet.toLowerCase().contains("title:"));
+        assertTrue("followup system asks for facts", ToolText.webSearchFollowupSystem(true).toLowerCase().contains("concrete facts"));
+
         if (failed > 0) { System.err.println(failed + " failed"); System.exit(1); }
         System.out.println("all passed");
     }

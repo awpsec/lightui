@@ -241,7 +241,74 @@ public final class ToolText {
         if (v.length() == 0) return false;
         if (looksLikeToolResidue(v)) return false;
         if (looksLikeSearchPlanning(v)) return false;
+        if (looksLikeSourceMetadataOnly(v)) return false;
         return true;
+    }
+
+    /** Title/citation dumps that are not real answers (e.g. "[1] Title: …"). */
+    public static boolean looksLikeSourceMetadataOnly(String text) {
+        String t = text == null ? "" : text.trim();
+        if (t.length() == 0) return false;
+        String lower = t.toLowerCase(Locale.US);
+        if (lower.startsWith("from the gathered sources:")) {
+            String rest = t.substring("from the gathered sources:".length()).trim();
+            return rest.length() == 0 || isSourceMetaLine(rest);
+        }
+        if (isSourceMetaLine(t)) return true;
+        // Single-line answers that are only a headline / citation header.
+        if (!t.contains("\n") && t.length() < 160 && isSourceMetaLine(t)) return true;
+        return false;
+    }
+
+    public static boolean isSourceMetaLine(String line) {
+        String t = line == null ? "" : line.trim();
+        if (t.length() == 0) return true;
+        String lower = t.toLowerCase(Locale.US);
+        if (lower.startsWith("http://") || lower.startsWith("https://")) return true;
+        if (lower.startsWith("url source:") || lower.startsWith("url:") || lower.startsWith("link:")) return true;
+        if (lower.startsWith("published date:") || lower.startsWith("published:") || lower.startsWith("date:")) return true;
+        if (lower.startsWith("title:") || lower.matches("(?i)^\\[?\\d+\\]?\\.?\\s*title\\s*:.*")) return true;
+        if (lower.matches("(?i)^\\[\\d+\\]\\s*title\\s*:.*")) return true;
+        if (lower.matches("(?i)^\\[\\d+\\]\\s*.{0,120}") && (lower.contains("title:") || lower.length() < 90)) return true;
+        if (lower.matches("(?i)^\\d+\\.\\s+\\S.{0,100}") && !lower.matches("(?i).*\\b(\\$|usd|gb|mhz|cl\\d+|price|cost|around|typically|between)\\b.*")) {
+            // Brave "1. Some Article Headline" without price/fact cues.
+            if (!lower.contains("description") && t.length() < 120) return true;
+        }
+        if (lower.equals("description:") || lower.startsWith("description:") && t.length() < 24) return true;
+        return false;
+    }
+
+    /**
+     * Last-resort readable snippet from Jina/Brave plain-text results.
+     * Prefers description/body lines; never returns bare titles.
+     */
+    public static String searchSnippetFallback(String result) {
+        if (result == null || result.trim().length() == 0) return "";
+        String[] lines = result.replace('\r', '\n').split("\n");
+        String bestDesc = "";
+        String bestBody = "";
+        for (int i = 0; i < lines.length; i++) {
+            String t = lines[i].trim();
+            if (t.length() == 0) continue;
+            String lower = t.toLowerCase(Locale.US);
+            if (lower.startsWith("description:")) {
+                String d = t.substring("description:".length()).trim();
+                if (d.length() >= 40 && !isSourceMetaLine(d) && (bestDesc.length() == 0 || d.length() > bestDesc.length())) {
+                    bestDesc = d;
+                }
+                continue;
+            }
+            if (isSourceMetaLine(t)) continue;
+            if (t.length() < 40) continue;
+            // Prefer lines with concrete cues (prices, numbers, units).
+            boolean juicy = lower.matches(".*\\b(\\$|usd|€|£|gb|tb|mhz|cl\\d+|price|cost|\\d{2,}).*");
+            if (juicy && (bestBody.length() == 0 || t.length() > bestBody.length())) bestBody = t;
+            else if (bestBody.length() == 0) bestBody = t;
+        }
+        String pick = bestDesc.length() > 0 ? bestDesc : bestBody;
+        if (pick.length() == 0) return "";
+        if (looksLikeSourceMetadataOnly(pick)) return "";
+        return pick;
     }
 
     public static String webSearchToolsPrompt() {
@@ -250,5 +317,18 @@ public final class ToolText {
                 + "<tool_call><function=web_search><parameter=query>short search query</parameter></function></tool_call> "
                 + "Never reply with only a tool call wrapped in markdown fences. Never invent other tool XML formats. "
                 + "If search results were already provided in the system context, answer directly and do not emit tool calls.";
+    }
+
+    public static String webSearchFollowupSystem(boolean retry) {
+        String base = retry
+                ? "Your previous reply was not a usable answer (empty, tool call, planning, or only a source title). "
+                + "The web search already ran. Answer the user's question NOW in plain text using the results below. "
+                : "Web search results are provided below. Answer the user's question directly in plain text. ";
+        return base
+                + "Do not output tool calls, XML, function calls, google(...), or <|tool_call|> markers. "
+                + "Give concrete facts from the snippets (prices, numbers, dates, ranges). "
+                + "If prices vary by seller, give a typical current range and mention it varies. "
+                + "Never reply with only a source title, '[1] Title: …', or a bare headline. "
+                + "Cite a URL only when helpful.\n\n";
     }
 }
