@@ -1,5 +1,9 @@
 package com.lightos.minimalchat;
 
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -10,6 +14,103 @@ public final class ObsidianTools {
 
     public static final String MISSING_APP =
             "no Obsidian found on this device. install Obsidian to properly write notes.";
+
+    /** Expandable chat row label — matches MainActivity glyphs (› collapsed, ˅ expanded). */
+    public static String noteRowLabel(boolean expanded) {
+        return "obsidian note" + (expanded ? " ˅" : " ›");
+    }
+
+    /**
+     * Result of handling model tool markers for Obsidian notes.
+     * {@code savedText} is shown under the expandable note row when present.
+     */
+    public static final class ToolOutcome {
+        public final boolean showRow;
+        public final String savedText;
+        public final String cleanedAnswer;
+        public final String writePath;
+        public final String appendPath;
+        public final String readPath;
+        public final boolean notReady;
+
+        public ToolOutcome(boolean showRow, String savedText, String cleanedAnswer,
+                           String writePath, String appendPath, String readPath, boolean notReady) {
+            this.showRow = showRow;
+            this.savedText = savedText == null ? "" : savedText;
+            this.cleanedAnswer = cleanedAnswer == null ? "" : cleanedAnswer;
+            this.writePath = writePath == null ? "" : writePath;
+            this.appendPath = appendPath == null ? "" : appendPath;
+            this.readPath = readPath == null ? "" : readPath;
+            this.notReady = notReady;
+        }
+    }
+
+    /** Decide what the chat UI should show for Obsidian tools (before real vault I/O). */
+    public static ToolOutcome planTool(String answer, boolean appInstalled, boolean enabled, boolean vaultLinked) {
+        String text = answer == null ? "" : answer;
+        String writeP = writePath(text);
+        String appendP = appendPath(text);
+        String readP = readPath(text);
+        boolean hasTool = writeP.length() > 0 || appendP.length() > 0 || readP.length() > 0 || looksLikeTool(text);
+        if (!hasTool) return new ToolOutcome(false, "", text, writeP, appendP, readP, false);
+        boolean ready = appInstalled && enabled && vaultLinked;
+        if (!ready) {
+            String reason = notReadyReason(appInstalled, enabled, vaultLinked);
+            return new ToolOutcome(true, reason, reason, writeP, appendP, readP, true);
+        }
+        return new ToolOutcome(true, "", text, writeP, appendP, readP, false);
+    }
+
+    /** Host-testable vault write/append against a real directory (mirrors SAF merge rules). */
+    public static String writeVaultNote(File vaultRoot, String relativePath, String content, boolean append) {
+        try {
+            String path = normalizePath(relativePath);
+            if (path.length() == 0) return "ERROR: missing note path";
+            if (vaultRoot == null || !vaultRoot.isDirectory()) return "ERROR: no vault";
+            File dest = new File(vaultRoot, path);
+            File parent = dest.getParentFile();
+            if (parent != null && !parent.exists() && !parent.mkdirs()) return "ERROR: couldn't create folders";
+            String body = content == null ? "" : content;
+            String mode;
+            if (append) {
+                if (!dest.exists()) {
+                    mode = "created";
+                    if (!body.endsWith("\n")) body = body + "\n";
+                } else {
+                    String prev = readVaultNote(vaultRoot, path);
+                    if (prev.startsWith("ERROR:")) return prev;
+                    body = mergeAppend(prev, body);
+                    mode = "updated";
+                }
+            } else {
+                mode = "wrote";
+            }
+            FileOutputStream out = new FileOutputStream(dest, false);
+            try { out.write(body.getBytes(StandardCharsets.UTF_8)); out.flush(); }
+            finally { try { out.close(); } catch (Exception ignored) { } }
+            return mode + " " + path;
+        } catch (Exception e) {
+            return "ERROR: " + (e.getMessage() == null ? "write failed" : e.getMessage());
+        }
+    }
+
+    public static String readVaultNote(File vaultRoot, String relativePath) {
+        try {
+            String path = normalizePath(relativePath);
+            if (path.length() == 0) return "ERROR: missing note path";
+            File dest = new File(vaultRoot, path);
+            if (!dest.isFile()) return "ERROR: note not found: " + path;
+            FileInputStream in = new FileInputStream(dest);
+            try {
+                byte[] buf = new byte[(int) Math.min(dest.length(), 2_000_000L)];
+                int n = in.read(buf);
+                if (n <= 0) return "";
+                return new String(buf, 0, n, StandardCharsets.UTF_8);
+            } finally { try { in.close(); } catch (Exception ignored) { } }
+        } catch (Exception e) {
+            return "ERROR: " + (e.getMessage() == null ? "read failed" : e.getMessage());
+        }
+    }
 
     public static String normalizePath(String path) {
         String p = path == null ? "" : path.trim().replace('\\', '/');

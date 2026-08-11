@@ -2217,7 +2217,7 @@ public class MainActivity extends Activity {
             }
             if (hasObsidianRow) {
                 final Msg obsidianMessage = m;
-                TextView note = text("obsidian note" + (m.obsidianExpanded ? " ˅" : " ›"), 11, Color.rgb(135,135,135));
+                TextView note = text(ObsidianTools.noteRowLabel(m.obsidianExpanded), 11, Color.rgb(135,135,135));
                 note.setGravity(Gravity.CENTER_VERTICAL);
                 note.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { obsidianMessage.obsidianExpanded = !obsidianMessage.obsidianExpanded; renderMessages(); } });
                 messageList.addView(note, new LinearLayout.LayoutParams(-1, dp(24)));
@@ -2698,18 +2698,17 @@ public class MainActivity extends Activity {
                 String savedMemory = appendMemory(pendingUserMemoryNote, "user");
                 if (savedMemory.length() > 0) { assistant.memorySaved = true; assistant.memorySavedText = savedMemory; }
             }
-            String obsidianReadPath = obsidianReadToolPath(finalAnswer);
-            String obsidianWritePath = obsidianWriteToolPath(finalAnswer);
-            String obsidianAppendPath = obsidianAppendToolPath(finalAnswer);
-            boolean hasObsidianTool = obsidianReadPath.length() > 0 || obsidianWritePath.length() > 0 || obsidianAppendPath.length() > 0
-                    || finalAnswer.toLowerCase(Locale.US).contains("obsidian_write")
-                    || finalAnswer.toLowerCase(Locale.US).contains("obsidian_append")
-                    || finalAnswer.toLowerCase(Locale.US).contains("obsidian_read");
-            if (hasObsidianTool && !obsidianReady()) {
+            ObsidianTools.ToolOutcome obsidianPlan = ObsidianTools.planTool(
+                    finalAnswer, obsidianAppInstalled(), obsidianEnabled(), obsidianTreeUri() != null);
+            String obsidianReadPath = obsidianPlan.readPath;
+            String obsidianWritePath = obsidianPlan.writePath;
+            String obsidianAppendPath = obsidianPlan.appendPath;
+            if (obsidianPlan.showRow && obsidianPlan.notReady) {
+                // Missing Obsidian app / vault / toggle — same path for chat and voice (slowVoice).
                 assistant.obsidianSaved = true;
-                assistant.obsidianSavedText = obsidianNotReadyReason();
+                assistant.obsidianSavedText = obsidianPlan.savedText;
                 finalAnswer = cleanAfterToolStrip(stripToolCalls(finalAnswer));
-                if (finalAnswer.trim().length() == 0) finalAnswer = obsidianNotReadyReason();
+                if (finalAnswer.trim().length() == 0) finalAnswer = obsidianPlan.savedText;
             } else if (obsidianReady() && obsidianReadPath.length() > 0) {
                 String noteBody = readObsidianNote(obsidianReadPath);
                 assistant.obsidianSaved = true;
@@ -3612,6 +3611,12 @@ public class MainActivity extends Activity {
         try {
             getPackageManager().getPackageInfo(OBSIDIAN_PACKAGE, 0);
             return true;
+        } catch (Exception e) {
+            // Fall through — also try launcher resolve in case of OEM PM quirks.
+        }
+        try {
+            Intent launch = getPackageManager().getLaunchIntentForPackage(OBSIDIAN_PACKAGE);
+            return launch != null;
         } catch (Exception e) {
             return false;
         }
