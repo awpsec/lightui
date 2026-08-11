@@ -107,7 +107,7 @@ public class MainActivity extends Activity {
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
     private static final String SEARCHING = "__searching__";
-    private static final String APP_VERSION = "1.0.23";
+    private static final String APP_VERSION = "1.0.24";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 64;
@@ -194,6 +194,7 @@ public class MainActivity extends Activity {
     private float downX, downY;
     private boolean messageWindowReady = false, renderingMessages = false, savedChatScrollKnown = false, restoreScrollOnce = false, forceAutoScrollBottom = false, userAtChatBottom = true, voiceMode = false, voiceFullMode = false, voiceThinking = false, voiceAwaitingSpeechResult = false, ttsReady = false, hookVoiceMode = false, projectEditorOpen = false, recordingFallback = false, wavRecording = false, wavSubmitAfterStop = false, webSearchChat = false;
     private boolean forceSearchThisTurn = false, researchThisTurn = false;
+    private volatile boolean turnForceSearch = false, turnResearch = false;
 
     @Override public void onCreate(Bundle b) {
         super.onCreate(b);
@@ -2526,6 +2527,11 @@ public class MainActivity extends Activity {
         final String sendModel = model;
         final String sendPendingUserMemoryNote = pendingUserMemoryNote;
         final String sendPendingUserMemoryRemoval = pendingUserMemoryRemoval;
+        // Capture turn flags before the worker starts — avoid cross-thread races on mutable fields.
+        turnForceSearch = forceSearchThisTurn;
+        turnResearch = researchThisTurn;
+        forceSearchThisTurn = false;
+        researchThisTurn = false;
         new Thread(new Runnable() { @Override public void run() { callOpenRouter(sendKey, sendSource, sendModel, assistant, userText, sendPendingUserMemoryNote, sendPendingUserMemoryRemoval); } }).start();
         return true;
     }
@@ -2609,8 +2615,8 @@ public class MainActivity extends Activity {
             String toolQuery = webSearchToolQuery(answer.toString());
             if (toolQuery.length() == 0) toolQuery = webSearchToolQuery(reasoning.toString());
             boolean hasSearchContext = lastSearchResult.length() > 0 || assistant.searchSources.size() > 0;
-            boolean research = researchThisTurn;
-            researchThisTurn = false;
+            boolean research = turnResearch;
+            turnResearch = false;
             boolean needsSearchAnswer = research || ToolText.needsSearchFollowup(answer.toString(), finalAnswer, hasSearchContext)
                     || toolQuery.length() > 0
                     || (hasSearchContext && !ToolText.isUsableFollowupAnswer(finalAnswer));
@@ -2895,7 +2901,7 @@ public class MainActivity extends Activity {
         if (assistant.slowVoice) { maybeSpeakStreamingChunk(assistant, assistant.text, true); maybeFinishVoiceAfterTts(assistant); }
     }
 
-    /** Prefer search snippets over a blank hard-fail when sources exist. */
+    /** Prefer search snippets over a blank hard-fail when sources exist. Never "No reply" if we have sources. */
     private String fallbackWhenNoReply(Msg assistant) {
         String snippet = ToolText.searchSnippetFallback(lastSearchResult);
         if (snippet.length() > 0) {
@@ -2908,7 +2914,10 @@ public class MainActivity extends Activity {
         return "No reply from the model.";
     }
 
-    /** If the model thought but emitted no usable reply, ask once more; never leave a blank body. */
+    /**
+     * If the model thought but emitted no usable reply, recover.
+     * When sources exist, synthesis ALWAYS wins over accepting junk / empty.
+     */
     private String recoverEmptyAssistantReply(String key, String source, String model, String userText,
                                               String rawAnswer, String finalAnswer, String reasoning, final Msg assistant) {
         String cleaned = sanitizeAssistantText(finalAnswer);
@@ -2916,10 +2925,11 @@ public class MainActivity extends Activity {
                 || ToolText.looksLikeSourceMetadataOnly(cleaned) || ToolText.looksLikeInternalMonologue(cleaned)) {
             cleaned = "";
         }
-        if (!ToolText.needsEmptyReplyRecovery(rawAnswer, cleaned)) return cleaned.length() > 0 ? cleaned : sanitizeAssistantText(finalAnswer);
-        // If we already have search sources, synthesize from them instead of a blind empty follow-up.
         boolean hasSources = lastSearchResult.length() > 0 || (assistant != null && assistant.searchSources.size() > 0);
-        if (hasSources) {
+        boolean stronglyUsable = ToolText.isUsableFollowupAnswer(cleaned) && (ToolText.containsConcreteFact(cleaned) || cleaned.length() >= 40);
+
+        // Sources present: never keep weak/junk text — synthesize from what we already fetched.
+        if (hasSources && !stronglyUsable) {
             runOnUiThread(new Runnable() { @Override public void run() {
                 assistant.text = "";
                 assistant.stats = SEARCHING;
@@ -2930,9 +2940,14 @@ public class MainActivity extends Activity {
             } });
             String q = lastSearchQuery.length() > 0 ? lastSearchQuery : (userText == null ? "" : userText.trim());
             String fromSearch = answerAfterWebSearch(key, source, model, q, lastSearchResult, userText, 3);
-            if (ToolText.isUsableFollowupAnswer(fromSearch) || fromSearch.length() > 0) return fromSearch;
+            if (fromSearch != null && fromSearch.trim().length() > 0) return fromSearch;
             return fallbackWhenNoReply(assistant);
         }
+
+        if (!ToolText.needsEmptyReplyRecovery(rawAnswer, cleaned)) {
+            return cleaned.length() > 0 ? cleaned : sanitizeAssistantText(finalAnswer);
+        }
+
         runOnUiThread(new Runnable() { @Override public void run() {
             if (assistant.thoughtMs == 0 && assistant.reasoningCapable) {
                 assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt);
@@ -3231,8 +3246,8 @@ public class MainActivity extends Activity {
         lastSearchSources.clear();
         lastSearchResult = "";
         lastSearchQuery = "";
-        boolean forceSearch = forceSearchThisTurn || prefs.getBoolean("searchNext", false);
-        forceSearchThisTurn = false;
+        boolean forceSearch = turnForceSearch || prefs.getBoolean("searchNext", false);
+        turnForceSearch = false;
         if (prefs.getBoolean("searchNext", false)) prefs.edit().remove("searchNext").apply();
         String query = searchQuery(userText);
         if (voiceMode && voiceFullMode && "on".equals(voiceWebSearchMode()) && query.length() == 0) query = userText == null ? "" : userText.trim();
@@ -3245,11 +3260,11 @@ public class MainActivity extends Activity {
         String result = webSearch(datedSearchQuery(query));
         if (result.length() == 0) return "";
         rememberSearchResult(query, result);
-        String clipped = result.length() > 6000 ? result.substring(0, 6000) : result;
-        String researchHint = researchThisTurn
+        String clipped = result.length() > 4000 ? result.substring(0, 4000) : result;
+        String researchHint = turnResearch
                 ? "This is a research turn: extract every concrete price/number/date you can and give a clear direct answer.\n\n"
                 : "";
-        return researchHint + "Web search has already been performed by the app. Do not emit tool calls, XML, function calls, or requests to search. Use the sources below to answer the user's question directly, interpreting relative times with the phone's current local date/time. Cite plain URLs only when useful; do not emit bracketed line citations like [1%L1-L9].\n\nQuery: " + query + "\n\n" + cleanSearchArtifacts(clipped);
+        return researchHint + "Web search has already been performed by the app. Do not emit tool calls, XML, function calls, SEARCH: lines, or requests to search. Use the sources below to answer the user's question directly, interpreting relative times with the phone's current local date/time. Cite plain URLs only when useful; do not emit bracketed line citations like [1%L1-L9].\n\nQuery: " + query + "\n\n" + cleanSearchArtifacts(clipped);
     }
 
     private void rememberSearchResult(String query, String result) {
@@ -3288,6 +3303,7 @@ public class MainActivity extends Activity {
                 if (ToolText.isUsableFollowupAnswer(out)) return out;
             } catch (Exception ignored) { }
         }
+        // Guaranteed non-empty when we have any search payload.
         String snippet = ToolText.searchSnippetFallback(cleaned);
         if (snippet.length() > 0) {
             return "I couldn't form a clean summary from the sources. Closest detail I found:\n\n" + snippet;
@@ -3295,7 +3311,7 @@ public class MainActivity extends Activity {
         if (cleaned.trim().length() > 0) {
             return "I gathered sources, but couldn't form a clear answer from them. Try /research, or open one of the gathered links.";
         }
-        return "I gathered sources, but couldn't form a clear answer from them. Try asking again, or open one of the gathered links.";
+        return "Search returned no usable text. Try /research with a more specific query.";
     }
 
     private String followupAfterWebSearch(String key, String source, String model, String query, String result, String userText, boolean retry) throws Exception {
@@ -3303,23 +3319,31 @@ public class MainActivity extends Activity {
     }
 
     private String followupAfterWebSearch(String key, String source, String model, String query, String result, String userText, boolean retry, int attemptIndex) throws Exception {
-        if (result.length() > 6000) result = result.substring(0, 6000);
+        // Keep sources short — long system dumps kill small/local models.
+        if (result.length() > 2500) result = result.substring(0, 2500);
         JSONObject body = new JSONObject();
         body.put("model", model);
         JSONArray arr = new JSONArray();
-        String system = ToolText.webSearchFollowupSystem(retry, attemptIndex);
-        system += buildCurrentTimeContext() + "\n\nQuery: " + query + "\n\n" + cleanSearchArtifacts(result);
+        String system = ToolText.webSearchFollowupSystem(retry, attemptIndex) + buildCurrentTimeContext();
         arr.put(new JSONObject().put("role", "system").put("content", system));
         String folderInstruction = buildFolderInstructionContext();
         if (folderInstruction.length() > 0) arr.put(new JSONObject().put("role", "system").put("content", folderInstruction));
+        // Recent conversation context helps local models resolve pronouns / entities.
+        appendRecentChatHistory(arr, 6);
         String ask = userText == null || userText.trim().length() == 0 ? query : userText.trim();
+        // Put sources in the USER turn (recency) — weak models attend here far better than system.
+        StringBuilder userBlock = new StringBuilder();
+        userBlock.append("Question: ").append(ask).append("\n\n");
+        userBlock.append("Search query: ").append(query == null ? "" : query).append("\n\n");
+        userBlock.append("Sources:\n").append(cleanSearchArtifacts(result)).append("\n\n");
+        userBlock.append("Answer the question now in plain text using the sources.");
         if (attemptIndex >= 1) {
-            ask = ask + "\n\nRespond with concrete facts only (prices/numbers/dates if relevant). Do not return a title or citation header.";
+            userBlock.append(" Respond with concrete facts only (prices/numbers/dates if relevant). Do not return a title or citation header.");
         }
         if (attemptIndex >= 2) {
-            ask = ask + "\n\nFinal attempt: one short paragraph answering the question with the best numbers from the snippets.";
+            userBlock.append(" Final attempt: one short paragraph with the best numbers from the snippets.");
         }
-        arr.put(new JSONObject().put("role", "user").put("content", ask));
+        arr.put(new JSONObject().put("role", "user").put("content", userBlock.toString()));
         body.put("messages", arr);
         body.put("stream", false);
         HttpURLConnection c = (HttpURLConnection) new URL(chatCompletionsUrl(source, model)).openConnection();
@@ -3337,6 +3361,37 @@ public class MainActivity extends Activity {
         return extractFollowupAnswerText(new JSONObject(raw));
     }
 
+    /** Append recent non-busy turns (plain text only) for post-tool synthesis context. */
+    private void appendRecentChatHistory(JSONArray arr, int maxTurns) throws Exception {
+        ArrayList<Msg> recent = new ArrayList<Msg>();
+        // Skip the trailing user turn — the synthesis user block restates the question + sources.
+        int end = messages.size() - 1;
+        while (end >= 0) {
+            Msg m = messages.get(end);
+            if (m != null && "user".equals(m.role) && !isBusyStats(m.stats)) { end--; break; }
+            if (m != null && "assistant".equals(m.role) && (isBusyStats(m.stats) || (m.text == null || m.text.trim().length() == 0))) {
+                end--;
+                continue;
+            }
+            break;
+        }
+        for (int i = end; i >= 0 && recent.size() < maxTurns; i--) {
+            Msg m = messages.get(i);
+            if (m == null || isBusyStats(m.stats)) continue;
+            if (!"user".equals(m.role) && !"assistant".equals(m.role)) continue;
+            String t = "assistant".equals(m.role) ? sanitizeAssistantText(m.text) : (m.text == null ? "" : m.text.trim());
+            if (t.length() == 0) continue;
+            if ("assistant".equals(m.role) && (ToolText.looksLikeToolResidue(t) || ToolText.looksLikeSearchPlanning(t))) continue;
+            recent.add(m);
+        }
+        for (int i = recent.size() - 1; i >= 0; i--) {
+            Msg m = recent.get(i);
+            String t = "assistant".equals(m.role) ? sanitizeAssistantText(m.text) : (m.text == null ? "" : m.text.trim());
+            if (t.length() > 800) t = t.substring(0, 800);
+            arr.put(new JSONObject().put("role", m.role).put("content", t));
+        }
+    }
+
     private String extractFollowupAnswerText(JSONObject resp) throws Exception {
         String direct = sanitizeAssistantText(stripReasoningTags(extractMessageText(resp)));
         if (ToolText.isUsableFollowupAnswer(direct)) return direct;
@@ -3344,19 +3399,23 @@ public class MainActivity extends Activity {
         if (choices == null || choices.length() == 0) return "";
         JSONObject msg = choices.getJSONObject(0).optJSONObject("message");
         if (msg == null) return "";
-        // Prefer real answer fields. Never promote planning/CoT about "needing to answer".
-        String[] keys = new String[]{"content", "output_text", "reasoning", "reasoning_content", "thinking"};
+        // Local servers often put the whole answer in reasoning_* / thinking / output / text.
+        String[] keys = new String[]{"content", "output_text", "output", "text", "response", "reasoning", "reasoning_content", "thinking"};
+        String best = "";
+        boolean contentEmpty = !ToolText.isUsableFollowupAnswer(sanitizeAssistantText(stripReasoningTags(cleanJsonString(msg, "content"))));
         for (String key : keys) {
             String v = cleanJsonString(msg, key);
             v = sanitizeAssistantText(stripReasoningTags(v));
-            if (!ToolText.isUsableFollowupAnswer(v) || v.length() >= 4000) continue;
-            if ("reasoning".equals(key) || "reasoning_content".equals(key) || "thinking".equals(key)) {
-                // Only accept short reasoning that is clearly a user-facing answer, not planning.
-                if (v.length() > 400 || ToolText.looksLikeSearchPlanning(v)) continue;
+            if (!ToolText.isUsableFollowupAnswer(v) || v.length() >= 6000) continue;
+            boolean reasoningField = "reasoning".equals(key) || "reasoning_content".equals(key) || "thinking".equals(key);
+            if (reasoningField) {
+                // Accept reasoning of any length when content is empty/unusable — local models do this often.
+                if (!contentEmpty && v.length() > 800) continue;
+                if (ToolText.looksLikeSearchPlanning(v) && !ToolText.containsConcreteFact(v)) continue;
             }
-            return v;
+            if (v.length() > best.length()) best = v;
         }
-        return "";
+        return best;
     }
 
     private String followupAfterMemoryTool(String key, String source, String model, String userText) {
@@ -3898,7 +3957,7 @@ public class MainActivity extends Activity {
                 || lower.contains(" look up ") || lower.startsWith("lookup ")
                 || lower.startsWith("find me ") || lower.startsWith("find the ")
                 || lower.contains("average price") || lower.contains("how much") || lower.contains("going for");
-        boolean force = forceSearchThisTurn || researchThisTurn || webSearchChat;
+        boolean force = turnForceSearch || turnResearch || webSearchChat;
         if (!prefs.getBoolean("autoSearch", false) && !force) return "";
         if (explicitLookup) return trimmed;
         if (force) return trimmed;
