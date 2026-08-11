@@ -86,6 +86,15 @@ public class ToolTextTest {
         assertTrue("fallback is not a title", !snippet.toLowerCase().contains("title:"));
         assertTrue("followup system asks for facts", ToolText.webSearchFollowupSystem(true).toLowerCase().contains("concrete facts"));
 
+        String empty = "";
+        assertTrue("empty needs recovery", ToolText.needsEmptyReplyRecovery("", empty));
+        assertTrue("usable answer skips recovery", !ToolText.needsEmptyReplyRecovery(real, real));
+        String mono = "The user said Testing. I should respond politely and briefly.";
+        assertTrue("monologue detected", ToolText.looksLikeInternalMonologue(mono));
+        assertTrue("monologue unusable", !ToolText.isUsableFollowupAnswer(mono));
+        assertTrue("monologue needs recovery", ToolText.needsEmptyReplyRecovery(mono, mono));
+        assertTrue("empty followup system present", ToolText.emptyReplyFollowupSystem().toLowerCase().contains("empty"));
+
         if (failed > 0) { System.err.println(failed + " failed"); System.exit(1); }
         System.out.println("all passed");
     }

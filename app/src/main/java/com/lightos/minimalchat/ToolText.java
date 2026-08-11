@@ -242,7 +242,67 @@ public final class ToolText {
         if (looksLikeToolResidue(v)) return false;
         if (looksLikeSearchPlanning(v)) return false;
         if (looksLikeSourceMetadataOnly(v)) return false;
+        if (looksLikeInternalMonologue(v)) return false;
         return true;
+    }
+
+    /**
+     * True when the visible reply is blank or only private CoT / tool residue —
+     * the main stream path must recover instead of finishing with an empty body.
+     */
+    public static boolean needsEmptyReplyRecovery(String rawAnswer, String sanitizedAnswer) {
+        String clean = sanitizedAnswer == null ? "" : sanitizeAssistantText(sanitizedAnswer);
+        if ("searching...".equals(clean.trim())) return true;
+        if (clean.length() == 0) return true;
+        if (!isUsableFollowupAnswer(clean)) return true;
+        if (rawAnswer != null && rawAnswer.length() > 0 && looksLikeToolResidue(rawAnswer) && sanitizeAssistantText(rawAnswer).length() == 0) {
+            return true;
+        }
+        return false;
+    }
+
+    /** Private chain-of-thought that models sometimes emit as the only "content". */
+    public static boolean looksLikeInternalMonologue(String text) {
+        String t = text == null ? "" : text.trim();
+        if (t.length() == 0) return false;
+        String lower = t.toLowerCase(Locale.US).replace('’', '\'');
+        String[] needles = new String[]{
+                "the user said",
+                "the user is testing",
+                "the user wants",
+                "the user asked",
+                "the user sent",
+                "user just said",
+                "i should respond",
+                "i need to respond",
+                "i will respond",
+                "i'll respond",
+                "let me respond",
+                "my response should",
+                "i should reply",
+                "i need to reply",
+                "i'll reply",
+                "keep my reply",
+                "respond politely",
+                "acknowledge that",
+                "this is a test message",
+                "simple test message",
+                "they are testing"
+        };
+        for (String n : needles) {
+            if (!lower.contains(n)) continue;
+            if (t.length() < 320) return true;
+            String head = lower.length() > 140 ? lower.substring(0, 140) : lower;
+            if (head.contains(n)) return true;
+        }
+        return false;
+    }
+
+    public static String emptyReplyFollowupSystem() {
+        return "Your previous reply was empty or only private thinking. "
+                + "Answer the user's message now in plain text. "
+                + "Do not output tool calls, XML, function calls, or chain-of-thought. "
+                + "Keep it brief and natural.\n\n";
     }
 
     /** Title/citation dumps that are not real answers (e.g. "[1] Title: …"). */

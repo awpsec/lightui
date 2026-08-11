@@ -107,7 +107,7 @@ public class MainActivity extends Activity {
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
     private static final String SEARCHING = "__searching__";
-    private static final String APP_VERSION = "1.0.20";
+    private static final String APP_VERSION = "1.0.21";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 64;
@@ -2085,7 +2085,9 @@ public class MainActivity extends Activity {
             if (hasThinkingRow) {
                 final Msg thinkingMessage = m;
                 LinearLayout thinkRow = row();
-                thinkRow.setPadding(0, dp(2), 0, dp(2));
+                thinkRow.setClipChildren(false);
+                thinkRow.setClipToPadding(false);
+                thinkRow.setPadding(0, dp(4), 0, dp(4));
                 TextView thinking;
                 if (!m.streamDone && m.text.length() == 0 && !isSearching) {
                     JumpTextView jump = new JumpTextView(this);
@@ -2096,10 +2098,10 @@ public class MainActivity extends Activity {
                     long doneMs = m.thoughtMs > 0 ? m.thoughtMs : Math.max(1, System.currentTimeMillis() - m.startedAt);
                     thinking = text("thought for " + thoughtDuration(doneMs), 11, Color.rgb(135,135,135));
                 }
-                thinking.setTextColor(Color.rgb(135,135,135)); thinking.setGravity(Gravity.CENTER_VERTICAL); setTextPx(thinking, 11); thinking.setPadding(0, 0, 0, 0);
+                thinking.setTextColor(Color.rgb(135,135,135)); thinking.setGravity(Gravity.CENTER_VERTICAL); setTextPx(thinking, 11); thinking.setPadding(0, dp(2), 0, dp(2));
                 thinking.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { toggleThinking(thinkingMessage); } });
-                thinking.setMinHeight(dp(28));
-                thinkRow.addView(thinking, new LinearLayout.LayoutParams(-1, dp(28)));
+                thinking.setMinHeight(dp(32));
+                thinkRow.addView(thinking, new LinearLayout.LayoutParams(-1, -2));
                 thinkRow.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { toggleThinking(thinkingMessage); } });
                 messageList.addView(thinkRow, new LinearLayout.LayoutParams(-1, -2));
                 if (m.thinkingExpanded && m.reasoning.length() > 0) {
@@ -2112,15 +2114,18 @@ public class MainActivity extends Activity {
             }
             if (isSearching) {
                 LinearLayout searchRow = row();
-                searchRow.setPadding(0, dp(2), 0, dp(2));
+                searchRow.setClipChildren(false);
+                searchRow.setClipToPadding(false);
+                searchRow.setPadding(0, dp(4), 0, dp(4));
                 JumpTextView searching = new JumpTextView(this);
                 searching.word = "searching";
                 searching.bind(m);
                 searching.setTextColor(Color.rgb(135,135,135));
                 searching.setGravity(Gravity.CENTER_VERTICAL);
                 setTextPx(searching, 11);
-                searching.setMinHeight(dp(28));
-                searchRow.addView(searching, new LinearLayout.LayoutParams(-1, dp(28)));
+                searching.setPadding(0, dp(2), 0, dp(2));
+                searching.setMinHeight(dp(32));
+                searchRow.addView(searching, new LinearLayout.LayoutParams(-1, -2));
                 messageList.addView(searchRow, new LinearLayout.LayoutParams(-1, -2));
             } else if (hasSearchRow) {
                 final Msg searchMessage = m;
@@ -2633,6 +2638,8 @@ public class MainActivity extends Activity {
                 String savedMemory = appendMemory(pendingUserMemoryNote, "user");
                 if (savedMemory.length() > 0) { assistant.memorySaved = true; assistant.memorySavedText = savedMemory; }
             }
+            // Never finish a turn with a blank body after thinking — recover like memory/search paths.
+            finalAnswer = recoverEmptyAssistantReply(key, source, model, userText, answer.toString(), finalAnswer, reasoning.toString(), assistant);
             final String finishedAnswer = finalAnswer;
             int completionTokens = estimateTokens(finishedAnswer) + (reasoning.length() == 0 ? 0 : estimateTokens(reasoning.toString()));
             final String stats = String.format(Locale.US, "%.1f tok/s", completionTokens / Math.max(0.001, (end - start) / 1e9));
@@ -2777,9 +2784,19 @@ public class MainActivity extends Activity {
 
     private void updateStreamingAssistant(Msg assistant, String partial, String reasoning) {
         boolean gotReasoning = reasoning.length() > 0;
-        if (gotReasoning) { assistant.reasoning = reasoning; assistant.reasoningCapable = true; assistant.text = ""; }
-        assistant.stats = gotReasoning && partial.length() == 0 ? LOADING : "";
-        if (gotReasoning && partial.length() == 0) { forceAutoScrollBottom = userAtChatBottom; requestStreamingRender(); saveCurrentChatDeferred(); return; }
+        if (gotReasoning) {
+            assistant.reasoning = reasoning;
+            assistant.reasoningCapable = true;
+            // Only clear visible text while still in the reasoning-only phase.
+            if (partial == null || partial.length() == 0) assistant.text = "";
+        }
+        assistant.stats = gotReasoning && (partial == null || partial.length() == 0) ? LOADING : "";
+        if (gotReasoning && (partial == null || partial.length() == 0)) {
+            forceAutoScrollBottom = userAtChatBottom;
+            requestStreamingRender();
+            saveCurrentChatDeferred();
+            return;
+        }
         String visiblePartial = visibleStreamingAnswer(partial);
         if (visiblePartial.length() > 0) stopVoiceThinking();
         if (gotReasoning && visiblePartial.length() > 0 && assistant.thoughtMs == 0) assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt);
@@ -2825,9 +2842,12 @@ public class MainActivity extends Activity {
         assistant.stats = stats;
         assistant.streamDone = true;
         String cleanedFinal = sanitizeAssistantText(finalAnswer.length() == 0 ? assistant.text : finalAnswer);
-        if ("searching...".equals(cleanedFinal.trim()) || looksLikeToolResidue(cleanedFinal) || ToolText.looksLikeSearchPlanning(cleanedFinal)) {
+        if ("searching...".equals(cleanedFinal.trim()) || looksLikeToolResidue(cleanedFinal) || ToolText.looksLikeSearchPlanning(cleanedFinal)
+                || ToolText.looksLikeSourceMetadataOnly(cleanedFinal) || ToolText.looksLikeInternalMonologue(cleanedFinal)) {
             cleanedFinal = "";
         }
+        // Last-resort visible body — background recovery should already have filled this.
+        if (cleanedFinal.length() == 0) cleanedFinal = "No reply from the model.";
         assistant.text = cleanedFinal;
         if (reasoning.length() > 0) { assistant.reasoning = reasoning; if (assistant.thoughtMs == 0) assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt); }
         else if (assistant.thoughtMs == 0 && assistant.reasoningCapable) assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt);
@@ -2847,6 +2867,69 @@ public class MainActivity extends Activity {
         saveCurrentChat();
         maybeGenerateChatTitle(key, source, model);
         if (assistant.slowVoice) { maybeSpeakStreamingChunk(assistant, assistant.text, true); maybeFinishVoiceAfterTts(assistant); }
+    }
+
+    /** If the model thought but emitted no usable reply, ask once more; never leave a blank body. */
+    private String recoverEmptyAssistantReply(String key, String source, String model, String userText,
+                                              String rawAnswer, String finalAnswer, String reasoning, final Msg assistant) {
+        String cleaned = sanitizeAssistantText(finalAnswer);
+        if ("searching...".equals(cleaned.trim()) || looksLikeToolResidue(cleaned) || ToolText.looksLikeSearchPlanning(cleaned)
+                || ToolText.looksLikeSourceMetadataOnly(cleaned) || ToolText.looksLikeInternalMonologue(cleaned)) {
+            cleaned = "";
+        }
+        if (!ToolText.needsEmptyReplyRecovery(rawAnswer, cleaned)) return cleaned.length() > 0 ? cleaned : sanitizeAssistantText(finalAnswer);
+        runOnUiThread(new Runnable() { @Override public void run() {
+            if (assistant.thoughtMs == 0 && assistant.reasoningCapable) {
+                assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt);
+            }
+            assistant.text = "";
+            assistant.stats = LOADING;
+            forceAutoScrollBottom = userAtChatBottom;
+            renderMessages();
+        } });
+        String recovered = "";
+        try {
+            recovered = sanitizeAssistantText(followupAfterEmptyReply(key, source, model, userText));
+        } catch (Exception ignored) { }
+        if (ToolText.isUsableFollowupAnswer(recovered)) return recovered;
+        try {
+            recovered = sanitizeAssistantText(followupAfterEmptyReply(key, source, model, userText));
+        } catch (Exception ignored) { }
+        if (ToolText.isUsableFollowupAnswer(recovered)) return recovered;
+        return "No reply from the model.";
+    }
+
+    private String followupAfterEmptyReply(String key, String source, String model, String userText) throws Exception {
+        JSONObject body = new JSONObject();
+        body.put("model", model);
+        body.put("stream", false);
+        JSONArray arr = new JSONArray();
+        arr.put(new JSONObject().put("role", "system").put("content", ToolText.emptyReplyFollowupSystem() + buildCurrentTimeContext()));
+        String folderInstruction = buildFolderInstructionContext();
+        if (folderInstruction.length() > 0) arr.put(new JSONObject().put("role", "system").put("content", folderInstruction));
+        arr.put(new JSONObject().put("role", "user").put("content", userText == null ? "" : userText));
+        body.put("messages", arr);
+        HttpURLConnection c = (HttpURLConnection) new URL(chatCompletionsUrl(source, model)).openConnection();
+        c.setRequestMethod("POST");
+        c.setConnectTimeout(20000);
+        c.setReadTimeout(60000);
+        c.setDoOutput(true);
+        if (key.length() > 0) c.setRequestProperty("Authorization", "Bearer " + key);
+        c.setRequestProperty("Content-Type", "application/json");
+        if (source.equals("openrouter")) {
+            c.setRequestProperty("HTTP-Referer", "https://minimal.chat/android");
+            c.setRequestProperty("X-Title", "empty reply followup");
+        }
+        OutputStream os = c.getOutputStream();
+        os.write(body.toString().getBytes(StandardCharsets.UTF_8));
+        os.close();
+        int code = c.getResponseCode();
+        String raw = readAll(code >= 400 ? c.getErrorStream() : c.getInputStream());
+        if (code >= 400) throw new RuntimeException(raw);
+        String out = extractFollowupAnswerText(new JSONObject(raw));
+        if (ToolText.isUsableFollowupAnswer(out)) return out;
+        out = sanitizeAssistantText(stripReasoningTags(extractMessageText(new JSONObject(raw))));
+        return out;
     }
 
     private void maybeSpeakStreamingChunk(Msg assistant, String fullText, boolean finish) {
@@ -7119,8 +7202,9 @@ public class MainActivity extends Activity {
         public JumpTextView(Context c) {
             super(c);
             setSingleLine(true);
-            setIncludeFontPadding(true);
+            setIncludeFontPadding(false);
             setGravity(Gravity.CENTER_VERTICAL);
+            setLayerType(LAYER_TYPE_SOFTWARE, null);
         }
         void bind(Msg m) {
             bound = m;
@@ -7151,25 +7235,41 @@ public class MainActivity extends Activity {
                 bound.jumpAnimStartMs = start;
                 bound.jumpAnimWord = w;
             }
-            final int letterMs = 110;
-            final int pauseMs = 160;
-            int cycleMs = Math.max(letterMs, w.length() * letterMs + pauseMs);
+            // Continuous traveling sine — smooth across rebinds; soft pause via amplitude envelope.
+            final float periodSec = 1.35f;
+            final float pauseFrac = 0.18f;
             long elapsed = Math.max(0L, android.os.SystemClock.uptimeMillis() - start);
-            int posInCycle = (int) (elapsed % cycleMs);
-            int pos = posInCycle / letterMs;
-            int peak = Math.min(pos, w.length() - 1);
-            boolean inPause = pos >= w.length();
+            float cycle = (elapsed / 1000f) / periodSec;
+            float phase = cycle - (float) Math.floor(cycle);
+            float ampScale = 1f;
+            if (phase > 1f - pauseFrac) {
+                float t = (phase - (1f - pauseFrac)) / pauseFrac;
+                ampScale = 0.5f + 0.5f * (float) Math.cos(Math.PI * Math.min(1f, Math.max(0f, t)));
+            }
+            final float ampPx = 2.6f * uiScale() * ampScale;
+            final int baseColor = Color.rgb(135, 135, 135);
+            final int baseR = Color.red(baseColor), baseG = Color.green(baseColor), baseB = Color.blue(baseColor);
             SpannableString span = new SpannableString(w);
+            int n = Math.max(1, w.length());
             for (int i = 0; i < w.length(); i++) {
-                final int dist = Math.abs(i - peak);
-                final int shift = inPause ? 0 : dist == 0 ? dp(3) : dist == 1 ? dp(1) : 0;
-                if (shift > 0) span.setSpan(new android.text.style.CharacterStyle() {
-                    @Override public void updateDrawState(android.text.TextPaint tp) { tp.baselineShift += shift; }
+                float wave = (float) Math.sin((2.0 * Math.PI) * (cycle - i / (float) n));
+                final float lift = ampPx * (0.55f + 0.45f * wave);
+                final float bright = 0.62f + 0.38f * ((wave + 1f) * 0.5f) * ampScale;
+                final int a = 255;
+                final int r = Math.min(255, Math.round(baseR + (255 - baseR) * (bright - 0.62f)));
+                final int g = Math.min(255, Math.round(baseG + (255 - baseG) * (bright - 0.62f)));
+                final int b = Math.min(255, Math.round(baseB + (255 - baseB) * (bright - 0.62f)));
+                final int shift = Math.max(0, Math.round(lift));
+                span.setSpan(new android.text.style.CharacterStyle() {
+                    @Override public void updateDrawState(android.text.TextPaint tp) {
+                        tp.baselineShift += shift;
+                        tp.setColor(Color.argb(a, r, g, b));
+                    }
                 }, i, i + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
             }
             setText(span);
-            // Steady cadence; time-based phase keeps motion smooth across rebinds.
-            postDelayed(tick, 50);
+            // ~60fps cadence; time-based phase keeps motion smooth across rebinds.
+            postDelayed(tick, 16);
         }
     }
     public static class ContextMeter extends View {
