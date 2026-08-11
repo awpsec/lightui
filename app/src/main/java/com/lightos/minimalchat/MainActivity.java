@@ -107,7 +107,7 @@ public class MainActivity extends Activity {
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
     private static final String SEARCHING = "__searching__";
-    private static final String APP_VERSION = "1.0.21";
+    private static final String APP_VERSION = "1.0.22";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 64;
@@ -7235,40 +7235,34 @@ public class MainActivity extends Activity {
                 bound.jumpAnimStartMs = start;
                 bound.jumpAnimWord = w;
             }
-            // Continuous traveling sine — smooth across rebinds; soft pause via amplitude envelope.
-            final float periodSec = 1.35f;
-            final float pauseFrac = 0.18f;
+            // Pure traveling sine — period matches one word-length so the loop has no seam.
+            // No end-of-cycle amplitude pause (that caused the hitchy reset).
+            final float periodSec = 1.45f;
             long elapsed = Math.max(0L, android.os.SystemClock.uptimeMillis() - start);
-            float cycle = (elapsed / 1000f) / periodSec;
-            float phase = cycle - (float) Math.floor(cycle);
-            float ampScale = 1f;
-            if (phase > 1f - pauseFrac) {
-                float t = (phase - (1f - pauseFrac)) / pauseFrac;
-                ampScale = 0.5f + 0.5f * (float) Math.cos(Math.PI * Math.min(1f, Math.max(0f, t)));
-            }
-            final float ampPx = 2.6f * uiScale() * ampScale;
+            double cycle = (elapsed / 1000.0) / periodSec;
+            final float ampPx = 2.6f * uiScale();
             final int baseColor = Color.rgb(135, 135, 135);
             final int baseR = Color.red(baseColor), baseG = Color.green(baseColor), baseB = Color.blue(baseColor);
             SpannableString span = new SpannableString(w);
             int n = Math.max(1, w.length());
             for (int i = 0; i < w.length(); i++) {
-                float wave = (float) Math.sin((2.0 * Math.PI) * (cycle - i / (float) n));
+                // Wavelength = word length ⇒ letter i at cycle+1 equals letter i at cycle (seamless).
+                float wave = (float) Math.sin((2.0 * Math.PI) * (cycle - i / (double) n));
                 final float lift = ampPx * (0.55f + 0.45f * wave);
-                final float bright = 0.62f + 0.38f * ((wave + 1f) * 0.5f) * ampScale;
-                final int a = 255;
+                final float bright = 0.62f + 0.38f * ((wave + 1f) * 0.5f);
                 final int r = Math.min(255, Math.round(baseR + (255 - baseR) * (bright - 0.62f)));
                 final int g = Math.min(255, Math.round(baseG + (255 - baseG) * (bright - 0.62f)));
                 final int b = Math.min(255, Math.round(baseB + (255 - baseB) * (bright - 0.62f)));
-                final int shift = Math.max(0, Math.round(lift));
+                // Floor+0.5 keeps sub-pixel motion from stair-stepping as hard as truncating.
+                final int shift = Math.max(0, (int) (lift + 0.5f));
                 span.setSpan(new android.text.style.CharacterStyle() {
                     @Override public void updateDrawState(android.text.TextPaint tp) {
                         tp.baselineShift += shift;
-                        tp.setColor(Color.argb(a, r, g, b));
+                        tp.setColor(Color.argb(255, r, g, b));
                     }
                 }, i, i + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
             }
             setText(span);
-            // ~60fps cadence; time-based phase keeps motion smooth across rebinds.
             postDelayed(tick, 16);
         }
     }
