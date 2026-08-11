@@ -125,6 +125,41 @@ public class ToolTextTest {
         assertTrue("pure planning still planning", ToolText.looksLikeSearchPlanning("Now I should use the sources to answer."));
         assertTrue("factful not monologue", !ToolText.looksLikeInternalMonologue("The user asked about RAM; kits are about $300 today."));
 
+        // Stop wiping good answers that also trail a SEARCH:/tool call.
+        String answeredPlusSearch = "Typical DDR5-6000 64GB kits are about $280–$360 today.\nSEARCH: ddr5 6000 price";
+        String answeredClean = ToolText.sanitizeAssistantText(answeredPlusSearch);
+        assertTrue("answer+SEARCH keeps usable body", ToolText.isUsableFollowupAnswer(answeredClean));
+        assertTrue("answer+SEARCH does not need followup wipe",
+                !ToolText.needsSearchFollowup(answeredPlusSearch, answeredClean, false));
+        assertTrue("answer+SEARCH with prior sources still kept",
+                !ToolText.needsSearchFollowup(answeredPlusSearch, answeredClean, true));
+
+        // Brief ack + SEARCH still needs the real search path.
+        String ackSearch = "Sure.\nSEARCH: ddr5 prices";
+        assertTrue("ack+SEARCH needs followup",
+                ToolText.needsSearchFollowup(ackSearch, ToolText.sanitizeAssistantText(ackSearch), false));
+
+        // Numbered real answers are not source metadata.
+        assertTrue("numbered score usable", ToolText.isUsableFollowupAnswer("1. The Lakers won 112-108 last night."));
+        assertTrue("numbered score not meta", !ToolText.isSourceMetaLine("1. The Lakers won 112-108 last night."));
+        assertTrue("brave headline still meta", ToolText.isSourceMetaLine("1. Some RAM Deal Page"));
+
+        // Modal "may" is not a date fact; "May 3" is.
+        assertTrue("may verb not fact", !ToolText.containsConcreteFact("Prices may vary by seller."));
+        assertTrue("May 3 is a date fact", ToolText.containsConcreteFact("Announced on May 3."));
+
+        // Punctuation leftovers after JSON strip are not answers.
+        assertTrue("brace junk unusable", !ToolText.isUsableFollowupAnswer("}"));
+
+        // Alternate tool dialects
+        assertEq("q dialect", "oilers score", ToolText.webSearchToolQuery("{\"name\":\"web_search\",\"q\":\"oilers score\"}"));
+        assertEq("positional dialect", "bitcoin price", ToolText.webSearchToolQuery("web_search(\"bitcoin price\")"));
+
+        // Factful "based on the sources" must stay usable.
+        String based = "Based on the sources I checked, 64GB DDR5 kits are typically $280-$360 right now.";
+        assertTrue("based-on-sources factful usable", ToolText.isUsableFollowupAnswer(based));
+        assertTrue("based-on-sources not planning", !ToolText.looksLikeSearchPlanning(based));
+
         if (failed > 0) { System.err.println(failed + " failed"); System.exit(1); }
         System.out.println("all passed");
     }

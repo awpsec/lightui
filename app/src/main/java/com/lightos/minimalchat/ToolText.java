@@ -15,6 +15,10 @@ public final class ToolText {
             "(?is)<parameter(?:\\s+name\\s*=\\s*[\"']?query[\"']?|\\s*=\\s*query)[^>]*>(.*?)</parameter>");
     private static final Pattern JSON_QUERY = Pattern.compile(
             "(?is)[\"']query[\"']\\s*:\\s*[\"']([^\"']+)[\"']");
+    private static final Pattern JSON_Q = Pattern.compile(
+            "(?is)[\"']q[\"']\\s*:\\s*[\"']([^\"']+)[\"']");
+    private static final Pattern POSITIONAL_QUERY = Pattern.compile(
+            "(?is)\\b(?:web[_\\s-]?search|google|search)\\s*\\(\\s*[\"']([^\"']{2,200})[\"']\\s*\\)");
     private static final Pattern INVOKE_QUERY = Pattern.compile(
             "(?is)(?:invoke|call|run)\\s+(?:tool\\s+)?(?:web[_\\s-]?search|google)[^\\n]{0,80}?(?:query|q)\\s*[:=]\\s*[\"']?([^\"'\\n<]+)[\"']?");
 
@@ -69,11 +73,21 @@ public final class ToolText {
     public static boolean containsConcreteFact(String text) {
         if (text == null || text.trim().length() == 0) return false;
         String t = text;
+        String lower = t.toLowerCase(Locale.US);
         if (t.matches("(?s).*\\b(\\$|€|£|¥)\\s?\\d.*")) return true;
         if (t.matches("(?s).*\\b\\d{1,3}(?:,\\d{3})+(?:\\.\\d+)?\\b.*")) return true;
         if (t.matches("(?s).*\\b\\d+(?:\\.\\d+)?\\s*%.*")) return true;
         if (t.matches("(?s).*\\b\\d{2,4}\\s*(gb|tb|mhz|ghz|cl\\d+|mm|kg|lb)\\b.*")) return true;
-        if (t.matches("(?s).*\\b(20\\d{2}|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\\b.*")) return true;
+        // Years and month+day — do NOT treat modal verb "may" as a date.
+        if (t.matches("(?s).*\\b20\\d{2}\\b.*")) return true;
+        if (lower.matches("(?s).*\\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|jun(?:e)?|"
+                + "jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+                + "\\.?\\s+\\d{1,4}\\b.*")) {
+            return true;
+        }
+        if (lower.matches("(?s).*\\bmay\\s+\\d{1,2}\\b.*") || lower.matches("(?s).*\\b\\d{1,2}\\s+may\\b.*")) {
+            return true;
+        }
         // At least one standalone number of 2+ digits (prices, scores, counts).
         return t.matches("(?s).*\\b\\d{2,}\\b.*");
     }
@@ -90,7 +104,7 @@ public final class ToolText {
         if (containsConcreteFact(t)) return false;
         String lower = t.toLowerCase(Locale.US).replace('’', '\'');
         // Short planning / scaffolding lines models emit after seeing sources.
-        String[] needles = new String[]{
+        String[] hardNeedles = new String[]{
                 "i need to answer",
                 "i should answer",
                 "i will answer",
@@ -100,7 +114,6 @@ public final class ToolText {
                 "let me answer",
                 "let me use the",
                 "using the sources",
-                "based on the sources i",
                 "i'll use the search",
                 "i will use the search",
                 "i need to use the search",
@@ -111,10 +124,11 @@ public final class ToolText {
                 "do not emit tool",
                 "i'll look that up",
                 "i will look that up",
+                "looking that up",
+                "looking up",
                 "let me search",
                 "i'll search",
                 "i will search",
-                "searching for",
                 "i need to search",
                 "i should search",
                 "going to search",
@@ -124,7 +138,7 @@ public final class ToolText {
                 "perform a search",
                 "perform web search"
         };
-        for (String n : needles) {
+        for (String n : hardNeedles) {
             if (lower.contains(n)) {
                 // If the message is short planning, or planning dominates, treat as non-answer.
                 if (t.length() < 280) return true;
@@ -133,13 +147,36 @@ public final class ToolText {
                 if (head.contains(n)) return true;
             }
         }
+        // Soft phrases that often appear in real answers — only reject when they dominate a short reply.
+        String[] softNeedles = new String[]{
+                "searching for",
+                "based on the sources i",
+                "according to the sources i"
+        };
+        for (String n : softNeedles) {
+            if (!lower.contains(n)) continue;
+            if (t.length() <= 80) return true;
+            if (lower.indexOf(n) < 12 && t.length() < 140) return true;
+        }
         return false;
     }
 
+    /**
+     * Whether a completion still needs a search+synth pass.
+     * A usable sanitized answer wins over residual tool markup / trailing SEARCH: lines —
+     * never wipe a finished reply just because the model also emitted a tool call.
+     */
     public static boolean needsSearchFollowup(String rawAnswer, String sanitizedAnswer, boolean hasSearchContext) {
-        if (webSearchToolQuery(rawAnswer).length() > 0) return true;
-        if (!hasSearchContext) return false;
         String clean = sanitizedAnswer == null ? "" : sanitizedAnswer.trim();
+        boolean usable = isUsableFollowupAnswer(clean);
+        String toolQ = webSearchToolQuery(rawAnswer);
+        if (usable) {
+            // Brief ack + tool ("Sure.\nSEARCH: …") still needs the real search path.
+            if (toolQ.length() > 0 && clean.length() < 40 && !containsConcreteFact(clean)) return true;
+            return false;
+        }
+        if (toolQ.length() > 0) return true;
+        if (!hasSearchContext) return false;
         if (clean.length() == 0) return true;
         if (looksLikeToolResidue(rawAnswer) || looksLikeToolResidue(clean)) return true;
         if (looksLikeSearchPlanning(clean) || looksLikeSearchPlanning(rawAnswer)) return true;
@@ -156,6 +193,8 @@ public final class ToolText {
         if (simpleQ.length() > 0) return simpleQ;
         if (!lower.contains("web_search") && !lower.contains("tool_call") && !lower.contains("[google(")
                 && !lower.contains("google(query") && !lower.contains("[search(") && !lower.contains("\"query\"")
+                && !lower.contains("\"q\"") && !lower.contains("'q'")
+                && !lower.contains("web_search(") && !lower.contains("google(") && !lower.contains("search(")
                 && !lower.contains("invoke") && !lower.contains("call web") && !lower.contains("search:")) {
             return "";
         }
@@ -174,12 +213,22 @@ public final class ToolText {
             String q = cleanQuery(json.group(1));
             if (q.length() > 0) return q;
         }
+        Matcher jsonQ = JSON_Q.matcher(s);
+        if (jsonQ.find()) {
+            String q = cleanQuery(jsonQ.group(1));
+            if (q.length() > 0) return q;
+        }
+        Matcher positional = POSITIONAL_QUERY.matcher(s);
+        if (positional.find()) {
+            String q = cleanQuery(positional.group(1));
+            if (q.length() > 0) return q;
+        }
         Matcher invoke = INVOKE_QUERY.matcher(s);
         if (invoke.find()) {
             String q = cleanQuery(invoke.group(1));
             if (q.length() > 0) return q;
         }
-        String[] markers = new String[]{"<parameter=query>", "query:", "query=", "\"query\":", "'query':"};
+        String[] markers = new String[]{"<parameter=query>", "query:", "query=", "\"query\":", "'query':", "\"q\":", "'q':"};
         for (String marker : markers) {
             int at = lower.indexOf(marker);
             if (at < 0) continue;
@@ -269,7 +318,14 @@ public final class ToolText {
         if (looksLikeSearchPlanning(v)) return false;
         if (looksLikeSourceMetadataOnly(v)) return false;
         if (looksLikeInternalMonologue(v)) return false;
-        return true;
+        // Pure punctuation / braces left after stripping JSON tool wrappers ("}").
+        if (v.matches("^[\\s\\p{Punct}]+$")) return false;
+        int alnum = 0;
+        for (int i = 0; i < v.length(); i++) {
+            if (Character.isLetterOrDigit(v.charAt(i))) alnum++;
+            if (alnum >= 2) break;
+        }
+        return alnum >= 2;
     }
 
     /**
@@ -356,9 +412,18 @@ public final class ToolText {
         if (lower.startsWith("title:") || lower.matches("(?i)^\\[?\\d+\\]?\\.?\\s*title\\s*:.*")) return true;
         if (lower.matches("(?i)^\\[\\d+\\]\\s*title\\s*:.*")) return true;
         if (lower.matches("(?i)^\\[\\d+\\]\\s*.{0,120}") && (lower.contains("title:") || lower.length() < 90)) return true;
-        if (lower.matches("(?i)^\\d+\\.\\s+\\S.{0,100}") && !lower.matches("(?i).*\\b(\\$|usd|gb|mhz|cl\\d+|price|cost|around|typically|between)\\b.*")) {
-            // Brave "1. Some Article Headline" without price/fact cues.
-            if (!lower.contains("description") && t.length() < 120) return true;
+        // Numbered dump / headline lines — not normal answers like "1. The Lakers won 112-108".
+        if (t.matches("(?i)^\\d+[.)]\\s*.{0,140}$")
+                && (t.contains(" - ") || t.contains(" | ") || lower.contains("http")
+                || lower.contains("title:") || lower.contains("snippet:") || lower.contains("url:"))) {
+            return true;
+        }
+        if (t.matches("(?i)^\\d+[.)]\\s+\\S.{0,100}$")
+                && !containsConcreteFact(t)
+                && !lower.matches("(?i).*\\b(won|beat|lost|is|are|was|were|costs?|priced?|around|about|typically|between)\\b.*")
+                && t.length() < 90) {
+            // Brave-style "1. Some Article Headline" without sentence/fact cues.
+            return true;
         }
         if (lower.equals("description:") || lower.startsWith("description:") && t.length() < 24) return true;
         return false;

@@ -107,7 +107,7 @@ public class MainActivity extends Activity {
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
     private static final String SEARCHING = "__searching__";
-    private static final String APP_VERSION = "1.0.24";
+    private static final String APP_VERSION = "1.0.25";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 64;
@@ -2543,7 +2543,7 @@ public class MainActivity extends Activity {
             JSONArray arr = new JSONArray();
             String searchContext = buildSearchContext(userText);
             if (searchContext.length() > 0) { assistant.searchSources.clear(); assistant.searchSources.addAll(lastSearchSources); arr.put(new JSONObject().put("role", "system").put("content", searchContext)); }
-            addBackgroundSystemContext(arr, true);
+            addBackgroundSystemContext(arr, true, searchContext.length() > 0);
             if (assistant.slowVoice) arr.put(new JSONObject().put("role", "system").put("content", "This is a spoken two-way voice conversation. Reply in plain text only. Do not use markdown, headings, bullets, tables, code blocks, or formatting symbols. Keep the response natural for text-to-speech."));
             for (Msg m : messages) {
                 if (isBusyStats(m.stats)) continue;
@@ -2612,20 +2612,27 @@ public class MainActivity extends Activity {
             }
             long end = System.nanoTime();
             String finalAnswer = sanitizeAssistantText(answer.toString());
+            String keptAnswer = finalAnswer;
+            boolean keptUsable = ToolText.isUsableFollowupAnswer(keptAnswer);
+            // Prefer tool calls in the visible answer. Only mine CoT when the answer itself is empty/unusable —
+            // thinking models narrate web_search(...) constantly and that must not wipe a finished reply.
             String toolQuery = webSearchToolQuery(answer.toString());
-            if (toolQuery.length() == 0) toolQuery = webSearchToolQuery(reasoning.toString());
+            if (toolQuery.length() == 0 && !keptUsable) toolQuery = webSearchToolQuery(reasoning.toString());
             boolean hasSearchContext = lastSearchResult.length() > 0 || assistant.searchSources.size() > 0;
             boolean research = turnResearch;
             turnResearch = false;
-            boolean needsSearchAnswer = research || ToolText.needsSearchFollowup(answer.toString(), finalAnswer, hasSearchContext)
-                    || toolQuery.length() > 0
-                    || (hasSearchContext && !ToolText.isUsableFollowupAnswer(finalAnswer));
+            // needsSearchFollowup keeps usable answers, but still honors brief-ack + SEARCH: tool calls.
+            boolean needsSearchAnswer = research
+                    || ToolText.needsSearchFollowup(answer.toString(), finalAnswer, hasSearchContext)
+                    || (toolQuery.length() > 0 && !keptUsable)
+                    || (hasSearchContext && !keptUsable);
             if (needsSearchAnswer) {
                 runOnUiThread(new Runnable() { @Override public void run() {
                     if (assistant.thoughtMs == 0 && assistant.reasoningCapable) {
                         assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt);
                     }
-                    assistant.text = "";
+                    // Keep a usable partial on screen unless we're replacing it; only clear when empty.
+                    if (!keptUsable) assistant.text = "";
                     assistant.stats = SEARCHING;
                     // Fresh wave phase for "searching" (don't continue the thinking cycle mid-pause).
                     assistant.jumpAnimStartMs = 0L;
@@ -2651,7 +2658,15 @@ public class MainActivity extends Activity {
                     assistant.searchSources.clear();
                     assistant.searchSources.addAll(extractSearchSources(result));
                 }
-                finalAnswer = answerAfterWebSearch(key, source, model, queryForFollowup, result, userText, research ? 3 : 2);
+                String synth = answerAfterWebSearch(key, source, model, queryForFollowup, result, userText, research ? 3 : 2);
+                // Never overwrite a usable in-stream answer with an apology / weaker fallback.
+                if (!keptUsable) {
+                    finalAnswer = synth;
+                } else if (ToolText.isUsableFollowupAnswer(synth) && synth.length() >= keptAnswer.length()) {
+                    finalAnswer = synth;
+                } else {
+                    finalAnswer = keptAnswer;
+                }
             }
             String memoryNote = memoryToolNote(finalAnswer);
             ArrayList<String> removeNotes = memoryRemoveToolNotes(finalAnswer);
@@ -2926,10 +2941,9 @@ public class MainActivity extends Activity {
             cleaned = "";
         }
         boolean hasSources = lastSearchResult.length() > 0 || (assistant != null && assistant.searchSources.size() > 0);
-        boolean stronglyUsable = ToolText.isUsableFollowupAnswer(cleaned) && (ToolText.containsConcreteFact(cleaned) || cleaned.length() >= 40);
 
-        // Sources present: never keep weak/junk text — synthesize from what we already fetched.
-        if (hasSources && !stronglyUsable) {
+        // Sources present: only re-synthesize when the kept text is not usable.
+        if (hasSources && !ToolText.isUsableFollowupAnswer(cleaned)) {
             runOnUiThread(new Runnable() { @Override public void run() {
                 assistant.text = "";
                 assistant.stats = SEARCHING;
@@ -3590,6 +3604,10 @@ public class MainActivity extends Activity {
     }
 
     private void addBackgroundSystemContext(JSONArray arr, boolean includeMemoryTools) throws Exception {
+        addBackgroundSystemContext(arr, includeMemoryTools, false);
+    }
+
+    private void addBackgroundSystemContext(JSONArray arr, boolean includeMemoryTools, boolean searchContextAlreadyInjected) throws Exception {
         arr.put(new JSONObject().put("role", "system").put("content", buildCurrentTimeContext()));
         String toolMemory = buildToolMemoryContext();
         if (toolMemory.length() > 0) arr.put(new JSONObject().put("role", "system").put("content", toolMemory));
@@ -3600,7 +3618,9 @@ public class MainActivity extends Activity {
         if (includeMemoryTools && memoryEnabled()) {
             arr.put(new JSONObject().put("role", "system").put("content", memoryToolsPrompt()));
         }
-        if (includeMemoryTools && webSearchAvailable()) {
+        // Don't teach tool-call syntax in the same turn we already injected search results —
+        // weak/local models pattern-match the examples and emit another SEARCH:/tool_call anyway.
+        if (includeMemoryTools && webSearchAvailable() && !searchContextAlreadyInjected) {
             arr.put(new JSONObject().put("role", "system").put("content", ToolText.webSearchToolsPrompt()));
         }
     }
@@ -5128,7 +5148,7 @@ public class MainActivity extends Activity {
             body.put("modalities", new JSONArray().put("text").put("audio"));
             body.put("audio", new JSONObject().put("voice", ttsVoiceForModel(model)).put("format", "pcm16"));
             JSONArray arr = new JSONArray();
-            addBackgroundSystemContext(arr, true);
+            addBackgroundSystemContext(arr, true, false);
             arr.put(new JSONObject().put("role", "system").put("content", "This is a spoken two-way voice conversation. Reply in plain text only. Do not use markdown, headings, bullets, tables, code blocks, or formatting symbols. Keep the response natural for text-to-speech."));
             for (int i = 0; i < messages.size(); i++) {
                 Msg m = messages.get(i);
