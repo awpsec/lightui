@@ -69,6 +69,7 @@ public class ToolTextTest {
         assertEq("prose mention not cut by stream", proseMentions, ToolText.visibleStreamingAnswer(proseMentions));
 
         assertTrue("prompt teaches format", ToolText.webSearchToolsPrompt().contains("<function=web_search>"));
+        assertTrue("prompt teaches SEARCH fallback", ToolText.webSearchToolsPrompt().contains("SEARCH:"));
 
         // DDR5-style Jina dump must not become the chat answer.
         String jina = "[1] Title: The DDR5 Price Crisis: Why RAM Costs So Much in 2026 and How to Buy Smart\n"
@@ -112,6 +113,17 @@ public class ToolTextTest {
         assertTrue("parse research", ToolText.parseSlash("/research ddr5 prices") != null
                 && "research".equals(ToolText.parseSlash("/research ddr5 prices").name));
         assertTrue("followup attempt2 mentions final", ToolText.webSearchFollowupSystem(true, 2).toLowerCase().contains("final"));
+
+        // SEARCH: dialect for weak/local models
+        assertEq("SEARCH query", "ddr5 6000 64gb price", ToolText.webSearchToolQuery("Looking that up.\nSEARCH: ddr5 6000 64gb price"));
+        assertEq("SEARCH stripped", "Looking that up.", ToolText.stripToolCalls("Looking that up.\nSEARCH: ddr5 6000 64gb price"));
+        assertTrue("SEARCH is residue", ToolText.looksLikeToolResidue("SEARCH: bitcoin price"));
+
+        // Concrete facts veto planning false-positives
+        assertTrue("has fact $", ToolText.containsConcreteFact("Based on the sources I found, kits are $299."));
+        assertTrue("factful not planning", !ToolText.looksLikeSearchPlanning("Based on the sources I found, kits are $299."));
+        assertTrue("pure planning still planning", ToolText.looksLikeSearchPlanning("Now I should use the sources to answer."));
+        assertTrue("factful not monologue", !ToolText.looksLikeInternalMonologue("The user asked about RAM; kits are about $300 today."));
 
         if (failed > 0) { System.err.println(failed + " failed"); System.exit(1); }
         System.out.println("all passed");

@@ -36,6 +36,9 @@ public final class ToolText {
         s = s.replaceAll("(?is)<function\\s*=\\s*(?:save_memory|remove_memory|web_search|obsidian_write|obsidian_append|obsidian_read)\\b[^>]*>?[\\s\\S]*$", "");
         s = s.replaceAll("(?is)\\[(?:google|web[_\\s-]?search|search)\\s*\\([^\\]]*$", "");
         s = s.replaceAll("(?is)(?:^|\\n)\\s*(?:invoke|call|run)\\s+(?:tool\\s+)?(?:web[_\\s-]?search|google|save_memory|remove_memory)[^\\n]*", "\n");
+        // Simple SEARCH: fallback dialect (line at end or alone).
+        s = s.replaceAll("(?im)^\\s*SEARCH:\\s*.*$", "");
+        s = s.replaceAll("(?is)\\n\\s*SEARCH:\\s*[\\s\\S]*$", "");
         return s.replaceAll("[ \\t]+\\n", "\n").replaceAll("\\n{3,}", "\n\n").trim();
     }
 
@@ -47,7 +50,8 @@ public final class ToolText {
                 || lower.contains("[google(") || lower.contains("[web_search") || lower.contains("[search(")
                 || lower.contains("<function=web_search") || lower.contains("<function=save_memory")
                 || lower.contains("<function=remove_memory") || lower.contains("<function=obsidian_")
-                || lower.contains("\"name\":\"web_search\"") || lower.contains("\"name\": \"web_search\"")) {
+                || lower.contains("\"name\":\"web_search\"") || lower.contains("\"name\": \"web_search\"")
+                || lower.matches("(?s).*(?:^|\\n)\\s*search:\\s*\\S.*")) {
             return true;
         }
         if (lower.contains("web_search") && (lower.contains("<") || lower.contains("{") || lower.contains("invoke") || lower.contains("parameter"))) {
@@ -57,8 +61,21 @@ public final class ToolText {
         // Nearly-only markup / fence leftovers after a failed strip.
         String stripped = stripToolCalls(text);
         if (stripped.length() == 0 && lower.length() > 0) return true;
-        if (stripped.length() > 0 && stripped.length() < 24 && (lower.contains("function=") || lower.contains("tool_call"))) return true;
+        if (stripped.length() > 0 && stripped.length() < 24 && (lower.contains("function=") || lower.contains("tool_call") || lower.contains("search:"))) return true;
         return false;
+    }
+
+    /** True when the text has digits/prices/dates — almost never pure planning. */
+    public static boolean containsConcreteFact(String text) {
+        if (text == null || text.trim().length() == 0) return false;
+        String t = text;
+        if (t.matches("(?s).*\\b(\\$|€|£|¥)\\s?\\d.*")) return true;
+        if (t.matches("(?s).*\\b\\d{1,3}(?:,\\d{3})+(?:\\.\\d+)?\\b.*")) return true;
+        if (t.matches("(?s).*\\b\\d+(?:\\.\\d+)?\\s*%.*")) return true;
+        if (t.matches("(?s).*\\b\\d{2,4}\\s*(gb|tb|mhz|ghz|cl\\d+|mm|kg|lb)\\b.*")) return true;
+        if (t.matches("(?s).*\\b(20\\d{2}|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\\b.*")) return true;
+        // At least one standalone number of 2+ digits (prices, scores, counts).
+        return t.matches("(?s).*\\b\\d{2,}\\b.*");
     }
 
     /**
@@ -69,6 +86,8 @@ public final class ToolText {
         String t = text == null ? "" : text.trim();
         if (t.length() == 0) return false;
         if (looksLikeToolResidue(t)) return true;
+        // Real answers with prices/numbers/dates are never "planning".
+        if (containsConcreteFact(t)) return false;
         String lower = t.toLowerCase(Locale.US).replace('’', '\'');
         // Short planning / scaffolding lines models emit after seeing sources.
         String[] needles = new String[]{
@@ -130,9 +149,14 @@ public final class ToolText {
     public static String webSearchToolQuery(String text) {
         String s = text == null ? "" : text.trim();
         String lower = s.toLowerCase(Locale.US);
+        // Simple SEARCH: dialect for weak/local models (prefer end-of-message line).
+        Matcher simple = Pattern.compile("(?im)^\\s*SEARCH:\\s*(.+?)\\s*$").matcher(s);
+        String simpleQ = "";
+        while (simple.find()) simpleQ = cleanQuery(simple.group(1));
+        if (simpleQ.length() > 0) return simpleQ;
         if (!lower.contains("web_search") && !lower.contains("tool_call") && !lower.contains("[google(")
                 && !lower.contains("google(query") && !lower.contains("[search(") && !lower.contains("\"query\"")
-                && !lower.contains("invoke") && !lower.contains("call web")) {
+                && !lower.contains("invoke") && !lower.contains("call web") && !lower.contains("search:")) {
             return "";
         }
         Matcher google = GOOGLE_QUERY.matcher(s);
@@ -215,7 +239,8 @@ public final class ToolText {
                 "<tool_call", "<function", "[google(", "[web_search", "[search(",
                 "\"name\":\"web_search\"", "\"name\": \"web_search\"",
                 "<function=save_memory", "<function=remove_memory",
-                "<function=obsidian_write", "<function=obsidian_append", "<function=obsidian_read"
+                "<function=obsidian_write", "<function=obsidian_append", "<function=obsidian_read",
+                "\nsearch:", "\nsearch :"
         };
         for (String marker : markers) {
             int at = lower.indexOf(marker);
@@ -265,6 +290,7 @@ public final class ToolText {
     public static boolean looksLikeInternalMonologue(String text) {
         String t = text == null ? "" : text.trim();
         if (t.length() == 0) return false;
+        if (containsConcreteFact(t)) return false;
         String lower = t.toLowerCase(Locale.US).replace('’', '\'');
         String[] needles = new String[]{
                 "the user said",
@@ -396,11 +422,12 @@ public final class ToolText {
     }
 
     public static String webSearchToolsPrompt() {
-        return "Web search tool: when you need fresh facts (scores, news, prices, schedules, weather, \"look up\" / \"search for\"), "
-                + "answer nothing yet — append ONE tool call at the very end: "
-                + "<tool_call><function=web_search><parameter=query>short search query</parameter></function></tool_call> "
-                + "Never reply with only a tool call wrapped in markdown fences. Never invent other tool XML formats. "
-                + "If search results were already provided in the system context, answer directly and do not emit tool calls.";
+        return "When you need fresh facts (scores, news, prices, schedules, weather, look-ups), "
+                + "do not answer yet. End your message with EXACTLY ONE of these tool forms:\n"
+                + "1) Preferred (simple): SEARCH: short search query\n"
+                + "2) XML: <tool_call><function=web_search><parameter=query>short search query</parameter></function></tool_call>\n"
+                + "Put the tool call at the very end. No markdown fences around it. "
+                + "If search results were already provided, answer directly — do not emit another tool call.";
     }
 
     public static String webSearchFollowupSystem(boolean retry) {
@@ -411,15 +438,15 @@ public final class ToolText {
         String base;
         if (attemptIndex >= 2) {
             base = "Final research pass. Prior replies were unusable. "
-                    + "Answer NOW with the best concrete numbers/facts from the snippets below. ";
+                    + "Answer NOW with the best concrete numbers/facts from the sources in the user message. ";
         } else if (retry || attemptIndex >= 1) {
             base = "Your previous reply was not a usable answer (empty, tool call, planning, or only a source title). "
-                    + "The web search already ran. Answer the user's question NOW in plain text using the results below. ";
+                    + "The web search already ran. Answer the user's question NOW in plain text using the sources in the user message. ";
         } else {
-            base = "Web search results are provided below. Answer the user's question directly in plain text. ";
+            base = "Web search results are in the user message. Answer the question directly in plain text. ";
         }
         return base
-                + "Do not output tool calls, XML, function calls, google(...), or <|tool_call|> markers. "
+                + "Do not output tool calls, XML, function calls, SEARCH: lines, or google(...) markers. "
                 + "Give concrete facts from the snippets (prices, numbers, dates, ranges). "
                 + "If prices vary by seller, give a typical current range and mention it varies. "
                 + "Never reply with only a source title, '[1] Title: …', or a bare headline. "
