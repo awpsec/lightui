@@ -107,7 +107,7 @@ public class MainActivity extends Activity {
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
     private static final String SEARCHING = "__searching__";
-    private static final String APP_VERSION = "1.0.18";
+    private static final String APP_VERSION = "1.0.19";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 64;
@@ -2579,9 +2579,9 @@ public class MainActivity extends Activity {
             String finalAnswer = sanitizeAssistantText(answer.toString());
             String toolQuery = webSearchToolQuery(answer.toString());
             if (toolQuery.length() == 0) toolQuery = webSearchToolQuery(reasoning.toString());
-            boolean needsSearchAnswer = toolQuery.length() > 0
-                    || ((finalAnswer.length() == 0 || looksLikeToolResidue(answer.toString()))
-                        && (lastSearchResult.length() > 0 || assistant.searchSources.size() > 0));
+            boolean hasSearchContext = lastSearchResult.length() > 0 || assistant.searchSources.size() > 0;
+            boolean needsSearchAnswer = ToolText.needsSearchFollowup(answer.toString(), finalAnswer, hasSearchContext)
+                    || toolQuery.length() > 0;
             if (needsSearchAnswer) {
                 runOnUiThread(new Runnable() { @Override public void run() {
                     if (assistant.thoughtMs == 0 && assistant.reasoningCapable) {
@@ -2596,8 +2596,14 @@ public class MainActivity extends Activity {
                 String queryForFollowup = lastSearchQuery.length() > 0 ? lastSearchQuery : (userText == null ? "" : userText.trim());
                 if (toolQuery.length() > 0) {
                     queryForFollowup = toolQuery;
-                    result = webSearch(toolQuery);
-                    rememberSearchResult(toolQuery, result);
+                    try {
+                        result = webSearch(toolQuery);
+                        rememberSearchResult(toolQuery, result);
+                    } catch (Exception searchErr) {
+                        if (result == null || result.length() == 0) {
+                            result = "Search failed: " + (searchErr.getMessage() == null ? "unknown error" : searchErr.getMessage());
+                        }
+                    }
                 }
                 if (result == null) result = "";
                 if (result.length() > 0) {
@@ -2809,42 +2815,16 @@ public class MainActivity extends Activity {
         renderMessages();
     }
 
-    private String visibleStreamingAnswer(String text) {
-        String s = text == null ? "" : text;
-        String cleaned = stripToolCalls(s);
-        String lower = cleaned.toLowerCase(Locale.US);
-        int cut = -1;
-        String[] markers = new String[]{
-                "<|tool_call", "<|tool_calls", "tool_call_started", "tool_call_ended",
-                "<tool_call", "<function", "[google(", "[web_search", "[search(",
-                "save_memory", "remove_memory", "web_search"
-        };
-        for (String marker : markers) {
-            int at = lower.indexOf(marker);
-            if (at >= 0) cut = cut < 0 ? at : Math.min(cut, at);
-        }
-        if (cut < 0) {
-            String[] prefixes = new String[]{"<|tool_call", "<|tool_calls", "<tool_call", "<function", "[google", "[web_search", "[search"};
-            int start = Math.max(0, lower.length() - 40);
-            for (int i = start; i < lower.length(); i++) {
-                String tail = lower.substring(i);
-                if (tail.length() == 0) continue;
-                for (String prefix : prefixes) {
-                    if (prefix.startsWith(tail)) { cut = i; break; }
-                }
-                if (cut >= 0) break;
-            }
-        }
-        if (cut >= 0) cleaned = cleaned.substring(0, cut);
-        return cleanAfterToolStrip(cleaned);
-    }
+    private String visibleStreamingAnswer(String text) { return ToolText.visibleStreamingAnswer(text); }
 
     private void finishStreamingAssistant(Msg assistant, String finalAnswer, String reasoning, String stats, String key, String source, String model) {
         stopVoiceThinking();
         assistant.stats = stats;
         assistant.streamDone = true;
         String cleanedFinal = sanitizeAssistantText(finalAnswer.length() == 0 ? assistant.text : finalAnswer);
-        if ("searching...".equals(cleanedFinal.trim()) || looksLikeToolResidue(cleanedFinal)) cleanedFinal = "";
+        if ("searching...".equals(cleanedFinal.trim()) || looksLikeToolResidue(cleanedFinal) || ToolText.looksLikeSearchPlanning(cleanedFinal)) {
+            cleanedFinal = "";
+        }
         assistant.text = cleanedFinal;
         if (reasoning.length() > 0) { assistant.reasoning = reasoning; if (assistant.thoughtMs == 0) assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt); }
         else if (assistant.thoughtMs == 0 && assistant.reasoningCapable) assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt);
@@ -3144,53 +3124,19 @@ public class MainActivity extends Activity {
         return q;
     }
 
-    private String cleanSearchArtifacts(String s) {
-        return (s == null ? "" : s)
-                .replaceAll("\\[[0-9]+%L[0-9]+(?:-L[0-9]+)?\\]", "")
-                .replaceAll("\\[[0-9]+[†‡]L[0-9]+(?:-L[0-9]+)?\\]", "")
-                .replaceAll("【[^】]*[†‡%]L[0-9][^】]*】", "")
-                .replaceAll("(?<=\\p{Alpha})[†‡](?=\\p{Alpha})", " ")
-                .replace("†", "")
-                .replace("‡", "");
-    }
+    private String cleanSearchArtifacts(String s) { return ToolText.cleanSearchArtifacts(s); }
 
-    private String webSearchToolQuery(String text) {
-        String s = text == null ? "" : text.trim();
-        String lower = s.toLowerCase(Locale.US);
-        if (!lower.contains("web_search") && !lower.contains("tool_call") && !lower.contains("[google(") && !lower.contains("google(query")) return "";
-        java.util.regex.Matcher google = java.util.regex.Pattern.compile("(?is)\\[?\\s*google\\s*\\(\\s*query\\s*=\\s*[\"']?([^\"'\\)\\]\\n]+)[\"']?\\s*\\)\\s*\\]?").matcher(s);
-        if (google.find()) {
-            String q = google.group(1).replace("\"", "").replace("'", "").trim();
-            if (q.length() > 0) return q;
-        }
-        java.util.regex.Matcher param = java.util.regex.Pattern.compile("(?is)<parameter(?:\\s+name\\s*=\\s*[\"']?query[\"']?|\\s*=\\s*query)[^>]*>(.*?)</parameter>").matcher(s);
-        if (param.find()) {
-            String q = param.group(1).replace("\"", "").replace("'", "").trim();
-            if (q.length() > 0) return q;
-        }
-        String[] markers = new String[]{"<parameter=query>", "query:", "query=", "\"query\":"};
-        for (String marker : markers) {
-            int at = lower.indexOf(marker);
-            if (at < 0) continue;
-            int start = at + marker.length();
-            int end = s.length();
-            String[] stops = new String[]{"</parameter>", "</function>", "</tool_call>", "</|tool_call|>", "<|tool_call_ended|>", "\n", ")", "]"};
-            for (String stop : stops) { int cut = lower.indexOf(stop, start); if (cut >= 0) end = Math.min(end, cut); }
-            String q = s.substring(start, end).replace("\"", "").replace("'", "").trim();
-            if (q.length() > 0) return q;
-        }
-        return "";
-    }
+    private String webSearchToolQuery(String text) { return ToolText.webSearchToolQuery(text); }
 
     private String answerAfterWebSearch(String key, String source, String model, String query, String result, String userText) {
         String cleaned = result == null ? "" : cleanSearchArtifacts(result);
         String q = query == null || query.trim().length() == 0 ? (userText == null ? "" : userText.trim()) : query.trim();
         try {
             String out = sanitizeAssistantText(followupAfterWebSearch(key, source, model, q, cleaned, userText, false));
-            if (out.length() == 0 || looksLikeToolResidue(out)) {
+            if (!ToolText.isUsableFollowupAnswer(out)) {
                 out = sanitizeAssistantText(followupAfterWebSearch(key, source, model, q, cleaned, userText, true));
             }
-            if (out.length() > 0 && !looksLikeToolResidue(out)) return out;
+            if (ToolText.isUsableFollowupAnswer(out)) return out;
         } catch (Exception ignored) { }
         if (assistantSearchFallback(cleaned).length() > 0) return assistantSearchFallback(cleaned);
         return "I gathered sources, but couldn't form a clear answer from them.";
@@ -3245,26 +3191,25 @@ public class MainActivity extends Activity {
     }
 
     private String extractFollowupAnswerText(JSONObject resp) throws Exception {
-        String direct = extractMessageText(resp);
-        if (direct.length() > 0 && !looksLikeToolResidue(direct)) return direct;
+        String direct = sanitizeAssistantText(stripReasoningTags(extractMessageText(resp)));
+        if (ToolText.isUsableFollowupAnswer(direct)) return direct;
         JSONArray choices = resp.optJSONArray("choices");
-        if (choices == null || choices.length() == 0) return direct;
+        if (choices == null || choices.length() == 0) return "";
         JSONObject msg = choices.getJSONObject(0).optJSONObject("message");
-        if (msg == null) return direct;
-        // Some reasoning models leave content empty and park usable text elsewhere.
-        String[] keys = new String[]{"content", "reasoning", "reasoning_content", "thinking", "output_text"};
+        if (msg == null) return "";
+        // Prefer real answer fields. Never promote planning/CoT about "needing to answer".
+        String[] keys = new String[]{"content", "output_text", "reasoning", "reasoning_content", "thinking"};
         for (String key : keys) {
             String v = cleanJsonString(msg, key);
             v = sanitizeAssistantText(stripReasoningTags(v));
-            if (v.length() > 0 && !looksLikeToolResidue(v) && v.length() < 4000) {
-                // Avoid dumping long private chain-of-thought as the user-visible answer.
-                if ("reasoning".equals(key) || "reasoning_content".equals(key) || "thinking".equals(key)) {
-                    if (v.length() > 600) continue;
-                }
-                return v;
+            if (!ToolText.isUsableFollowupAnswer(v) || v.length() >= 4000) continue;
+            if ("reasoning".equals(key) || "reasoning_content".equals(key) || "thinking".equals(key)) {
+                // Only accept short reasoning that is clearly a user-facing answer, not planning.
+                if (v.length() > 400 || ToolText.looksLikeSearchPlanning(v)) continue;
             }
+            return v;
         }
-        return sanitizeAssistantText(direct);
+        return "";
     }
 
     private String followupAfterMemoryTool(String key, String source, String model, String userText) {
@@ -3449,6 +3394,18 @@ public class MainActivity extends Activity {
         if (includeMemoryTools && memoryEnabled()) {
             arr.put(new JSONObject().put("role", "system").put("content", memoryToolsPrompt()));
         }
+        if (includeMemoryTools && webSearchAvailable()) {
+            arr.put(new JSONObject().put("role", "system").put("content", ToolText.webSearchToolsPrompt()));
+        }
+    }
+
+    private boolean webSearchAvailable() {
+        // Search providers work without a key for Jina (rate-limited); Brave needs a key.
+        if ("brave".equals(searchProvider())) {
+            String key = prefs == null ? "" : prefs.getString("braveApiKey", "");
+            return key.length() > 0;
+        }
+        return true;
     }
 
     private String buildCurrentTimeContext() {
@@ -3773,41 +3730,26 @@ public class MainActivity extends Activity {
         return (note == null ? "" : note).replace("&quot;", "\"").replace("&apos;", "'").replace("\"", "").replace("'", "").trim();
     }
 
-    private String stripToolCalls(String text) {
-        if (text == null || text.length() == 0) return "";
-        String s = text;
-        s = s.replaceAll("(?is)<tool_call\\b[^>]*>.*?</tool_call>", "");
-        s = s.replaceAll("(?is)<function\\s*=\\s*(?:save_memory|remove_memory|web_search)[^>]*>.*?</function>", "");
-        // Pipe-token blocks: <|tool_call|>…</|tool_call|>, <|tool_call_started|>…<|tool_call_ended|>, etc.
-        s = s.replaceAll("(?is)<\\|/?tool[_\\s-]?calls?(?:_section)?(?:_started|_ended|_begin|_end)?\\|>.*?<\\|/?tool[_\\s-]?calls?(?:_section)?(?:_started|_ended|_begin|_end)?\\|>", "");
-        s = s.replaceAll("(?is)\\[(?:google|web[_\\s-]?search|search|bing|brave)\\s*\\([^\\]]*\\)\\]", "");
-        s = s.replaceAll("(?is)<\\|/?tool[_\\s-]?calls?(?:_section)?(?:_started|_ended|_begin|_end)?\\|>[\\s\\S]*$", "");
-        s = s.replaceAll("(?is)<tool_call\\b[^>]*>[\\s\\S]*$", "");
-        s = s.replaceAll("(?is)<function\\s*=\\s*(?:save_memory|remove_memory|web_search)[^>]*>[\\s\\S]*$", "");
-        s = s.replaceAll("(?is)\\[(?:google|web[_\\s-]?search|search)\\s*\\([^\\]]*$", "");
-        return s.trim();
-    }
+    private String stripToolCalls(String text) { return ToolText.stripToolCalls(text); }
 
-    private boolean looksLikeToolResidue(String text) {
-        String lower = text == null ? "" : text.toLowerCase(Locale.US).trim();
-        if (lower.length() == 0) return false;
-        return lower.contains("<tool_call") || lower.contains("<|tool_call") || lower.contains("tool_call_started")
-                || lower.contains("tool_call_ended") || lower.contains("[google(") || lower.contains("<function=web_search")
-                || lower.contains("<function=save_memory") || lower.contains("<function=remove_memory")
-                || (lower.contains("web_search") && lower.contains("<"));
-    }
+    private boolean looksLikeToolResidue(String text) { return ToolText.looksLikeToolResidue(text); }
 
     private String sanitizeAssistantText(String text) {
-        return cleanSearchArtifacts(cleanAfterToolStrip(stripToolCalls(text))).trim();
+        return ToolText.sanitizeAssistantText(stripReasoningTags(text == null ? "" : text));
     }
 
-    private String cleanAfterToolStrip(String text) { return (text == null ? "" : text).replaceAll("(?is)(?:i(?:'|’)ll|i will|i(?:'|’)m going to|i am going to|i(?:'|’)ve|i have)\\s+(?:save|saved|remove|removed|delete|deleted|forget|forgot)[^.!?\n]{0,100}[:,-]?\\s*$", "").replaceAll("[\\s:,-]+$", "").trim(); }
+    private String cleanAfterToolStrip(String text) { return ToolText.cleanAfterToolStrip(text); }
 
     private String searchQuery(String text) {
         String trimmed = text == null ? "" : text.trim();
         String lower = trimmed.toLowerCase(Locale.US);
         if (lower.startsWith("/search ")) return trimmed.substring(8).trim();
+        // Explicit lookup intents always search when autoSearch is on (no need for "?")
+        boolean explicitLookup = lower.contains("look up") || lower.contains("lookup") || lower.contains("search for")
+                || lower.contains("search the web") || lower.contains("web search") || lower.startsWith("google ")
+                || lower.contains(" look up ") || lower.startsWith("lookup ");
         if (!prefs.getBoolean("autoSearch", false)) return "";
+        if (explicitLookup) return trimmed;
         if (!isLikelyQuestion(lower)) return "";
         if (lower.contains("right now") || lower.contains("currently") || lower.contains("at the moment") || lower.contains("as of now") || lower.contains("today") || lower.contains("yesterday") || lower.contains("last night") || lower.contains("latest") || lower.contains("recent") || lower.contains("newest") || lower.contains("current ") || lower.contains("current-") || lower.contains("news") || lower.contains("score") || lower.contains("this week") || lower.contains("this month") || lower.contains("2025") || lower.contains("2026")) return trimmed;
         return "";
