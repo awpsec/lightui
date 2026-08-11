@@ -95,6 +95,24 @@ public class ToolTextTest {
         assertTrue("monologue needs recovery", ToolText.needsEmptyReplyRecovery(mono, mono));
         assertTrue("empty followup system present", ToolText.emptyReplyFollowupSystem().toLowerCase().contains("empty"));
 
+        // Usable sanitized answer must not be wiped because raw stream was a tool call.
+        String toolOnly = "<tool_call><function=web_search><parameter=query>ddr5</parameter></function></tool_call>";
+        String goodSearchAnswer = "Typical DDR5-6000 64GB kits are about $280–$360 today.";
+        assertTrue("usable answer skips recovery even if raw was tool",
+                !ToolText.needsEmptyReplyRecovery(toolOnly, goodSearchAnswer));
+        assertTrue("empty sanitized still recovers", ToolText.needsEmptyReplyRecovery(toolOnly, ""));
+
+        String braveish = "1. Some RAM Deal Page\nhttps://example.com/ram\nDDR5 64GB kits listing around $299 this week at major sellers.\n\n";
+        String snip = ToolText.searchSnippetFallback(braveish);
+        assertTrue("brave desc fallback", snip.toLowerCase().contains("299") || snip.toLowerCase().contains("ddr5"));
+
+        assertTrue("slash filter on /", ToolText.filterSlashCommands("/").size() >= 4);
+        assertTrue("slash filter /se", ToolText.filterSlashCommands("/se").size() >= 1);
+        assertTrue("slash hide after args", ToolText.filterSlashCommands("/search ddr5").size() == 0);
+        assertTrue("parse research", ToolText.parseSlash("/research ddr5 prices") != null
+                && "research".equals(ToolText.parseSlash("/research ddr5 prices").name));
+        assertTrue("followup attempt2 mentions final", ToolText.webSearchFollowupSystem(true, 2).toLowerCase().contains("final"));
+
         if (failed > 0) { System.err.println(failed + " failed"); System.exit(1); }
         System.out.println("all passed");
     }

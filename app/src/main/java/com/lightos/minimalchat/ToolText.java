@@ -1,5 +1,6 @@
 package com.lightos.minimalchat;
 
+import java.util.ArrayList;
 import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -255,9 +256,8 @@ public final class ToolText {
         if ("searching...".equals(clean.trim())) return true;
         if (clean.length() == 0) return true;
         if (!isUsableFollowupAnswer(clean)) return true;
-        if (rawAnswer != null && rawAnswer.length() > 0 && looksLikeToolResidue(rawAnswer) && sanitizeAssistantText(rawAnswer).length() == 0) {
-            return true;
-        }
+        // A usable post-search / sanitized answer always wins — never wipe it just because
+        // the raw stream was a tool call (that was the "No reply" overwrite bug).
         return false;
     }
 
@@ -340,34 +340,58 @@ public final class ToolText {
 
     /**
      * Last-resort readable snippet from Jina/Brave plain-text results.
-     * Prefers description/body lines; never returns bare titles.
+     * Prefers description/body lines; never returns bare titles alone.
      */
     public static String searchSnippetFallback(String result) {
         if (result == null || result.trim().length() == 0) return "";
         String[] lines = result.replace('\r', '\n').split("\n");
         String bestDesc = "";
         String bestBody = "";
+        StringBuilder juicyBits = new StringBuilder();
+        String pendingTitle = "";
         for (int i = 0; i < lines.length; i++) {
             String t = lines[i].trim();
             if (t.length() == 0) continue;
             String lower = t.toLowerCase(Locale.US);
             if (lower.startsWith("description:")) {
                 String d = t.substring("description:".length()).trim();
-                if (d.length() >= 40 && !isSourceMetaLine(d) && (bestDesc.length() == 0 || d.length() > bestDesc.length())) {
-                    bestDesc = d;
+                if (d.length() >= 24 && !isSourceMetaLine(d)) {
+                    if (bestDesc.length() == 0 || d.length() > bestDesc.length()) bestDesc = d;
+                    if (juicyBits.length() < 500 && (d.matches("(?i).*\\b(\\$|usd|€|£|gb|price|cost|\\d{2,}).*") || juicyBits.length() == 0)) {
+                        if (juicyBits.length() > 0) juicyBits.append(' ');
+                        juicyBits.append(d);
+                    }
                 }
                 continue;
             }
+            if (lower.startsWith("title:") || lower.matches("(?i)^\\[\\d+\\]\\s*title\\s*:.*") || lower.matches("(?i)^\\d+\\.\\s+\\S.{0,100}")) {
+                pendingTitle = t.replaceFirst("(?i)^(?:\\[\\d+\\]\\s*)?(?:title\\s*:\\s*)?", "").trim();
+                continue;
+            }
             if (isSourceMetaLine(t)) continue;
-            if (t.length() < 40) continue;
-            // Prefer lines with concrete cues (prices, numbers, units).
+            if (t.length() < 24) continue;
             boolean juicy = lower.matches(".*\\b(\\$|usd|€|£|gb|tb|mhz|cl\\d+|price|cost|\\d{2,}).*");
-            if (juicy && (bestBody.length() == 0 || t.length() > bestBody.length())) bestBody = t;
-            else if (bestBody.length() == 0) bestBody = t;
+            if (juicy) {
+                if (bestBody.length() == 0 || t.length() > bestBody.length()) bestBody = t;
+                if (juicyBits.length() < 500) {
+                    if (juicyBits.length() > 0) juicyBits.append(' ');
+                    juicyBits.append(t);
+                }
+            } else if (bestBody.length() == 0) {
+                bestBody = t;
+            }
+        }
+        if (juicyBits.length() >= 24) {
+            String pick = juicyBits.toString().trim();
+            if (!looksLikeSourceMetadataOnly(pick)) return pick.length() > 700 ? pick.substring(0, 700).trim() + "…" : pick;
         }
         String pick = bestDesc.length() > 0 ? bestDesc : bestBody;
+        if (pick.length() == 0 && pendingTitle.length() > 0) {
+            // Absolute last resort: title alone is better than "No reply".
+            return pendingTitle;
+        }
         if (pick.length() == 0) return "";
-        if (looksLikeSourceMetadataOnly(pick)) return "";
+        if (looksLikeSourceMetadataOnly(pick) && bestDesc.length() == 0) return "";
         return pick;
     }
 
@@ -380,15 +404,83 @@ public final class ToolText {
     }
 
     public static String webSearchFollowupSystem(boolean retry) {
-        String base = retry
-                ? "Your previous reply was not a usable answer (empty, tool call, planning, or only a source title). "
-                + "The web search already ran. Answer the user's question NOW in plain text using the results below. "
-                : "Web search results are provided below. Answer the user's question directly in plain text. ";
+        return webSearchFollowupSystem(retry, retry ? 1 : 0);
+    }
+
+    public static String webSearchFollowupSystem(boolean retry, int attemptIndex) {
+        String base;
+        if (attemptIndex >= 2) {
+            base = "Final research pass. Prior replies were unusable. "
+                    + "Answer NOW with the best concrete numbers/facts from the snippets below. ";
+        } else if (retry || attemptIndex >= 1) {
+            base = "Your previous reply was not a usable answer (empty, tool call, planning, or only a source title). "
+                    + "The web search already ran. Answer the user's question NOW in plain text using the results below. ";
+        } else {
+            base = "Web search results are provided below. Answer the user's question directly in plain text. ";
+        }
         return base
                 + "Do not output tool calls, XML, function calls, google(...), or <|tool_call|> markers. "
                 + "Give concrete facts from the snippets (prices, numbers, dates, ranges). "
                 + "If prices vary by seller, give a typical current range and mention it varies. "
                 + "Never reply with only a source title, '[1] Title: …', or a bare headline. "
                 + "Cite a URL only when helpful.\n\n";
+    }
+
+    public static final class SlashCommand {
+        public final String name;
+        public final String description;
+        public SlashCommand(String name, String description) {
+            this.name = name;
+            this.description = description;
+        }
+    }
+
+    public static final class SlashParse {
+        public final String name;
+        public final String args;
+        public SlashParse(String name, String args) {
+            this.name = name == null ? "" : name;
+            this.args = args == null ? "" : args;
+        }
+    }
+
+    public static final SlashCommand[] SLASH_COMMANDS = new SlashCommand[]{
+            new SlashCommand("search", "search the web"),
+            new SlashCommand("research", "deep search — up to 3 synthesis passes"),
+            new SlashCommand("help", "list slash commands"),
+            new SlashCommand("memory", "show persistent memory"),
+            new SlashCommand("new", "start a new chat"),
+            new SlashCommand("web", "toggle web search for this chat"),
+    };
+
+    public static SlashParse parseSlash(String text) {
+        String t = text == null ? "" : text.trim();
+        if (!t.startsWith("/")) return null;
+        String body = t.substring(1).trim();
+        if (body.length() == 0) return null;
+        int sp = body.indexOf(' ');
+        String name = (sp < 0 ? body : body.substring(0, sp)).toLowerCase(Locale.US);
+        String args = sp < 0 ? "" : body.substring(sp + 1).trim();
+        if (name.length() == 0) return null;
+        for (SlashCommand c : SLASH_COMMANDS) {
+            if (c.name.equals(name)) return new SlashParse(name, args);
+        }
+        return null;
+    }
+
+    /** Filter commands while the user types `/se` or `/search ` (before args get long). */
+    public static ArrayList<SlashCommand> filterSlashCommands(String raw) {
+        ArrayList<SlashCommand> out = new ArrayList<SlashCommand>();
+        String t = raw == null ? "" : raw;
+        if (!t.startsWith("/")) return out;
+        // Hide once they are typing the query after a known command + space.
+        if (t.matches("(?is)^/(search|research)\\s+\\S.*")) return out;
+        String token = t.substring(1);
+        int sp = token.indexOf(' ');
+        String partial = (sp < 0 ? token : token.substring(0, sp)).toLowerCase(Locale.US);
+        for (SlashCommand c : SLASH_COMMANDS) {
+            if (partial.length() == 0 || c.name.startsWith(partial)) out.add(c);
+        }
+        return out;
     }
 }
