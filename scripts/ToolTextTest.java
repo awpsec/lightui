@@ -247,6 +247,19 @@ public class ToolTextTest {
         assertEq("extract search for", "ddr5 64gb 6000 price", ToolText.extractSearchQuery("search for ddr5 64gb 6000 price"));
         assertEq("extract slash", "bitcoin price", ToolText.extractSearchQuery("/search bitcoin price"));
         assertEq("extract look up", "the lakers score", ToolText.extractSearchQuery("look up the lakers score"));
+        assertEq("ellipsis thinking", "thinking...", ToolText.ensureEllipsis("thinking"));
+        assertEq("ellipsis already", "fetching...", ToolText.ensureEllipsis("fetching..."));
+        assertEq("ellipsis unicode", "searching the web...", ToolText.ensureEllipsis("searching the web…"));
+        assertEq("live thinking dots", "searching the web...", ToolText.toolLiveLabel("web_search"));
+        assertTrue("palette hides on /search space", ToolText.filterSlashCommands("/search ").size() == 0);
+        assertTrue("palette hides on /search query", ToolText.filterSlashCommands("/search ddr5").size() == 0);
+        assertTrue("palette shows /se", ToolText.filterSlashCommands("/se").size() == 1
+                && "search".equals(ToolText.filterSlashCommands("/se").get(0).name));
+        assertTrue("palette aligned names", ToolText.slashNameColumnChars() >= "/research".length());
+        assertTrue("path is not a slash command", ToolText.parseSlash("/sdcard/foo") == null);
+        assertTrue("unknown slash is not parsed", ToolText.parseSlash("/nope") == null);
+        assertTrue("search takes args", ToolText.slashByName("search") != null && ToolText.slashByName("search").takesArgs);
+        assertTrue("help has no args", ToolText.slashByName("help") != null && !ToolText.slashByName("help").takesArgs);
 
         if (failed > 0) { System.err.println(failed + " failed"); System.exit(1); }
         System.out.println("all passed");

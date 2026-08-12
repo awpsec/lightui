@@ -972,12 +972,24 @@ public final class ToolText {
     /** Live status while a tool is running — Pi/Hermes wording, same gray wave. */
     public static String toolLiveLabel(String name) {
         String n = name == null ? "" : name.toLowerCase(Locale.US).trim();
-        if ("web_search".equals(n) || "search".equals(n) || "google".equals(n)) return "searching the web...";
-        if ("fetch".equals(n) || "fetch_content".equals(n) || "read_url".equals(n)) return "fetching...";
-        if ("save_memory".equals(n)) return "saving memory...";
-        if ("remove_memory".equals(n)) return "updating memory...";
-        if (n.length() == 0) return "working...";
-        return n.replace('_', ' ') + "...";
+        if ("web_search".equals(n) || "search".equals(n) || "google".equals(n)) return ensureEllipsis("searching the web");
+        if ("fetch".equals(n) || "fetch_content".equals(n) || "read_url".equals(n)) return ensureEllipsis("fetching");
+        if ("save_memory".equals(n)) return ensureEllipsis("saving memory");
+        if ("remove_memory".equals(n)) return ensureEllipsis("updating memory");
+        if (n.length() == 0) return ensureEllipsis("working");
+        return ensureEllipsis(n.replace('_', ' '));
+    }
+
+    /** Every in-progress status uses the same trailing dots: thinking... / fetching... */
+    public static String ensureEllipsis(String label) {
+        if (label == null) return "...";
+        String t = label.trim();
+        if (t.length() == 0) return "...";
+        if (t.endsWith("…")) t = t.substring(0, t.length() - 1).trim();
+        while (t.endsWith(".")) t = t.substring(0, t.length() - 1);
+        t = t.trim();
+        if (t.length() == 0) return "...";
+        return t + "...";
     }
 
     /** Completed tool row, Claude Code / Cursor style: `name  detail`. */
@@ -1027,9 +1039,19 @@ public final class ToolText {
     public static final class SlashCommand {
         public final String name;
         public final String description;
+        public final String hint;
+        public final boolean takesArgs;
         public SlashCommand(String name, String description) {
+            this(name, description, "", false);
+        }
+        public SlashCommand(String name, String description, String hint, boolean takesArgs) {
             this.name = name;
             this.description = description;
+            this.hint = hint == null ? "" : hint;
+            this.takesArgs = takesArgs;
+        }
+        public String paletteName() {
+            return "/" + name;
         }
     }
 
@@ -1043,42 +1065,61 @@ public final class ToolText {
     }
 
     public static final SlashCommand[] SLASH_COMMANDS = new SlashCommand[]{
-            new SlashCommand("search", "search the web"),
-            new SlashCommand("research", "deep search — up to 3 synthesis passes"),
-            new SlashCommand("help", "list slash commands"),
-            new SlashCommand("memory", "show persistent memory"),
-            new SlashCommand("new", "start a new chat"),
-            new SlashCommand("web", "toggle web search for this chat"),
+            new SlashCommand("search", "search the web", "<query>", true),
+            new SlashCommand("research", "search deeper", "<query>", true),
+            new SlashCommand("help", "list commands", "", false),
+            new SlashCommand("memory", "show memory", "[query]", false),
+            new SlashCommand("new", "new chat", "", false),
+            new SlashCommand("web", "toggle web search", "", false),
     };
 
     public static SlashParse parseSlash(String text) {
         String t = text == null ? "" : text.trim();
         if (!t.startsWith("/")) return null;
+        if (t.startsWith("//")) return null;
         String body = t.substring(1).trim();
         if (body.length() == 0) return null;
         int sp = body.indexOf(' ');
         String name = (sp < 0 ? body : body.substring(0, sp)).toLowerCase(Locale.US);
         String args = sp < 0 ? "" : body.substring(sp + 1).trim();
         if (name.length() == 0) return null;
+        if (!name.matches("[a-z][a-z0-9_]*")) return null;
         for (SlashCommand c : SLASH_COMMANDS) {
             if (c.name.equals(name)) return new SlashParse(name, args);
         }
         return null;
     }
 
-    /** Filter commands while the user types `/se` or `/search ` (before args get long). */
+    public static SlashCommand slashByName(String name) {
+        String n = name == null ? "" : name.toLowerCase(Locale.US);
+        for (SlashCommand c : SLASH_COMMANDS) {
+            if (c.name.equals(n)) return c;
+        }
+        return null;
+    }
+
+    /**
+     * Palette while composing a command token.
+     * Hide once a known command is complete and they are in args mode (`/search `).
+     */
     public static ArrayList<SlashCommand> filterSlashCommands(String raw) {
         ArrayList<SlashCommand> out = new ArrayList<SlashCommand>();
         String t = raw == null ? "" : raw;
-        if (!t.startsWith("/")) return out;
-        // Hide once they are typing the query after a known command + space.
-        if (t.matches("(?is)^/(search|research)\\s+\\S.*")) return out;
-        String token = t.substring(1);
-        int sp = token.indexOf(' ');
-        String partial = (sp < 0 ? token : token.substring(0, sp)).toLowerCase(Locale.US);
+        if (!t.startsWith("/") || t.startsWith("//")) return out;
+        if (t.indexOf('\n') >= 0) return out;
+        String rest = t.substring(1);
+        int sp = rest.indexOf(' ');
+        if (sp >= 0) return out;
+        String partial = rest.toLowerCase(Locale.US);
         for (SlashCommand c : SLASH_COMMANDS) {
             if (partial.length() == 0 || c.name.startsWith(partial)) out.add(c);
         }
         return out;
+    }
+
+    public static int slashNameColumnChars() {
+        int n = 0;
+        for (SlashCommand c : SLASH_COMMANDS) n = Math.max(n, c.paletteName().length());
+        return n;
     }
 }
