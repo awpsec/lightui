@@ -310,6 +310,17 @@ public class ToolTextTest {
             failed++;
         }
 
+        assertEq("relative now", "now", ToolText.relativeTime(100000, 90000));
+        assertEq("relative minutes", "3m", ToolText.relativeTime(1000000, 1000000 - 3 * 60000));
+        assertEq("relative hours", "2h", ToolText.relativeTime(10000000, 10000000 - 2 * 3600000));
+        assertTrue("query matches title", ToolText.textMatchesQuery("ddr", "DDR5 prices", "empty chat"));
+        assertTrue("query matches preview", ToolText.textMatchesQuery("ram", "untitled", "ai: ram is expensive"));
+        assertTrue("empty query matches", ToolText.textMatchesQuery("", "x", "y"));
+        assertTrue("query miss", !ToolText.textMatchesQuery("zebra", "cats", "dogs"));
+        assertTrue("recency prefers updatedAt", ToolText.recencyMillis(50, "10", 20) == 50);
+        assertTrue("recency falls back to message", ToolText.recencyMillis(0, "10", 20) == 20);
+        assertTrue("recency falls back to id", ToolText.recencyMillis(0, "12345", 0) == 12345);
+
         if (failed > 0) { System.err.println(failed + " failed"); System.exit(1); }
         System.out.println("all passed");
     }
