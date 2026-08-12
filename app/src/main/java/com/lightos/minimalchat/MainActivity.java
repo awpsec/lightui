@@ -3,12 +3,14 @@ package com.lightos.minimalchat;
 import android.Manifest;
 import android.app.Activity;
 import android.app.Dialog;
+import android.app.DownloadManager;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.database.Cursor;
 import android.media.AudioAttributes;
 import android.media.AudioFocusRequest;
 import android.media.AudioFormat;
@@ -112,7 +114,7 @@ public class MainActivity extends Activity {
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
     private static final String SEARCHING = "__searching__";
-    private static final String APP_VERSION = "1.0.36";
+    private static final String APP_VERSION = "1.0.37";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 120;
@@ -899,21 +901,16 @@ public class MainActivity extends Activity {
         });
         LinearLayout box = panelBox();
         box.addView(panelTitle("version " + version + " is available!"));
-        TextView msg = text("a newer lightui build is on github. update in-app, open the apk in your browser, dismiss for later, or silence this version.", 13, Color.LTGRAY);
+        TextView msg = text("a newer lightui build is on github. update now, dismiss for later, or silence this version.", 13, Color.LTGRAY);
         msg.setPadding(0, 0, 0, dp(16));
         box.addView(msg);
         TextView update = panelAction("update");
-        TextView browser = panelAction("browser");
         TextView dismiss = panelAction("dismiss");
         TextView silence = panelAction("silence");
         update.setTextColor(Color.WHITE);
         update.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
             d.dismiss();
             beginUpdateInstall(version, apkUrl);
-        } });
-        browser.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
-            d.dismiss();
-            openUpdateInBrowser(apkUrl);
         } });
         dismiss.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); } });
         silence.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
@@ -922,7 +919,6 @@ public class MainActivity extends Activity {
             toast("silenced " + version);
         } });
         box.addView(update, new LinearLayout.LayoutParams(-1, dp(48)));
-        box.addView(browser, new LinearLayout.LayoutParams(-1, dp(48)));
         box.addView(dismiss, new LinearLayout.LayoutParams(-1, dp(48)));
         box.addView(silence, new LinearLayout.LayoutParams(-1, dp(48)));
         showPanel(d, box);
@@ -959,33 +955,29 @@ public class MainActivity extends Activity {
             File out = new File(getCacheDir(), "lightui-update.apk");
             Exception last = null;
             String[] urls = ToolText.updateDownloadUrls(apkUrl, version);
+            String ua = "Mozilla/5.0 (Linux; Android 14; Mobile) lightui/" + APP_VERSION;
             try {
-                for (int attempt = 1; attempt <= 3; attempt++) {
-                    String ua = attempt <= 1
-                            ? "lightui-android"
-                            : "Mozilla/5.0 (Linux; Android 14; Mobile) lightui/" + APP_VERSION;
-                    for (int i = 0; i < urls.length; i++) {
-                        try {
-                            if (out.exists()) out.delete();
-                            UpdateDownload.downloadApk(urls[i], out, ua);
-                            final File apk = out;
-                            runOnUiThread(new Runnable() { @Override public void run() {
-                                updateDownloading = false;
-                                toast("installing " + version);
-                                installUpdateApk(apk);
-                            } });
-                            return;
-                        } catch (Exception e) {
-                            last = e;
-                            if (out.exists()) try { out.delete(); } catch (Exception ignored) { }
-                        }
-                    }
-                    if (attempt < 3) {
-                        try { Thread.sleep(400L * attempt); }
-                        catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
+                if (UpdateDownload.isUsableApk(out, -1)) {
+                    finishUpdateDownload(version, out);
+                    return;
+                }
+                for (int i = 0; i < urls.length; i++) {
+                    try {
+                        UpdateDownload.downloadApk(urls[i], out, ua);
+                        finishUpdateDownload(version, out);
+                        return;
+                    } catch (Exception e) {
+                        last = e;
                     }
                 }
-                if (out.exists()) try { out.delete(); } catch (Exception ignored) { }
+                try {
+                    if (urls.length > 0 && downloadWithManager(urls[0], out)) {
+                        finishUpdateDownload(version, out);
+                        return;
+                    }
+                } catch (Exception e) {
+                    last = e;
+                }
                 final Exception fail = last;
                 runOnUiThread(new Runnable() { @Override public void run() {
                     updateDownloading = false;
@@ -993,7 +985,6 @@ public class MainActivity extends Activity {
                     showUpdateDownloadFailed(version, apkUrl);
                 } });
             } catch (Exception e) {
-                if (out.exists()) try { out.delete(); } catch (Exception ignored) { }
                 final String msg = ToolText.friendlyDownloadError(e);
                 runOnUiThread(new Runnable() { @Override public void run() {
                     updateDownloading = false;
@@ -1002,6 +993,63 @@ public class MainActivity extends Activity {
                 } });
             }
         } }, "lightui-update").start();
+    }
+
+    private void finishUpdateDownload(final String version, final File apk) {
+        runOnUiThread(new Runnable() { @Override public void run() {
+            updateDownloading = false;
+            toast("installing " + version);
+            installUpdateApk(apk);
+        } });
+    }
+
+    private boolean downloadWithManager(String url, File dest) throws Exception {
+        DownloadManager dm = (DownloadManager) getSystemService(DOWNLOAD_SERVICE);
+        if (dm == null) return false;
+        File extDir = getExternalFilesDir(null);
+        if (extDir == null) return false;
+        File ext = new File(extDir, "lightui-update.apk");
+        if (ext.exists() && !ext.delete()) return false;
+        DownloadManager.Request req = new DownloadManager.Request(Uri.parse(url));
+        req.setMimeType("application/vnd.android.package-archive");
+        req.setTitle("lightui");
+        req.setDescription("updating");
+        req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE);
+        req.setAllowedOverMetered(true);
+        req.setAllowedOverRoaming(true);
+        req.addRequestHeader("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) lightui/" + APP_VERSION);
+        req.addRequestHeader("Accept", "application/octet-stream");
+        req.setDestinationInExternalFilesDir(this, null, "lightui-update.apk");
+        long id = dm.enqueue(req);
+        long start = System.currentTimeMillis();
+        try {
+            while (System.currentTimeMillis() - start < 90000L) {
+                Cursor c = dm.query(new DownloadManager.Query().setFilterById(id));
+                if (c == null) { Thread.sleep(300); continue; }
+                try {
+                    if (!c.moveToFirst()) { Thread.sleep(300); continue; }
+                    int status = c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS));
+                    if (status == DownloadManager.STATUS_SUCCESSFUL) {
+                        if (!ext.exists()) {
+                            int uriIdx = c.getColumnIndex(DownloadManager.COLUMN_LOCAL_URI);
+                            String local = uriIdx >= 0 ? c.getString(uriIdx) : null;
+                            if (local != null && local.startsWith("file://")) ext = new File(Uri.parse(local).getPath());
+                        }
+                        if (!UpdateDownload.isUsableApk(ext, -1)) return false;
+                        if (dest.exists()) dest.delete();
+                        UpdateDownload.copyFile(ext, dest);
+                        return UpdateDownload.isUsableApk(dest, -1);
+                    }
+                    if (status == DownloadManager.STATUS_FAILED) return false;
+                } finally {
+                    c.close();
+                }
+                Thread.sleep(300);
+            }
+            return false;
+        } finally {
+            try { dm.remove(id); } catch (Exception ignored) {}
+        }
     }
 
     private void showUpdateDownloadFailed(final String version, final String apkUrl) {
@@ -1018,39 +1066,20 @@ public class MainActivity extends Activity {
         });
         LinearLayout box = panelBox();
         box.addView(panelTitle("download cut off"));
-        TextView msg = text("github closed the connection before the apk finished. retry here, or open the file in your browser and install from downloads.", 13, Color.LTGRAY);
+        TextView msg = text("the apk did not finish. retry keeps going from where it stopped.", 13, Color.LTGRAY);
         msg.setPadding(0, 0, 0, dp(16));
         box.addView(msg);
         TextView retry = panelAction("retry");
-        TextView browser = panelAction("browser");
         TextView dismiss = panelAction("dismiss");
         retry.setTextColor(Color.WHITE);
         retry.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
             d.dismiss();
             beginUpdateInstall(version, apkUrl);
         } });
-        browser.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
-            d.dismiss();
-            openUpdateInBrowser(apkUrl);
-        } });
         dismiss.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); } });
         box.addView(retry, new LinearLayout.LayoutParams(-1, dp(48)));
-        box.addView(browser, new LinearLayout.LayoutParams(-1, dp(48)));
         box.addView(dismiss, new LinearLayout.LayoutParams(-1, dp(48)));
         showPanel(d, box);
-    }
-
-    private void openUpdateInBrowser(String apkUrl) {
-        String url = apkUrl == null || apkUrl.length() == 0
-                ? "https://github.com/awpsec/lightui/releases/latest"
-                : apkUrl;
-        try {
-            Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
-            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            startActivity(i);
-        } catch (Exception e) {
-            toast("couldn't open browser");
-        }
     }
 
     private void installUpdateApk(File apk) {

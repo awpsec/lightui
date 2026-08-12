@@ -343,7 +343,7 @@ public class ToolTextTest {
         assertTrue("stream cutoff is transient",
                 ToolText.isTransientDownloadError(new java.io.IOException("unexpected end of stream on com.android.okhttp.Address@1")));
         assertEq("cutoff toast",
-                "download cut off - retry or open in browser",
+                "download cut off - retry",
                 ToolText.friendlyDownloadError(new java.io.IOException("unexpected end of stream on com.android.okhttp.Address@1")));
         String[] apkUrls = ToolText.updateDownloadUrls(
                 "https://github.com/awpsec/lightui/releases/download/v1.0.33/lightui-release.apk", "v1.0.33");
