@@ -1224,4 +1224,31 @@ public final class ToolText {
         if (n <= 0) n = usage.optInt("promptTokens", 0);
         return Math.max(0, n);
     }
+
+    public static String relativeTime(long now, long then) {
+        if (then <= 0) return "";
+        long ago = now - then;
+        if (ago < 0) ago = 0;
+        if (ago < 45000L) return "now";
+        if (ago < 3600000L) return Math.max(1, ago / 60000L) + "m";
+        if (ago < 86400000L) return Math.max(1, ago / 3600000L) + "h";
+        if (ago < 7L * 86400000L) return Math.max(1, ago / 86400000L) + "d";
+        if (ago < 30L * 86400000L) return Math.max(1, ago / (7L * 86400000L)) + "w";
+        return Math.max(1, ago / (30L * 86400000L)) + "mo";
+    }
+
+    public static boolean textMatchesQuery(String query, String a, String b) {
+        String q = query == null ? "" : query.trim().toLowerCase(Locale.US);
+        if (q.length() == 0) return true;
+        String x = a == null ? "" : a.toLowerCase(Locale.US);
+        String y = b == null ? "" : b.toLowerCase(Locale.US);
+        return x.contains(q) || y.contains(q);
+    }
+
+    public static long recencyMillis(long updatedAt, String id, long lastMessageAt) {
+        if (updatedAt > 0) return updatedAt;
+        if (lastMessageAt > 0) return lastMessageAt;
+        if (id == null) return 0;
+        try { return Long.parseLong(id.trim()); } catch (Exception e) { return 0; }
+    }
 }

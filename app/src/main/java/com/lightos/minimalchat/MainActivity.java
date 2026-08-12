@@ -65,6 +65,7 @@ import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
 import android.view.Window;
 import android.view.WindowManager;
+import android.view.animation.DecelerateInterpolator;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
@@ -97,6 +98,8 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Calendar;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Locale;
@@ -109,7 +112,7 @@ public class MainActivity extends Activity {
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
     private static final String SEARCHING = "__searching__";
-    private static final String APP_VERSION = "1.0.32";
+    private static final String APP_VERSION = "1.0.33";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 120;
@@ -139,11 +142,11 @@ public class MainActivity extends Activity {
     private LinearLayout root, messageList, folderList, chatList;
     private ScrollView scroll, settingsScrollView;
     private ScrollIndicator scrollIndicator;
-    private EditText input, apiKey, endpointInput, endpointKeyInput, jinaKeyInput, voiceEndpointInput;
+    private EditText input, apiKey, endpointInput, endpointKeyInput, jinaKeyInput, braveKeyInput, voiceEndpointInput, chatSearch;
     private ImageButton composerAction;
     private View photoPreviewOverlay;
-    private TextView modelText, contextText, attachText, replyChip, notice, voiceStatus, voiceText, voiceReply, bulkButton, emptyPrompt, bottomButton;
-    private LinearLayout slashSuggestRow;
+    private TextView modelText, contextText, attachText, replyChip, notice, voiceStatus, voiceText, voiceReply, bulkButton, emptyPrompt, bottomButton, chatsSelectCount;
+    private LinearLayout slashSuggestRow, chatsSelectBar;
     private GlobeButton webSearchIcon;
     private View chatFade;
     private ContextMeter meter;
@@ -189,10 +192,10 @@ public class MainActivity extends Activity {
     private String lastSearchQuery = "";
     private final HashSet<String> selectedChats = new HashSet<String>();
     private final Handler ui = new Handler(Looper.getMainLooper());
-    private String currentChatId = "", selectedFolder = "Inbox", projectView = "", expandedFolder = "", pendingVoiceText = "", replyQuote = "", voiceThinkingWord = "thinking...", settingsPage = "";
+    private String currentChatId = "", selectedFolder = "Inbox", projectView = "", expandedFolder = "", pendingVoiceText = "", replyQuote = "", voiceThinkingWord = "thinking...", settingsPage = "", chatFilter = "";
     private final ArrayList<AttachedImage> pendingImages = new ArrayList<AttachedImage>();
     private static final int MAX_PENDING_IMAGES = 6;
-    private int pane = 1, messageStart = 0, messageEnd = 0, savedChatScrollY = 0, savedSettingsScrollY = 0, emptyPromptRun = 0, voiceThinkingRun = 0, voiceListenRun = 0, recorderSpeechFrames = 0, voiceSession = 0;
+    private int pane = 1, messageStart = 0, messageEnd = 0, savedChatScrollY = 0, savedSettingsScrollY = 0, emptyPromptRun = 0, voiceThinkingRun = 0, voiceListenRun = 0, recorderSpeechFrames = 0, voiceSession = 0, paneSlide = 0;
     private long recordingStartedAt = 0, quietSince = 0;
     private float downX, downY;
     private boolean messageWindowReady = false, renderingMessages = false, savedChatScrollKnown = false, restoreScrollOnce = false, forceAutoScrollBottom = false, userAtChatBottom = true, voiceMode = false, voiceFullMode = false, voiceThinking = false, voiceAwaitingSpeechResult = false, ttsReady = false, hookVoiceMode = false, projectEditorOpen = false, recordingFallback = false, wavRecording = false, wavSubmitAfterStop = false, webSearchChat = false;
@@ -266,6 +269,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onPause() {
         super.onPause();
+        flushSettingsInputs();
         flushPendingPersist();
         if (voiceMode && voiceFullMode) stopVoiceMode();
     }
@@ -295,10 +299,10 @@ public class MainActivity extends Activity {
             }
             if (dy > dp(90) && Math.abs(dy) > Math.abs(dx) * 1.4f && clearFocusedTextField()) return true;
             if (Math.abs(dx) > dp(72) && Math.abs(dx) > Math.abs(dy) * 1.2f && Math.abs(dy) < dp(220)) {
-                if (dx > 0 && pane == 0 && projectView.length() > 0) { projectView = ""; showChatsPane(); return true; }
-                if (dx > 0 && pane == 2 && settingsPage.length() > 0) { settingsPage = ""; showSettingsPane(); return true; }
-                if (dx < 0 && pane < 2) { pane++; if (pane == 2) settingsPage = ""; renderPane(); return true; }
-                if (dx > 0 && pane > 0) { pane--; renderPane(); return true; }
+                if (dx > 0 && pane == 0 && projectView.length() > 0) { paneSlide = 1; projectView = ""; showChatsPane(); return true; }
+                if (dx > 0 && pane == 2 && settingsPage.length() > 0) { paneSlide = 1; settingsPage = ""; showSettingsPane(); return true; }
+                if (dx < 0 && pane < 2) { paneSlide = -1; pane++; if (pane == 2) settingsPage = ""; renderPane(); return true; }
+                if (dx > 0 && pane > 0) { paneSlide = 1; pane--; renderPane(); return true; }
             }
         }
         return super.dispatchTouchEvent(e);
@@ -317,8 +321,8 @@ public class MainActivity extends Activity {
                 if (photoPreviewOverlay != null) { dismissImagePreview(); return true; }
                 if (voiceMode && voiceFullMode) stopVoiceMode();
                 else if (projectEditorOpen) showChatsPane();
-                else if (pane == 0 && projectView.length() > 0) { projectView = ""; showChatsPane(); }
-                else if (pane == 2 && settingsPage.length() > 0) { settingsPage = ""; showSettingsPane(); }
+                else if (pane == 0 && projectView.length() > 0) { paneSlide = 1; projectView = ""; showChatsPane(); }
+                else if (pane == 2 && settingsPage.length() > 0) { paneSlide = 1; settingsPage = ""; showSettingsPane(); }
                 else goHome();
                 return true;
             }
@@ -355,11 +359,17 @@ public class MainActivity extends Activity {
 
     private void renderPane() {
         hideKeyboard();
+        flushSettingsInputs();
         removeScreenChild(bulkButton); bulkButton = null;
         if (pane == 0) showChatsPane(); else if (pane == 2) showSettingsPane(); else showChatPane();
     }
 
     private void clearPaneViews() {
+        if (root != null) {
+            root.animate().cancel();
+            root.setAlpha(1f);
+            root.setTranslationX(0);
+        }
         root.removeAllViews();
         input = null;
         composerAction = null;
@@ -367,7 +377,11 @@ public class MainActivity extends Activity {
         endpointInput = null;
         endpointKeyInput = null;
         jinaKeyInput = null;
+        braveKeyInput = null;
         voiceEndpointInput = null;
+        chatSearch = null;
+        chatsSelectBar = null;
+        chatsSelectCount = null;
         contextText = null;
         attachText = null;
         replyChip = null;
@@ -535,10 +549,12 @@ public class MainActivity extends Activity {
         updateAttachChip();
         updateSlashSuggestions(input.getText() == null ? "" : input.getText().toString());
         renderMessages();
+        slidePaneIn();
     }
 
     private void showSettingsPane() {
         projectEditorOpen = false;
+        flushSettingsInputs();
         if (pane == 2 && settingsPage.length() == 0 && settingsScrollView != null) savedSettingsScrollY = settingsScrollView.getScrollY();
         pane = 2;
         captureChatScroll();
@@ -549,6 +565,7 @@ public class MainActivity extends Activity {
         endpointInput = null;
         endpointKeyInput = null;
         jinaKeyInput = null;
+        braveKeyInput = null;
         voiceEndpointInput = null;
         root.addView(settingsTitle());
         ScrollView settingsScroll = new ScrollView(this);
@@ -560,7 +577,7 @@ public class MainActivity extends Activity {
         settingsScroll.setVerticalScrollBarEnabled(false);
 
         if (settingsPage.length() == 0) addSettingsIndex(settings);
-        else if ("model source".equals(settingsPage)) addModelSourceSettings(settings);
+        else if ("providers".equals(settingsPage) || "model source".equals(settingsPage)) addModelSourceSettings(settings);
         else if ("search".equals(settingsPage)) addJinaSettings(settings);
         else if ("voice".equals(settingsPage)) addVoiceSettings(settings);
         else if ("display".equals(settingsPage)) addDisplaySettings(settings);
@@ -568,6 +585,7 @@ public class MainActivity extends Activity {
         else if ("models".equals(settingsPage)) addModelsSettings(settings);
         root.addView(settingsScroll, new LinearLayout.LayoutParams(-1, 0, 1));
         settingsScroll.post(new Runnable() { @Override public void run() { settingsScroll.scrollTo(0, settingsPage.length() == 0 ? savedSettingsScrollY : 0); } });
+        slidePaneIn();
     }
 
     private View collapsibleHeader(final String title, final String pref) {
@@ -589,37 +607,102 @@ public class MainActivity extends Activity {
         h.setPadding(0, dp(8), 0, dp(18));
         TextView title = text("settings", 23, Color.WHITE);
         title.setGravity(Gravity.CENTER_VERTICAL);
-        title.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { if (settingsPage.length() > 0) { settingsPage = ""; showSettingsPane(); } } });
+        title.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { if (settingsPage.length() > 0) { paneSlide = 1; settingsPage = ""; showSettingsPane(); } } });
         h.addView(title, new LinearLayout.LayoutParams(-2, dp(34)));
         if (settingsPage.length() > 0) {
             TextView sub = text("  " + settingsPageTitle(settingsPage), 13, Color.rgb(150,150,150));
             sub.setGravity(Gravity.CENTER_VERTICAL);
-            sub.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { settingsPage = ""; showSettingsPane(); } });
+            sub.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { paneSlide = 1; settingsPage = ""; showSettingsPane(); } });
             h.addView(sub, new LinearLayout.LayoutParams(0, dp(34), 1));
         }
         return h;
     }
 
     private String settingsPageTitle(String page) {
-        if ("model source".equals(page)) return "model source";
+        if ("model source".equals(page) || "providers".equals(page)) return "providers";
         if ("search".equals(page)) return "web search";
         if ("memory".equals(page)) return "memory";
         return page;
     }
 
     private void addSettingsIndex(LinearLayout settings) {
-        settings.addView(settingsLink("model source", "model source"));
-        settings.addView(separator());
-        settings.addView(settingsLink("web search", "search"));
-        settings.addView(separator());
-        settings.addView(settingsLink("voice", "voice"));
-        settings.addView(separator());
-        settings.addView(settingsLink("display", "display"));
-        settings.addView(separator());
-        settings.addView(settingsLink("memory", "memory"));
-        settings.addView(separator());
-        settings.addView(settingsLink("models", "models"));
+        settings.addView(settingsNav("models", "models", modelsNavDetail(), 0));
+        settings.addView(settingsNav("providers", "providers", providersNavDetail(), 1));
+        settings.addView(settingsNav("web search", "search", searchNavDetail(), 2));
+        settings.addView(settingsNav("voice", "voice", voiceNavDetail(), 3));
+        settings.addView(settingsNav("display", "display", displayNavDetail(), 4));
+        settings.addView(settingsNav("memory", "memory", memoryNavDetail(), 5));
         addVersionFooter(settings);
+    }
+
+    private View settingsNav(final String title, final String page, String detail, int index) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(10), dp(9), dp(10), dp(9));
+        card.setBackground(listCardBg(false, false, index));
+        LinearLayout top = row();
+        top.setBackgroundColor(Color.TRANSPARENT);
+        TextView name = text(title, 15, Color.WHITE);
+        name.setBackgroundColor(Color.TRANSPARENT);
+        TextView arrow = text(">", 14, Color.rgb(135, 135, 135));
+        arrow.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
+        arrow.setBackgroundColor(Color.TRANSPARENT);
+        top.addView(name, new LinearLayout.LayoutParams(0, -2, 1));
+        top.addView(arrow, new LinearLayout.LayoutParams(dp(28), -2));
+        card.addView(top, new LinearLayout.LayoutParams(-1, -2));
+        if (detail != null && detail.length() > 0) {
+            TextView sub = text(detail, 11, Color.rgb(135, 135, 135));
+            sub.setSingleLine(true);
+            sub.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            sub.setBackgroundColor(Color.TRANSPARENT);
+            sub.setPadding(0, dp(2), 0, 0);
+            card.addView(sub, new LinearLayout.LayoutParams(-1, -2));
+        }
+        bindPress(card);
+        card.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
+            if (settingsScrollView != null) savedSettingsScrollY = settingsScrollView.getScrollY();
+            paneSlide = -1;
+            settingsPage = page;
+            showSettingsPane();
+        } });
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        if (index > 0) lp.topMargin = dp(6);
+        card.setLayoutParams(lp);
+        return card;
+    }
+
+    private String modelsNavDetail() {
+        if (myModels.size() == 0) return "none added";
+        String m = selectedModel();
+        if (m.length() == 0) return myModels.size() + " saved";
+        return shortModel(m) + (myModels.size() > 1 ? " · " + myModels.size() : "");
+    }
+
+    private String providersNavDetail() {
+        boolean or = savedApiKey().length() > 0;
+        int n = customEndpoints.size();
+        if (or && n > 0) return "openrouter · " + n + " endpoint" + (n == 1 ? "" : "s");
+        if (or) return "openrouter";
+        if (n > 0) return n + " endpoint" + (n == 1 ? "" : "s");
+        return "add a key or endpoint";
+    }
+
+    private String searchNavDetail() {
+        return searchProvider() + (prefs.getBoolean("autoSearch", false) ? " · auto on" : " · auto off");
+    }
+
+    private String voiceNavDetail() {
+        return (prefs.getBoolean("voiceSpeak", true) ? "speak on" : "speak off") + " · " + voiceOutputProvider();
+    }
+
+    private String displayNavDetail() {
+        int n = fontOffset();
+        return n == 0 ? "font default" : "font " + (n > 0 ? "+" : "") + n;
+    }
+
+    private String memoryNavDetail() {
+        if (!memoryEnabled()) return "off";
+        return "on · " + memoryEntryCount(normalizeMemoryMd(memoryMd())) + " entries";
     }
 
     private void maybeShowWelcome() {
@@ -681,7 +764,7 @@ public class MainActivity extends Activity {
         boolean outdated = hasPendingUpdate();
         TextView v = text(versionFooterText(), 11, outdated ? Color.rgb(190, 190, 190) : Color.rgb(130, 130, 130));
         v.setGravity(Gravity.CENTER_VERTICAL);
-        v.setPadding(0, dp(10), 0, dp(10));
+        v.setPadding(0, dp(18), 0, dp(10));
         v.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View view) { onVersionFooterClick(); } });
         settings.addView(v, new LinearLayout.LayoutParams(-1, -2));
     }
@@ -978,18 +1061,6 @@ public class MainActivity extends Activity {
         showPanel(d, box);
     }
 
-    private View settingsLink(final String title, final String page) {
-        LinearLayout h = row();
-        h.setPadding(0, dp(6), 0, dp(6));
-        TextView name = text(title, 16, Color.WHITE);
-        TextView arrow = text(">", 14, Color.LTGRAY);
-        arrow.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
-        h.addView(name, new LinearLayout.LayoutParams(0, dp(33), 1));
-        h.addView(arrow, new LinearLayout.LayoutParams(dp(34), dp(33)));
-        h.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { if (settingsScrollView != null) savedSettingsScrollY = settingsScrollView.getScrollY(); settingsPage = page; showSettingsPane(); } });
-        return h;
-    }
-
     private void addModelsSettings(LinearLayout settings) {
         LinearLayout modelsHeader = row();
         modelsHeader.addView(space(1), new LinearLayout.LayoutParams(0, dp(34), 1));
@@ -1178,14 +1249,14 @@ public class MainActivity extends Activity {
         auto.addView(toggle, new LinearLayout.LayoutParams(dp(48), dp(28)));
         settings.addView(auto);
         settings.addView(settingChoice("provider", searchProvider(), new View.OnClickListener() { @Override public void onClick(View v) { chooseVoiceProvider("searchProvider", new String[]{"jina", "brave"}); } }));
-        final EditText[] braveKeyInput = new EditText[1];
+        braveKeyInput = null;
         if ("brave".equals(searchProvider())) {
             settings.addView(text("brave api key", 11, Color.LTGRAY));
-            braveKeyInput[0] = plainEdit("required");
-            braveKeyInput[0].setSingleLine(true);
-            braveKeyInput[0].setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-            braveKeyInput[0].setText(prefs.getString("braveApiKey", ""));
-            settings.addView(braveKeyInput[0], new LinearLayout.LayoutParams(-1, dp(42)));
+            braveKeyInput = plainEdit("required");
+            braveKeyInput.setSingleLine(true);
+            braveKeyInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+            braveKeyInput.setText(prefs.getString("braveApiKey", ""));
+            settings.addView(braveKeyInput, new LinearLayout.LayoutParams(-1, dp(42)));
         } else {
             settings.addView(text("jina api key", 11, Color.LTGRAY));
             jinaKeyInput = plainEdit("optional");
@@ -1196,7 +1267,7 @@ public class MainActivity extends Activity {
         }
         LinearLayout actions = row();
         TextView save = smallPill("save");
-        save.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { if (jinaKeyInput != null) saveJinaSettings(); if (braveKeyInput[0] != null) prefs.edit().putString("braveApiKey", braveKeyInput[0].getText().toString().trim()).apply(); toast("saved"); } });
+        save.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { flushSettingsInputs(); toast("saved"); } });
         actions.addView(save);
         settings.addView(actions, new LinearLayout.LayoutParams(-1, dp(34)));
         settings.addView(text("/search <query>   /research <query>", 11, Color.rgb(120,120,120)), new LinearLayout.LayoutParams(-1, dp(24)));
@@ -1243,23 +1314,31 @@ public class MainActivity extends Activity {
             settings.addView(text(voicePipelineLabel(), 10, Color.rgb(120,120,120)), new LinearLayout.LayoutParams(-1, dp(28)));
         }
 
-        settings.addView(sectionHeader("input"));
-        settings.addView(settingChoice("provider", voiceInputProvider(), new View.OnClickListener() { @Override public void onClick(View v) { chooseVoiceProvider("voiceInputProvider", new String[]{"auto", "system", "openrouter", "endpoint"}); } }));
-        if ("openrouter".equals(voiceInputProvider())) settings.addView(settingChoice("model", prefs.getString("voiceTranscribeModel", "whisper-1"), new View.OnClickListener() { @Override public void onClick(View v) { chooseTranscriptionModel(); } }));
-        else if ("endpoint".equals(voiceInputProvider())) settings.addView(settingChoice("model", "endpoint default", null));
-        if ("endpoint".equals(voiceInputProvider()) || "auto".equals(voiceInputProvider())) settings.addView(settingChoice("endpoint", endpointLabel(prefs.getString("voiceTranscribeEndpoint", "")), new View.OnClickListener() { @Override public void onClick(View v) { chooseSavedEndpoint("voiceTranscribeEndpoint"); } }));
+        settings.addView(collapsibleHeader("input", "voiceInputOpen"));
+        if (isExpanded("voiceInputOpen")) {
+            settings.addView(settingChoice("provider", voiceInputProvider(), new View.OnClickListener() { @Override public void onClick(View v) { chooseVoiceProvider("voiceInputProvider", new String[]{"auto", "system", "openrouter", "endpoint"}); } }));
+            if ("openrouter".equals(voiceInputProvider())) settings.addView(settingChoice("model", prefs.getString("voiceTranscribeModel", "whisper-1"), new View.OnClickListener() { @Override public void onClick(View v) { chooseTranscriptionModel(); } }));
+            else if ("endpoint".equals(voiceInputProvider())) settings.addView(settingChoice("model", "endpoint default", null));
+            if ("endpoint".equals(voiceInputProvider()) || "auto".equals(voiceInputProvider())) settings.addView(settingChoice("endpoint", endpointLabel(prefs.getString("voiceTranscribeEndpoint", "")), new View.OnClickListener() { @Override public void onClick(View v) { chooseSavedEndpoint("voiceTranscribeEndpoint"); } }));
+        } else {
+            settings.addView(text(voiceInputSummary(), 11, Color.rgb(135, 135, 135)), new LinearLayout.LayoutParams(-1, dp(24)));
+        }
 
-        settings.addView(sectionHeader("output"));
-        settings.addView(settingChoice("provider", voiceOutputProvider(), new View.OnClickListener() { @Override public void onClick(View v) { chooseVoiceProvider("voiceOutputProvider", new String[]{"system", "openrouter", "endpoint"}); } }));
-        if ("openrouter".equals(voiceOutputProvider())) {
-            settings.addView(settingChoice("model", prefs.getString("voiceTtsModel", "choose"), new View.OnClickListener() { @Override public void onClick(View v) { chooseTtsModel(); } }));
-            settings.addView(settingChoice("voice", ttsVoiceForModel(prefs.getString("voiceTtsModel", "")), new View.OnClickListener() { @Override public void onClick(View v) { chooseVoiceName(); } }));
-            addVoiceSpeedSetting(settings);
-        } else if ("endpoint".equals(voiceOutputProvider())) {
-            settings.addView(settingChoice("model", voiceEndpointModelLabel(), new View.OnClickListener() { @Override public void onClick(View v) { promptVoiceCustom("voiceEndpointTtsModel", "tts-1"); } }));
-            settings.addView(settingChoice("voice", ttsVoiceForModel(prefs.getString("voiceEndpointTtsModel", "")), new View.OnClickListener() { @Override public void onClick(View v) { chooseVoiceName(); } }));
-            addVoiceSpeedSetting(settings);
-            settings.addView(settingChoice("endpoint", endpointLabel(prefs.getString("voiceTtsEndpoint", "")), new View.OnClickListener() { @Override public void onClick(View v) { chooseSavedEndpoint("voiceTtsEndpoint"); } }));
+        settings.addView(collapsibleHeader("output", "voiceOutputOpen"));
+        if (isExpanded("voiceOutputOpen")) {
+            settings.addView(settingChoice("provider", voiceOutputProvider(), new View.OnClickListener() { @Override public void onClick(View v) { chooseVoiceProvider("voiceOutputProvider", new String[]{"system", "openrouter", "endpoint"}); } }));
+            if ("openrouter".equals(voiceOutputProvider())) {
+                settings.addView(settingChoice("model", prefs.getString("voiceTtsModel", "choose"), new View.OnClickListener() { @Override public void onClick(View v) { chooseTtsModel(); } }));
+                settings.addView(settingChoice("voice", ttsVoiceForModel(prefs.getString("voiceTtsModel", "")), new View.OnClickListener() { @Override public void onClick(View v) { chooseVoiceName(); } }));
+                addVoiceSpeedSetting(settings);
+            } else if ("endpoint".equals(voiceOutputProvider())) {
+                settings.addView(settingChoice("model", voiceEndpointModelLabel(), new View.OnClickListener() { @Override public void onClick(View v) { promptVoiceCustom("voiceEndpointTtsModel", "tts-1"); } }));
+                settings.addView(settingChoice("voice", ttsVoiceForModel(prefs.getString("voiceEndpointTtsModel", "")), new View.OnClickListener() { @Override public void onClick(View v) { chooseVoiceName(); } }));
+                addVoiceSpeedSetting(settings);
+                settings.addView(settingChoice("endpoint", endpointLabel(prefs.getString("voiceTtsEndpoint", "")), new View.OnClickListener() { @Override public void onClick(View v) { chooseSavedEndpoint("voiceTtsEndpoint"); } }));
+            }
+        } else {
+            settings.addView(text(voiceOutputSummary(), 11, Color.rgb(135, 135, 135)), new LinearLayout.LayoutParams(-1, dp(24)));
         }
 
         settings.addView(space(8));
@@ -1278,6 +1357,18 @@ public class MainActivity extends Activity {
 
     private String voiceInputProvider() { return prefs.getString("voiceInputProvider", "auto"); }
     private String voiceOutputProvider() { return prefs.getString("voiceOutputProvider", prefs.getBoolean("voiceEndpointTts", false) ? "endpoint" : "system"); }
+    private String voiceInputSummary() {
+        String p = voiceInputProvider();
+        if ("openrouter".equals(p)) return p + " · " + shortModel(prefs.getString("voiceTranscribeModel", "whisper-1"));
+        if ("endpoint".equals(p)) return "endpoint · " + endpointLabel(prefs.getString("voiceTranscribeEndpoint", ""));
+        return p;
+    }
+    private String voiceOutputSummary() {
+        String p = voiceOutputProvider();
+        if ("openrouter".equals(p)) return p + " · " + shortModel(prefs.getString("voiceTtsModel", ""));
+        if ("endpoint".equals(p)) return "endpoint · " + endpointLabel(prefs.getString("voiceTtsEndpoint", ""));
+        return p;
+    }
     private String voiceWebSearchMode() { return prefs.getString("voiceWebSearchMode", "auto"); }
     private String searchProvider() { return prefs.getString("searchProvider", "jina"); }
     private String voiceAnswerModel() { return prefs.getString("voiceAnswerModel", "").trim(); }
@@ -1866,19 +1957,55 @@ public class MainActivity extends Activity {
         top.setGravity(Gravity.CENTER_VERTICAL);
         TextView title = text("chats", 21, Color.WHITE);
         title.setGravity(Gravity.CENTER_VERTICAL);
-        title.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { if (projectView.length() > 0) { projectView = ""; showChatsPane(); } } });
+        title.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { if (projectView.length() > 0) { paneSlide = 1; projectView = ""; showChatsPane(); } } });
         top.addView(title, new LinearLayout.LayoutParams(-2, dp(38)));
         if (projectView.length() > 0) {
             TextView sub = text("  " + projectView, 13, Color.rgb(150,150,150));
             sub.setGravity(Gravity.CENTER_VERTICAL);
-            sub.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { projectView = ""; showChatsPane(); } });
+            sub.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { paneSlide = 1; projectView = ""; showChatsPane(); } });
             top.addView(sub, new LinearLayout.LayoutParams(0, dp(38), 1));
         } else top.addView(space(1), new LinearLayout.LayoutParams(0, dp(38), 1));
-        ImageButton fresh = iconButton(R.drawable.ic_chat_plus, new View.OnClickListener() { @Override public void onClick(View v) { newChat(); pane = 1; renderPane(); } }, 6);
+        ImageButton fresh = iconButton(R.drawable.ic_chat_plus, new View.OnClickListener() { @Override public void onClick(View v) { paneSlide = -1; newChat(); pane = 1; renderPane(); } }, 6);
         top.addView(fresh, new LinearLayout.LayoutParams(dp(42), dp(34)));
         if (projectView.length() > 0) top.addView(iconButton(R.drawable.ic_pencil, new View.OnClickListener() { @Override public void onClick(View v) { editFolder(projectView); } }, 8), new LinearLayout.LayoutParams(dp(42), dp(34)));
         else top.addView(iconButton(R.drawable.ic_folder_plus, new View.OnClickListener() { @Override public void onClick(View v) { addFolder(); } }, 6), new LinearLayout.LayoutParams(dp(42), dp(34)));
         root.addView(top, new LinearLayout.LayoutParams(-1, dp(40)));
+
+        chatSearch = plainEdit("search");
+        chatSearch.setSingleLine(true);
+        chatSearch.setHintTextColor(Color.rgb(90, 90, 90));
+        setTextPx(chatSearch, 14);
+        chatSearch.setPadding(dp(10), 0, dp(10), 0);
+        GradientDrawable searchBg = new GradientDrawable();
+        searchBg.setColor(Color.BLACK);
+        searchBg.setStroke(1, Color.rgb(34, 34, 34));
+        searchBg.setCornerRadius(dp(3));
+        chatSearch.setBackground(searchBg);
+        chatSearch.setImeOptions(EditorInfo.IME_ACTION_DONE);
+        chatSearch.setOnEditorActionListener(new TextView.OnEditorActionListener() {
+            @Override public boolean onEditorAction(TextView v, int actionId, KeyEvent event) {
+                if (actionId == EditorInfo.IME_ACTION_DONE || actionId == EditorInfo.IME_ACTION_SEARCH) {
+                    hideKeyboardFrom(chatSearch);
+                    chatSearch.clearFocus();
+                    return true;
+                }
+                return false;
+            }
+        });
+        if (chatFilter.length() > 0) chatSearch.setText(chatFilter);
+        chatSearch.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int st, int c, int a) { }
+            @Override public void onTextChanged(CharSequence s, int st, int b, int c) {
+                chatFilter = s == null ? "" : s.toString();
+                renderChatList();
+            }
+            @Override public void afterTextChanged(Editable e) { }
+        });
+        LinearLayout.LayoutParams searchLp = new LinearLayout.LayoutParams(-1, dp(36));
+        searchLp.topMargin = dp(4);
+        searchLp.bottomMargin = dp(6);
+        root.addView(chatSearch, searchLp);
+
         ScrollView s = new ScrollView(this);
         s.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
         chatList = new LinearLayout(this); chatList.setOrientation(LinearLayout.VERTICAL);
@@ -1886,39 +2013,77 @@ public class MainActivity extends Activity {
         s.addView(chatList);
         s.setVerticalScrollBarEnabled(false);
         root.addView(s, new LinearLayout.LayoutParams(-1, 0, 1));
+
+        chatsSelectBar = row();
+        chatsSelectBar.setPadding(dp(4), 0, dp(4), 0);
+        chatsSelectCount = text("", 13, Color.WHITE);
+        chatsSelectCount.setGravity(Gravity.CENTER_VERTICAL);
+        TextView actions = text("actions", 13, Color.LTGRAY);
+        actions.setGravity(Gravity.CENTER);
+        TextView done = text("done", 13, Color.LTGRAY);
+        done.setGravity(Gravity.CENTER);
+        actions.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { showBulkActions(); } });
+        done.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { selectedChats.clear(); renderChatList(); } });
+        chatsSelectBar.addView(chatsSelectCount, new LinearLayout.LayoutParams(0, dp(36), 1));
+        chatsSelectBar.addView(actions, new LinearLayout.LayoutParams(dp(72), dp(36)));
+        chatsSelectBar.addView(done, new LinearLayout.LayoutParams(dp(52), dp(36)));
+        GradientDrawable barBg = new GradientDrawable();
+        barBg.setColor(Color.BLACK);
+        barBg.setStroke(1, Color.rgb(52, 52, 52));
+        barBg.setCornerRadius(dp(3));
+        chatsSelectBar.setBackground(barBg);
+        chatsSelectBar.setVisibility(View.GONE);
+        LinearLayout.LayoutParams barLp = new LinearLayout.LayoutParams(-1, dp(40));
+        barLp.topMargin = dp(6);
+        root.addView(chatsSelectBar, barLp);
+
         renderChatList();
+        slidePaneIn();
     }
 
     private void renderChatList() {
+        if (chatList == null) return;
         chatList.removeAllViews();
         chatList.setPadding(0, dp(3), 0, dp(14));
+        String q = chatFilter;
+        int shown = 0;
         if (projectView.length() > 0) {
-            boolean hasProjectChats = false;
-            for (final Chat c : chats) if (projectView.equals(c.folder)) { hasProjectChats = true; chatList.addView(chatCard(c, false)); }
-            if (!hasProjectChats) chatList.addView(emptyLine("no chats yet"));
+            ArrayList<Chat> list = chatsInFolder(projectView);
+            for (int i = 0; i < list.size(); i++) {
+                Chat c = list.get(i);
+                if (!chatMatchesFilter(c)) continue;
+                chatList.addView(chatCard(c, false, shown));
+                shown++;
+            }
+            if (shown == 0) chatList.addView(emptyLine(q.trim().length() > 0 ? "no matches" : "no chats yet"));
             updateBulkButton();
             return;
         }
-        chatList.addView(sectionHeader("projects  " + realFolderCount()));
-        boolean hasFolders = false;
-        for (final String f : folders) if (!"Inbox".equals(f)) {
-            hasFolders = true;
-            chatList.addView(folderCard(f));
+        ArrayList<String> projectFolders = sortedProjectFolders();
+        ArrayList<String> visibleFolders = new ArrayList<String>();
+        for (int i = 0; i < projectFolders.size(); i++) {
+            String f = projectFolders.get(i);
+            if (q.trim().length() == 0 || ToolText.textMatchesQuery(q, f, "") || folderHasMatchingChat(f)) visibleFolders.add(f);
         }
-        if (!hasFolders) chatList.addView(emptyLine("no projects"));
+        chatList.addView(sectionHeader("projects  " + visibleFolders.size()));
+        if (visibleFolders.size() == 0) chatList.addView(emptyLine(q.trim().length() > 0 ? "no matches" : "no projects"));
+        for (int i = 0; i < visibleFolders.size(); i++) chatList.addView(folderCard(visibleFolders.get(i), i));
         chatList.addView(space(10));
-        chatList.addView(sectionHeader("general  " + folderCount("Inbox")));
-        boolean hasInbox = false;
-        for (final Chat c : chats) if ("Inbox".equals(c.folder)) { hasInbox = true; chatList.addView(chatCard(c, false)); }
-        if (!hasInbox) chatList.addView(emptyLine("no chats yet"));
+        ArrayList<Chat> inbox = chatsInFolder("Inbox");
+        ArrayList<Chat> visibleInbox = new ArrayList<Chat>();
+        for (int i = 0; i < inbox.size(); i++) if (chatMatchesFilter(inbox.get(i))) visibleInbox.add(inbox.get(i));
+        chatList.addView(sectionHeader("general  " + visibleInbox.size()));
+        if (visibleInbox.size() == 0) chatList.addView(emptyLine(q.trim().length() > 0 ? "no matches" : "no chats yet"));
+        for (int i = 0; i < visibleInbox.size(); i++) chatList.addView(chatCard(visibleInbox.get(i), false, i));
         updateBulkButton();
     }
 
-    private View folderCard(final String folder) {
+    private View folderCard(final String folder, int index) {
         LinearLayout card = row();
         card.setPadding(dp(10), 0, dp(6), 0);
-        card.setBackground(cardBorder());
-        card.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { projectView = folder; showChatsPane(); } });
+        card.setBackground(listCardBg(false, false, index));
+        card.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { paneSlide = -1; projectView = folder; showChatsPane(); } });
+        bindPress(card);
         TextView name = cardText(folder, 14, Color.WHITE);
         name.setGravity(Gravity.CENTER_VERTICAL);
         TextView count = cardText(folderCount(folder) + " chats", 11, Color.LTGRAY);
@@ -1930,41 +2095,60 @@ public class MainActivity extends Activity {
         card.addView(count, new LinearLayout.LayoutParams(dp(68), dp(40)));
         card.addView(dots, new LinearLayout.LayoutParams(dp(30), dp(40)));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, dp(40));
-        lp.setMargins(0, 0, 0, dp(4));
+        lp.setMargins(0, 0, 0, dp(6));
         card.setLayoutParams(lp);
         return card;
     }
 
-    private View chatCard(final Chat c, boolean nested) {
+    private View chatCard(final Chat c, boolean nested, int index) {
+        boolean selected = selectedChats.contains(c.id);
+        boolean current = c.id.equals(currentChatId);
         LinearLayout wrap = new LinearLayout(this);
         wrap.setOrientation(LinearLayout.HORIZONTAL);
         wrap.setBackgroundColor(Color.BLACK);
         if (nested) wrap.setPadding(dp(10), 0, 0, 0);
         LinearLayout card = row();
         card.setPadding(dp(10), dp(4), dp(2), dp(4));
-        card.setBackground(selectedChats.contains(c.id) ? selectedBorder() : cardBorder());
+        card.setBackground(listCardBg(selected, current, index));
         card.setOnLongClickListener(new View.OnLongClickListener() { @Override public boolean onLongClick(View v) { toggleChatSelection(c); return true; } });
-        card.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { if (selectedChats.size() > 0) toggleChatSelection(c); else openChatFromList(c); } });
+        card.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
+            if (selectedChats.size() > 0) toggleChatSelection(c);
+            else { paneSlide = -1; openChatFromList(c); }
+        } });
+        bindPress(card);
         LinearLayout textCol = new LinearLayout(this);
         textCol.setOrientation(LinearLayout.VERTICAL);
         textCol.setGravity(Gravity.CENTER_VERTICAL);
         textCol.setBackgroundColor(Color.TRANSPARENT);
-        TextView name = cardText((selectedChats.contains(c.id) ? "✓ " : "") + chatListTitle(c), 13, Color.WHITE);
+        TextView name = cardText((selected ? "✓ " : "") + chatListTitle(c), 13, Color.WHITE);
         name.setSingleLine(true);
         name.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        TextView preview = cardText(chatPreview(c), 10, Color.rgb(145,145,145));
+        String when = ToolText.relativeTime(System.currentTimeMillis(), chatRecency(c));
+        String previewLine = chatPreview(c);
+        if (when.length() > 0) previewLine = when + "  ·  " + previewLine;
+        TextView preview = cardText(previewLine, 10, Color.rgb(145,145,145));
         preview.setSingleLine(true);
         preview.setEllipsize(android.text.TextUtils.TruncateAt.END);
         textCol.addView(name, new LinearLayout.LayoutParams(-1, dp(22)));
         textCol.addView(preview, new LinearLayout.LayoutParams(-1, dp(17)));
+        LinearLayout end = new LinearLayout(this);
+        end.setOrientation(LinearLayout.HORIZONTAL);
+        end.setGravity(Gravity.CENTER_VERTICAL);
+        end.setBackgroundColor(Color.TRANSPARENT);
+        if (current && !selected) {
+            TextView on = cardText("on", 11, Color.rgb(180, 180, 180));
+            on.setGravity(Gravity.CENTER);
+            end.addView(on, new LinearLayout.LayoutParams(-2, dp(47)));
+        }
         TextView dots = cardText("...", 13, Color.LTGRAY);
         dots.setGravity(Gravity.CENTER);
         dots.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { chatActions(c); } });
+        end.addView(dots, new LinearLayout.LayoutParams(dp(30), dp(47)));
         card.addView(textCol, new LinearLayout.LayoutParams(0, dp(47), 1));
-        card.addView(dots, new LinearLayout.LayoutParams(dp(30), dp(47)));
+        card.addView(end, new LinearLayout.LayoutParams(-2, dp(47)));
         wrap.addView(card, new LinearLayout.LayoutParams(-1, dp(53)));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, dp(57));
-        lp.setMargins(0, 0, 0, dp(4));
+        lp.setMargins(0, 0, 0, dp(6));
         wrap.setLayoutParams(lp);
         return wrap;
     }
@@ -2029,6 +2213,72 @@ public class MainActivity extends Activity {
     private static boolean isBusyStats(String stats) { return LOADING.equals(stats) || SEARCHING.equals(stats); }
     private boolean chatIsLoading(Chat c) { for (Msg m : c.messages) if (isBusyStats(m.stats)) return true; if (c.id.equals(currentChatId)) for (Msg m : messages) if (isBusyStats(m.stats)) return true; return false; }
 
+    private boolean chatMatchesFilter(Chat c) {
+        return ToolText.textMatchesQuery(chatFilter, chatListTitle(c), chatPreview(c));
+    }
+
+    private boolean folderHasMatchingChat(String folder) {
+        for (Chat c : chats) if (folder.equals(c.folder) && chatMatchesFilter(c)) return true;
+        return false;
+    }
+
+    private long chatRecency(Chat c) {
+        if (c == null) return 0;
+        long last = 0;
+        for (int i = 0; i < c.messages.size(); i++) {
+            Msg m = c.messages.get(i);
+            if (m != null && m.startedAt > last) last = m.startedAt;
+        }
+        return ToolText.recencyMillis(c.updatedAt, c.id, last);
+    }
+
+    private void touchChat(Chat c) {
+        if (c == null) return;
+        c.updatedAt = System.currentTimeMillis();
+        chats.remove(c);
+        chats.add(0, c);
+    }
+
+    private ArrayList<Chat> chatsInFolder(String folder) {
+        ArrayList<Chat> out = new ArrayList<Chat>();
+        for (int i = 0; i < chats.size(); i++) {
+            Chat c = chats.get(i);
+            if (c != null && folder.equals(c.folder)) out.add(c);
+        }
+        Collections.sort(out, new Comparator<Chat>() {
+            @Override public int compare(Chat a, Chat b) { return Long.compare(chatRecency(b), chatRecency(a)); }
+        });
+        return out;
+    }
+
+    private ArrayList<String> sortedProjectFolders() {
+        ArrayList<String> out = new ArrayList<String>();
+        for (int i = 0; i < folders.size(); i++) {
+            String f = folders.get(i);
+            if (f != null && !"Inbox".equals(f)) out.add(f);
+        }
+        Collections.sort(out, new Comparator<String>() {
+            @Override public int compare(String a, String b) {
+                long da = folderRecency(a), db = folderRecency(b);
+                if (db != da) return Long.compare(db, da);
+                return a.compareToIgnoreCase(b);
+            }
+        });
+        return out;
+    }
+
+    private long folderRecency(String folder) {
+        long best = 0;
+        for (int i = 0; i < chats.size(); i++) {
+            Chat c = chats.get(i);
+            if (c != null && folder.equals(c.folder)) {
+                long t = chatRecency(c);
+                if (t > best) best = t;
+            }
+        }
+        return best;
+    }
+
     private void toggleChatSelection(Chat c) {
         if (selectedChats.contains(c.id)) selectedChats.remove(c.id); else selectedChats.add(c.id);
         renderChatList();
@@ -2037,14 +2287,21 @@ public class MainActivity extends Activity {
 
     private void updateBulkButton() {
         removeScreenChild(bulkButton); bulkButton = null;
-        if (selectedChats.size() == 0 || pane != 0) return;
-        bulkButton = text("...", 15, Color.WHITE);
-        bulkButton.setGravity(Gravity.CENTER);
-        bulkButton.setBackground(grayBorder());
-        bulkButton.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { showBulkActions(); } });
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(34), dp(28), Gravity.RIGHT | Gravity.TOP);
-        lp.setMargins(0, dp(98), dp(18), 0);
-        screen.addView(bulkButton, lp);
+        if (chatsSelectBar == null || chatsSelectCount == null) return;
+        int n = selectedChats.size();
+        boolean show = n > 0 && pane == 0;
+        chatsSelectCount.setText(n == 0 ? "" : n + " selected");
+        if (show && chatsSelectBar.getVisibility() != View.VISIBLE) {
+            chatsSelectBar.setVisibility(View.VISIBLE);
+            chatsSelectBar.setAlpha(0f);
+            chatsSelectBar.setTranslationY(dp(10));
+            chatsSelectBar.animate().alpha(1f).translationY(0).setDuration(140).setInterpolator(new DecelerateInterpolator()).start();
+        } else if (!show) {
+            chatsSelectBar.animate().cancel();
+            chatsSelectBar.setVisibility(View.GONE);
+            chatsSelectBar.setAlpha(1f);
+            chatsSelectBar.setTranslationY(0);
+        }
     }
 
     private void captureChatScroll() {
@@ -7187,25 +7444,21 @@ public class MainActivity extends Activity {
     private void chatActions(final Chat c) {
         final Dialog d = panel(c.title);
         LinearLayout box = panelBox();
-        TextView title = text(c.title.length() == 0 ? "chat" : c.title, 18, Color.WHITE);
-        title.setPadding(0, 0, 0, dp(14));
-        box.addView(title);
-        LinearLayout actions = row();
-        TextView rename = panelAction("rename");
-        TextView move = panelAction("move");
-        TextView remove = panelAction("unfile");
-        TextView delete = panelAction("delete");
+        box.addView(panelTitle(c.title.length() == 0 ? "chat" : c.title));
+        TextView rename = panelItem("rename", "");
+        TextView move = panelItem("move to project", "");
+        TextView remove = panelItem("remove from project", "");
+        TextView delete = panelItem("delete", "");
         TextView cancel = panelAction("cancel");
         rename.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); renameChat(c); } });
         move.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); moveChat(c); } });
-        remove.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { c.folder = "Inbox"; saveState(); d.dismiss(); showChatsPane(); } });
+        remove.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { c.folder = "Inbox"; touchChat(c); saveState(); d.dismiss(); showChatsPane(); } });
         delete.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); confirmDeleteChat(c); } });
         cancel.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); } });
-        actions.addView(rename, new LinearLayout.LayoutParams(0, dp(52), 1));
-        actions.addView(move, new LinearLayout.LayoutParams(0, dp(52), 1));
-        if (!"Inbox".equals(c.folder)) actions.addView(remove, new LinearLayout.LayoutParams(0, dp(52), 1));
-        actions.addView(delete, new LinearLayout.LayoutParams(0, dp(52), 1));
-        box.addView(actions);
+        box.addView(rename);
+        box.addView(move);
+        if (!"Inbox".equals(c.folder)) box.addView(remove);
+        box.addView(delete);
         box.addView(cancel, new LinearLayout.LayoutParams(-1, dp(46)));
         showPanel(d, box);
     }
@@ -7237,7 +7490,7 @@ public class MainActivity extends Activity {
         TextView delete = panelItem("delete", "");
         TextView cancel = panelAction("cancel");
         move.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); moveSelectedChats(); } });
-        remove.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { for (Chat c : chats) if (selectedChats.contains(c.id)) c.folder = "Inbox"; selectedChats.clear(); saveState(); d.dismiss(); showChatsPane(); } });
+        remove.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { for (Chat c : chats) if (selectedChats.contains(c.id)) { c.folder = "Inbox"; touchChat(c); } selectedChats.clear(); saveState(); d.dismiss(); showChatsPane(); } });
         delete.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); confirmDeleteSelectedChats(); } });
         cancel.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); } });
         box.addView(move); box.addView(remove); box.addView(delete); box.addView(cancel, new LinearLayout.LayoutParams(-1, dp(52)));
@@ -7253,7 +7506,7 @@ public class MainActivity extends Activity {
             if ("Inbox".equals(f)) continue;
             TextView item = panelItem(f, "");
             item.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
-                for (Chat c : chats) if (selectedChats.contains(c.id)) c.folder = f;
+                for (Chat c : chats) if (selectedChats.contains(c.id)) { c.folder = f; touchChat(c); }
                 selectedChats.clear(); saveState(); d.dismiss(); showChatsPane();
             } });
             box.addView(item);
@@ -7308,7 +7561,7 @@ public class MainActivity extends Activity {
             final String f = folders.get(i);
             if ("Inbox".equals(f)) continue;
             TextView item = panelItem(f, "");
-            item.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { c.folder = f; saveState(); d.dismiss(); showChatsPane(); } });
+            item.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { c.folder = f; touchChat(c); saveState(); d.dismiss(); showChatsPane(); } });
             box.addView(item);
         }
         TextView cancel = panelAction("cancel");
@@ -7335,6 +7588,8 @@ public class MainActivity extends Activity {
         Chat t = null;
         for (Chat c : chats) if (c.id.equals(currentChatId)) t = c;
         if (t == null) { t = new Chat(); t.id = currentChatId; chats.add(0, t); }
+        else if (chats.indexOf(t) > 0) { chats.remove(t); chats.add(0, t); }
+        t.updatedAt = System.currentTimeMillis();
         t.folder = selectedFolder;
         if (t.title.length() == 0 || "[voice input]".equals(t.title)) t.title = firstUserText();
         t.webSearch = webSearchChat;
@@ -7864,6 +8119,11 @@ public class MainActivity extends Activity {
         e.apply();
     }
     private void saveJinaSettings() { if (jinaKeyInput != null) prefs.edit().putString("jinaApiKey", jinaKeyInput.getText().toString().trim()).apply(); }
+    private void flushSettingsInputs() {
+        saveApiKey();
+        saveJinaSettings();
+        if (braveKeyInput != null) prefs.edit().putString("braveApiKey", braveKeyInput.getText().toString().trim()).apply();
+    }
     private void removeCustomModels() {
         for (int i = models.size() - 1; i >= 0; i--) {
             String m = models.get(i);
@@ -8175,6 +8435,38 @@ public class MainActivity extends Activity {
         TextView v = text(s, 16, Color.LTGRAY);
         v.setGravity(Gravity.CENTER);
         return v;
+    }
+
+    private void slidePaneIn() {
+        if (root == null) return;
+        root.animate().cancel();
+        float from = paneSlide == 0 ? 0f : (paneSlide < 0 ? dp(18) : -dp(18));
+        root.setAlpha(paneSlide == 0 ? 1f : 0.4f);
+        root.setTranslationX(from);
+        if (paneSlide == 0 && from == 0f) { root.setAlpha(1f); return; }
+        root.animate().alpha(1f).translationX(0).setDuration(150).setInterpolator(new DecelerateInterpolator()).withLayer().start();
+        paneSlide = 0;
+    }
+
+    private void bindPress(final View v) {
+        if (v == null) return;
+        v.setOnTouchListener(new View.OnTouchListener() {
+            @Override public boolean onTouch(View view, MotionEvent e) {
+                int action = e.getAction();
+                if (action == MotionEvent.ACTION_DOWN) view.animate().alpha(0.55f).setDuration(60).start();
+                else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) view.animate().alpha(1f).setDuration(120).start();
+                return false;
+            }
+        });
+    }
+
+    private GradientDrawable listCardBg(boolean selected, boolean current, int index) {
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(index % 2 == 0 ? Color.BLACK : Color.rgb(16, 16, 16));
+        if (selected) bg.setStroke(2, Color.WHITE);
+        else bg.setStroke(1, current ? Color.rgb(88, 88, 88) : Color.rgb(34, 34, 34));
+        bg.setCornerRadius(dp(3));
+        return bg;
     }
 
     private LinearLayout row() { LinearLayout l = new LinearLayout(this); l.setOrientation(LinearLayout.HORIZONTAL); l.setGravity(Gravity.CENTER_VERTICAL); l.setBackgroundColor(Color.BLACK); return l; }
@@ -8633,5 +8925,30 @@ public class MainActivity extends Activity {
             return m;
         }
     }
-    public static class Chat { String id="", title="", folder="Inbox", model=""; boolean webSearch=false, titleGenerated=false; ArrayList<Msg> messages=new ArrayList<Msg>(); JSONObject toJson() throws Exception { JSONArray a=new JSONArray(); for(Msg m:messages)a.put(m.toJson()); return new JSONObject().put("id",id).put("title",title).put("titleGenerated",titleGenerated).put("folder",folder).put("model",model).put("webSearch",webSearch).put("messages",a); } static Chat fromJson(JSONObject o) { Chat c=new Chat(); c.id=o.optString("id"); c.title=o.optString("title"); c.titleGenerated=o.optBoolean("titleGenerated", false); c.folder=o.optString("folder","Inbox"); c.model=o.optString("model", ""); c.webSearch=o.optBoolean("webSearch", false); JSONArray a=o.optJSONArray("messages"); if(a!=null) for(int i=0;i<a.length();i++) c.messages.add(Msg.fromJson(a.optJSONObject(i))); return c; } }
+    public static class Chat {
+        String id="", title="", folder="Inbox", model="";
+        boolean webSearch=false, titleGenerated=false;
+        long updatedAt = 0;
+        ArrayList<Msg> messages=new ArrayList<Msg>();
+        JSONObject toJson() throws Exception {
+            JSONArray a=new JSONArray();
+            for (Msg m : messages) a.put(m.toJson());
+            return new JSONObject().put("id",id).put("title",title).put("titleGenerated",titleGenerated)
+                    .put("folder",folder).put("model",model).put("webSearch",webSearch)
+                    .put("updatedAt",updatedAt).put("messages",a);
+        }
+        static Chat fromJson(JSONObject o) {
+            Chat c=new Chat();
+            c.id=o.optString("id");
+            c.title=o.optString("title");
+            c.titleGenerated=o.optBoolean("titleGenerated", false);
+            c.folder=o.optString("folder","Inbox");
+            c.model=o.optString("model", "");
+            c.webSearch=o.optBoolean("webSearch", false);
+            c.updatedAt=o.optLong("updatedAt", 0);
+            JSONArray a=o.optJSONArray("messages");
+            if (a != null) for (int i = 0; i < a.length(); i++) c.messages.add(Msg.fromJson(a.optJSONObject(i)));
+            return c;
+        }
+    }
 }
