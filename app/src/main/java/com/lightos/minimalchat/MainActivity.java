@@ -107,7 +107,7 @@ public class MainActivity extends Activity {
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
     private static final String SEARCHING = "__searching__";
-    private static final String APP_VERSION = "1.0.27";
+    private static final String APP_VERSION = "1.0.28";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 64;
@@ -2550,7 +2550,7 @@ public class MainActivity extends Activity {
                 arr.put(new JSONObject().put("role", "system").put("content", searchContext));
             }
             boolean searchAlready = searchContext.length() > 0;
-            addBackgroundSystemContext(arr, true, searchAlready && !research, true, true);
+            addBackgroundSystemContext(arr, true, searchAlready && !research, true, false);
             if (assistant.slowVoice) arr.put(new JSONObject().put("role", "system").put("content", "This is a spoken two-way voice conversation. Reply in plain text only. Do not use markdown, headings, bullets, tables, code blocks, or formatting symbols. Keep the response natural for text-to-speech."));
             for (Msg m : messages) {
                 if (isBusyStats(m.stats)) continue;
@@ -2577,6 +2577,7 @@ public class MainActivity extends Activity {
             String finalAnswer = "";
             String lastRaw = "";
             ArrayList<String> seenSearchQueries = new ArrayList<String>();
+            ArrayList<String> seenFetchUrls = new ArrayList<String>();
             long end = start;
             for (int round = 0; round < maxRounds; round++) {
                 boolean lastRound = round == maxRounds - 1;
@@ -2589,6 +2590,7 @@ public class MainActivity extends Activity {
                     if (nativeTools && AgentTools.looksLikeToolsUnsupported(e.getMessage())) {
                         nativeTools = false;
                         endpointsWithoutNativeTools.add(endpointUrl);
+                        arr.put(new JSONObject().put("role", "system").put("content", AgentTools.textSearchFallbackPrompt()));
                         round--;
                         continue;
                     }
@@ -2606,6 +2608,26 @@ public class MainActivity extends Activity {
                 if (calls.size() == 0) {
                     boolean hadSearch = lastSearchResult.length() > 0 || assistant.searchSources.size() > 0;
                     if (hadSearch && ToolText.looksLikeSearchPunt(visible) && round + 1 < maxRounds) {
+                        String fetchUrl = "";
+                        ArrayList<String> candidates = assistant.searchSources.size() > 0
+                                ? assistant.searchSources : extractSearchSources(lastSearchResult);
+                        ArrayList<String> pick = ToolText.preferReaderUrls(candidates);
+                        for (int pi = 0; pi < pick.size(); pi++) {
+                            String u = pick.get(pi);
+                            if (u == null || u.length() == 0) continue;
+                            if (!seenFetchUrls.contains(u.toLowerCase(Locale.US))) { fetchUrl = u; break; }
+                        }
+                        if (fetchUrl.length() > 0) {
+                            seenFetchUrls.add(fetchUrl.toLowerCase(Locale.US));
+                            showSearchingStatus(assistant, false);
+                            String result = fetchUrlForTool(fetchUrl);
+                            if (result.length() > 0) {
+                                if (!assistant.searchSources.contains(fetchUrl)) assistant.searchSources.add(fetchUrl);
+                                arr.put(new JSONObject().put("role", "assistant").put("content", visible));
+                                arr.put(AgentTools.textResultUserMessage("fetch", fetchUrl, result));
+                                continue;
+                            }
+                        }
                         String seed = lastSearchQuery.length() > 0 ? lastSearchQuery : (userText == null ? "" : userText.trim());
                         String refined = ToolText.refineSearchQuery(seed, seenSearchQueries.size());
                         String keyQ = refined.toLowerCase(Locale.US);
@@ -2614,7 +2636,7 @@ public class MainActivity extends Activity {
                             showSearchingStatus(assistant, false);
                             String result;
                             try {
-                                result = webSearch(refined);
+                                result = webSearch(refined, nativeTools);
                                 rememberSearchResult(refined, result);
                             } catch (Exception searchErr) {
                                 result = lastSearchResult;
@@ -2654,7 +2676,7 @@ public class MainActivity extends Activity {
                         showSearchingStatus(assistant, usable);
                         String result;
                         try {
-                            result = webSearch(q);
+                            result = webSearch(q, nativeTools);
                             rememberSearchResult(q, result);
                         } catch (Exception searchErr) {
                             result = lastSearchResult;
@@ -2668,9 +2690,26 @@ public class MainActivity extends Activity {
                             assistant.searchSources.addAll(extractSearchSources(result));
                         }
                         String packed = result;
-                        if (nativeThisRound) arr.put(AgentTools.searchToolResultMessage(call.id, packed));
+                        if (nativeThisRound) arr.put(AgentTools.toolResultMessage(call.id, packed));
                         else arr.put(AgentTools.textResultUserMessage("web_search", q, packed));
                         executed.add(call);
+                    } else if (call.isFetch()) {
+                        String url = call.url();
+                        String keyU = url.toLowerCase(Locale.US);
+                        if (url.length() == 0 || seenFetchUrls.contains(keyU)) {
+                            String dup = url.length() == 0 ? "No URL provided." : "Already fetched.";
+                            if (nativeThisRound) arr.put(AgentTools.toolResultMessage(call.id, dup));
+                            else arr.put(AgentTools.textResultUserMessage("fetch", url, dup));
+                            executed.add(call);
+                        } else {
+                            seenFetchUrls.add(keyU);
+                            showSearchingStatus(assistant, usable);
+                            String result = fetchUrlForTool(url);
+                            if (url.length() > 0 && !assistant.searchSources.contains(url)) assistant.searchSources.add(url);
+                            if (nativeThisRound) arr.put(AgentTools.toolResultMessage(call.id, result));
+                            else arr.put(AgentTools.textResultUserMessage("fetch", url, result));
+                            executed.add(call);
+                        }
                     } else if (call.isSaveMemory()) {
                         String note = call.note();
                         String result;
@@ -3380,25 +3419,11 @@ public class MainActivity extends Activity {
         lastSearchSources.clear();
         lastSearchResult = "";
         lastSearchQuery = "";
-        boolean forceSearch = turnForceSearch || prefs.getBoolean("searchNext", false);
+        // Consume one-shot flags so they don't leak into the next turn. The model
+        // calls web_search / fetch itself — do not pre-search and hide tools.
         turnForceSearch = false;
         if (prefs.getBoolean("searchNext", false)) prefs.edit().remove("searchNext").apply();
-        String query = searchQuery(userText);
-        if (voiceMode && voiceFullMode && "on".equals(voiceWebSearchMode()) && query.length() == 0) query = userText == null ? "" : userText.trim();
-        if (voiceMode && voiceFullMode && "auto".equals(voiceWebSearchMode()) && query.length() == 0 && shouldVoiceAutoSearch(userText)) query = userText == null ? "" : userText.trim();
-        String folderInstruction = folderInstruction(selectedFolder);
-        if (query.length() == 0 && folderInstructionForcesSearch(folderInstruction)) query = ((userText == null ? "" : userText.trim()) + " " + folderInstruction).trim();
-        if (webSearchChat && (query == null || query.length() == 0)) query = userText == null ? "" : userText.trim();
-        if (forceSearch && (query == null || query.length() == 0)) query = userText == null ? "" : userText.trim();
-        if (query.length() == 0) return "";
-        String result = webSearch(datedSearchQuery(query));
-        if (result.length() == 0) return "";
-        rememberSearchResult(query, result);
-        String clipped = result.length() > 4000 ? result.substring(0, 4000) : result;
-        String researchHint = turnResearch
-                ? "This is a research turn: extract every concrete price/number/date you can and give a clear direct answer.\n\n"
-                : "";
-        return researchHint + "Web search has already been performed by the app. Do not emit tool calls, XML, function calls, SEARCH: lines, or requests to search. Use the sources below to answer the user's question directly, interpreting relative times with the phone's current local date/time. Cite plain URLs only when useful; do not emit bracketed line citations like [1%L1-L9].\n\nQuery: " + query + "\n\n" + cleanSearchArtifacts(clipped);
+        return "";
     }
 
     private void rememberSearchResult(String query, String result) {
@@ -4122,6 +4147,10 @@ public class MainActivity extends Activity {
     private static final String SEARCH_UA = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36";
 
     private String webSearch(String query) throws Exception {
+        return webSearch(query, false);
+    }
+
+    private String webSearch(String query, boolean modelCanFetch) throws Exception {
         String q = datedSearchQuery(query);
         String raw = "";
         Exception last = null;
@@ -4150,7 +4179,9 @@ public class MainActivity extends Activity {
         }
         String compact = ToolText.compactWebSearch(raw);
         if (compact.length() == 0) compact = raw;
-        if (ToolText.looksLikePriceQuery(q)) {
+        // When the model can fetch, keep search compact (Pi: search then fetch).
+        // Without native fetch, inline page facts so SEARCH: fallback still has numbers.
+        if (!modelCanFetch && ToolText.looksLikePriceQuery(q)) {
             compact = enrichWithPageFacts(raw, compact);
         }
         return compact.trim().length() > 0 ? compact.trim() : raw;
@@ -4191,6 +4222,26 @@ public class MainActivity extends Activity {
         if (facts.length() > 0) return facts;
         try { page = fetchPage(url); } catch (Exception ignored) { return ""; }
         return ToolText.extractFactLines(page, 900);
+    }
+
+    private String fetchUrlForTool(String url) {
+        String u = url == null ? "" : url.trim();
+        if (u.length() == 0) return "No URL provided.";
+        if (ToolText.isLowValueSearchUrl(u)) return "Skipped low-value URL.";
+        if (!u.startsWith("http://") && !u.startsWith("https://")) u = "https://" + u;
+        String page = "";
+        try { page = jinaRead(u); } catch (Exception ignored) { page = ""; }
+        if (page.length() == 0) {
+            try { page = fetchPage(u); } catch (Exception e) {
+                return "Fetch failed: " + (e.getMessage() == null ? "unknown error" : e.getMessage());
+            }
+        }
+        String facts = ToolText.extractFactLines(page, 2000);
+        if (facts.length() > 0) return facts;
+        String plain = ToolText.looksLikeHtml(page) ? ToolText.htmlToPlainText(page) : page;
+        plain = plain.trim();
+        if (plain.length() == 0) return "No readable text on that page.";
+        return AgentTools.clipResult(plain);
     }
 
     private String jinaRead(String url) throws Exception {

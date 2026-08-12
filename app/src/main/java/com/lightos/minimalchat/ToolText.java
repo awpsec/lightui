@@ -43,6 +43,8 @@ public final class ToolText {
         // Simple SEARCH: fallback dialect (line at end or alone).
         s = s.replaceAll("(?im)^\\s*SEARCH:\\s*.*$", "");
         s = s.replaceAll("(?is)\\n\\s*SEARCH:\\s*[\\s\\S]*$", "");
+        s = s.replaceAll("(?im)^\\s*FETCH:\\s*.*$", "");
+        s = s.replaceAll("(?is)\\n\\s*FETCH:\\s*[\\s\\S]*$", "");
         return s.replaceAll("[ \\t]+\\n", "\n").replaceAll("\\n{3,}", "\n\n").trim();
     }
 
@@ -55,7 +57,8 @@ public final class ToolText {
                 || lower.contains("<function=web_search") || lower.contains("<function=save_memory")
                 || lower.contains("<function=remove_memory") || lower.contains("<function=obsidian_")
                 || lower.contains("\"name\":\"web_search\"") || lower.contains("\"name\": \"web_search\"")
-                || lower.matches("(?s).*(?:^|\\n)\\s*search:\\s*\\S.*")) {
+                || lower.matches("(?s).*(?:^|\\n)\\s*search:\\s*\\S.*")
+                || lower.matches("(?s).*(?:^|\\n)\\s*fetch:\\s*https?://\\S.*")) {
             return true;
         }
         if (lower.contains("web_search") && (lower.contains("<") || lower.contains("{") || lower.contains("invoke") || lower.contains("parameter"))) {
@@ -244,6 +247,18 @@ public final class ToolText {
             String q = cleanQuery(s.substring(start, end));
             if (q.length() > 0) return q;
         }
+        return "";
+    }
+
+    public static String fetchToolUrl(String text) {
+        String s = text == null ? "" : text.trim();
+        if (s.length() == 0) return "";
+        Matcher simple = Pattern.compile("(?im)^\\s*FETCH:\\s*(\\S+)\\s*$").matcher(s);
+        String url = "";
+        while (simple.find()) url = simple.group(1).trim();
+        if (url.startsWith("http://") || url.startsWith("https://")) return url;
+        Matcher json = Pattern.compile("(?is)[\"']url[\"']\\s*:\\s*[\"'](https?://[^\"']+)[\"']").matcher(s);
+        if (json.find()) return json.group(1).trim();
         return "";
     }
 

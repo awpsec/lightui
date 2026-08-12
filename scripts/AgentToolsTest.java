@@ -21,20 +21,23 @@ public class AgentToolsTest {
     public static void main(String[] args) throws Exception {
         String lean = AgentTools.leanToolsPrompt(true, true, true, false);
         assertTrue("lean lists web_search", lean.contains("web_search"));
+        assertTrue("lean lists fetch", lean.contains("fetch:"));
         assertTrue("lean lists save_memory", lean.contains("save_memory"));
         assertTrue("lean has SEARCH fallback", lean.contains("SEARCH:"));
         assertTrue("lean has no XML tutorial", !lean.contains("<function=") && !lean.contains("<tool_call>"));
         assertTrue("lean prompt under 400 tokens", AgentTools.promptTokenEstimate(lean) < 400);
         assertTrue("lean prompt under 1800 chars", lean.length() < 1800);
 
-        String injected = AgentTools.leanToolsPrompt(true, true, true, true);
-        assertTrue("injected omits SEARCH dialect", !injected.contains("SEARCH:"));
-        assertTrue("injected says results already in context", injected.toLowerCase().contains("already in context"));
+        String nativePrompt = AgentTools.leanToolsPrompt(true, true, false, false);
+        assertTrue("native prompt has no SEARCH dialect", !nativePrompt.contains("SEARCH:"));
+        assertTrue("native prompt lists fetch", nativePrompt.contains("fetch:"));
 
         JSONArray tools = AgentTools.openaiTools(true, true);
-        assertTrue("schema has 3 tools", tools.length() == 3);
+        assertTrue("schema has 4 tools", tools.length() == 4);
         assertEq("first tool is web_search", "web_search",
                 tools.getJSONObject(0).getJSONObject("function").getString("name"));
+        assertEq("second tool is fetch", "fetch",
+                tools.getJSONObject(1).getJSONObject("function").getString("name"));
         assertTrue("web_search has query param",
                 tools.getJSONObject(0).getJSONObject("function").getJSONObject("parameters")
                         .getJSONObject("properties").has("query"));
@@ -99,16 +102,22 @@ public class AgentToolsTest {
         JSONObject toolMsg = AgentTools.toolResultMessage("call_abc", "kits are $299");
         assertEq("tool role", "tool", toolMsg.getString("role"));
         assertEq("tool id", "call_abc", toolMsg.getString("tool_call_id"));
-
-        JSONObject searchTool = AgentTools.searchToolResultMessage("call_abc", "kits are $299");
-        assertEq("search tool role", "tool", searchTool.getString("role"));
-        assertTrue("search tool keeps numbers", searchTool.getString("content").contains("$299"));
-        assertTrue("search tool forbids look-it-up", searchTool.getString("content").toLowerCase().contains("look it up"));
+        assertTrue("tool result is just data", toolMsg.getString("content").equals("kits are $299"));
 
         JSONObject userMsg = AgentTools.textResultUserMessage("web_search", "ddr5", "kits are $299");
         assertEq("text fallback role", "user", userMsg.getString("role"));
         assertTrue("text fallback has result", userMsg.getString("content").contains("$299"));
-        assertTrue("text fallback forbids look-it-up", userMsg.getString("content").toLowerCase().contains("look it up"));
+        assertTrue("text fallback has no sermon", !userMsg.getString("content").toLowerCase().contains("look it up"));
+
+        AgentTools.ToolCall fetchCall = new AgentTools.ToolCall();
+        fetchCall.name = "fetch";
+        fetchCall.arguments = "{\"url\":\"https://rampricesusa.com/best-64gb-ddr5-ram\"}";
+        assertTrue("fetch detected", fetchCall.isFetch());
+        assertEq("fetch url", "https://rampricesusa.com/best-64gb-ddr5-ram", fetchCall.url());
+
+        java.util.ArrayList<AgentTools.ToolCall> fetchExec = new java.util.ArrayList<AgentTools.ToolCall>();
+        fetchExec.add(fetchCall);
+        assertTrue("fetch continues loop", AgentTools.continueAfter(fetchExec, false, 0, 4));
 
         assertTrue("unsupported: extra tools field", AgentTools.looksLikeToolsUnsupported("unexpected field: tools"));
         assertTrue("unsupported: does not support", AgentTools.looksLikeToolsUnsupported("This model does not support tools"));

@@ -72,6 +72,7 @@ public class ToolTextTest {
 
         assertTrue("prompt teaches SEARCH fallback", ToolText.webSearchToolsPrompt().contains("SEARCH:"));
         assertTrue("lean prompt lists web_search", ToolText.webSearchToolsPrompt().contains("web_search"));
+        assertTrue("lean prompt lists fetch", ToolText.webSearchToolsPrompt().contains("fetch:"));
         assertTrue("lean prompt has no XML dump", !ToolText.webSearchToolsPrompt().contains("<function=web_search>"));
 
         // DDR5-style Jina dump must not become the chat answer.
@@ -121,6 +122,9 @@ public class ToolTextTest {
         assertEq("SEARCH query", "ddr5 6000 64gb price", ToolText.webSearchToolQuery("Looking that up.\nSEARCH: ddr5 6000 64gb price"));
         assertEq("SEARCH stripped", "Looking that up.", ToolText.stripToolCalls("Looking that up.\nSEARCH: ddr5 6000 64gb price"));
         assertTrue("SEARCH is residue", ToolText.looksLikeToolResidue("SEARCH: bitcoin price"));
+        assertEq("FETCH url", "https://rampricesusa.com/best-64gb-ddr5-ram",
+                ToolText.fetchToolUrl("Opening it.\nFETCH: https://rampricesusa.com/best-64gb-ddr5-ram"));
+        assertEq("FETCH stripped", "Opening it.", ToolText.stripToolCalls("Opening it.\nFETCH: https://rampricesusa.com/best-64gb-ddr5-ram"));
 
         // Concrete facts veto planning false-positives
         assertTrue("has fact $", ToolText.containsConcreteFact("Based on the sources I found, kits are $299."));

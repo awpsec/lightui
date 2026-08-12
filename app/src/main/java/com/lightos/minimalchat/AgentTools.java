@@ -20,6 +20,7 @@ public final class AgentTools {
     public static final int TOOL_RESULT_CHARS = 4000;
 
     public static final String WEB_SEARCH = "web_search";
+    public static final String FETCH = "fetch";
     public static final String SAVE_MEMORY = "save_memory";
     public static final String REMOVE_MEMORY = "remove_memory";
 
@@ -31,6 +32,11 @@ public final class AgentTools {
         public boolean isSearch() {
             String n = name == null ? "" : name.toLowerCase(Locale.US);
             return WEB_SEARCH.equals(n) || "google".equals(n) || "search".equals(n);
+        }
+
+        public boolean isFetch() {
+            String n = name == null ? "" : name.toLowerCase(Locale.US);
+            return FETCH.equals(n) || "fetch_content".equals(n) || "read_url".equals(n);
         }
 
         public boolean isSaveMemory() {
@@ -55,6 +61,16 @@ public final class AgentTools {
                 }
             }
             return q;
+        }
+
+        public String url() {
+            String u = jsonField(arguments, "url");
+            if (u.length() == 0) u = jsonField(arguments, "href");
+            if (u.length() == 0 && arguments != null) {
+                String raw = arguments.trim().replaceAll("^\"|\"$", "");
+                if (raw.startsWith("http://") || raw.startsWith("https://")) u = raw;
+            }
+            return u.trim();
         }
 
         public String note() {
@@ -90,8 +106,8 @@ public final class AgentTools {
     }
 
     /**
-     * Lean system prompt (~200 tokens). No XML tutorials.
-     * {@code textFallback} adds a one-line SEARCH: dialect for local models.
+     * Pi-style system prompt: one-line tool snippets, a few guidelines, no XML.
+     * {@code textFallback} adds SEARCH: only when the endpoint rejected native tools.
      */
     public static String leanToolsPrompt(boolean search, boolean memory, boolean textFallback, boolean searchAlreadyInjected) {
         StringBuilder b = new StringBuilder();
@@ -99,11 +115,12 @@ public final class AgentTools {
         b.append("Available tools:\n");
         boolean any = false;
         if (search && !searchAlreadyInjected) {
-            b.append("- web_search: Search the public web for current facts (scores, news, prices, weather, schedules)\n");
+            b.append("- web_search: Search the public web\n");
+            b.append("- fetch: Fetch a URL and return readable text\n");
             any = true;
         }
         if (memory) {
-            b.append("- save_memory: Save a durable fact about the user for future chats\n");
+            b.append("- save_memory: Save a durable fact about the user\n");
             b.append("- remove_memory: Remove a previously saved memory\n");
             any = true;
         }
@@ -111,20 +128,22 @@ public final class AgentTools {
         b.append("\nGuidelines:\n");
         b.append("- Be concise\n");
         if (search && searchAlreadyInjected) {
-            b.append("- Web search results are already in context. Answer from them. Do not search again unless they do not cover the question\n");
+            b.append("- Search results are already in context. Answer from them, or fetch a source URL if you need the page\n");
         } else if (search) {
-            b.append("- Use web_search for moving facts instead of guessing\n");
+            b.append("- Use web_search for current facts; fetch a source when you need the page\n");
         }
-        b.append("- After tool results, answer the user in plain text with concrete numbers\n");
-        b.append("- If results lack the numbers asked for, search again with a more specific query. Never tell the user to look it up themselves\n");
         if (memory) {
-            b.append("- save_memory only for durable facts (name, preferences, constraints) — never one-off chatter, secrets, or medical/financial details\n");
+            b.append("- save_memory only for durable facts (name, preferences, constraints)\n");
         }
         b.append("- Never mention tools unless asked\n");
         if (textFallback && search && !searchAlreadyInjected) {
-            b.append("\nIf structured tools are unavailable, end with exactly one line:\nSEARCH: short query\n");
+            b.append("\n").append(textSearchFallbackPrompt());
         }
         return b.toString().trim();
+    }
+
+    public static String textSearchFallbackPrompt() {
+        return "Structured tools are unavailable. If you need the web, end with exactly one line:\nSEARCH: short query";
     }
 
     public static JSONArray openaiTools(boolean search, boolean memory) {
@@ -132,8 +151,11 @@ public final class AgentTools {
         try {
             if (search) {
                 tools.put(functionTool(WEB_SEARCH,
-                        "Search the public web for current facts (scores, news, prices, weather, schedules).",
+                        "Search the public web. Returns compact titles, URLs, and snippets so you can choose a source.",
                         "query", "Short search query"));
+                tools.put(functionTool(FETCH,
+                        "Fetch a URL and return readable text (prices, specs, article body).",
+                        "url", "http(s) URL to fetch"));
             }
             if (memory) {
                 tools.put(functionTool(SAVE_MEMORY,
@@ -297,6 +319,15 @@ public final class AgentTools {
                 out.add(c);
             }
         }
+        String fetchUrl = ToolText.fetchToolUrl(content);
+        if (fetchUrl.length() == 0 && !usableAnswer) fetchUrl = ToolText.fetchToolUrl(think);
+        if (fetchUrl.length() > 0) {
+            ToolCall c = new ToolCall();
+            c.id = "call_fetch";
+            c.name = FETCH;
+            c.arguments = "{\"url\":" + jsonQuote(fetchUrl) + "}";
+            out.add(c);
+        }
         String save = memoryNoteFromText(content, "save_memory");
         if (save.length() > 0) {
             ToolCall c = new ToolCall();
@@ -326,14 +357,16 @@ public final class AgentTools {
         if (executed == null || executed.size() == 0) return false;
         if (round + 1 >= maxRounds) return false;
         boolean anySearch = false;
+        boolean anyFetch = false;
         boolean anyMemory = false;
         for (int i = 0; i < executed.size(); i++) {
             ToolCall c = executed.get(i);
             if (c == null) continue;
             if (c.isSearch()) anySearch = true;
+            if (c.isFetch()) anyFetch = true;
             if (c.isMemory()) anyMemory = true;
         }
-        if (anySearch) return true;
+        if (anySearch || anyFetch) return true;
         if (anyMemory && !usableAnswer) return true;
         return false;
     }
@@ -364,13 +397,6 @@ public final class AgentTools {
         return arr;
     }
 
-    public static String withSearchAnswerHint(String result) {
-        return clipResult(result)
-                + "\n\nAnswer the user now in plain text with concrete numbers from this result. "
-                + "If it lacks the numbers they asked for, search again with a more specific query. "
-                + "Never tell the user to look it up themselves.";
-    }
-
     public static JSONObject toolResultMessage(String toolCallId, String content) throws Exception {
         JSONObject o = new JSONObject();
         o.put("role", "tool");
@@ -379,22 +405,12 @@ public final class AgentTools {
         return o;
     }
 
-    public static JSONObject searchToolResultMessage(String toolCallId, String result) throws Exception {
-        JSONObject o = new JSONObject();
-        o.put("role", "tool");
-        o.put("tool_call_id", toolCallId == null || toolCallId.length() == 0 ? "call_0" : toolCallId);
-        o.put("content", withSearchAnswerHint(result));
-        return o;
-    }
-
     public static JSONObject textResultUserMessage(String toolName, String query, String result) throws Exception {
         JSONObject o = new JSONObject();
         StringBuilder b = new StringBuilder();
         b.append("Tool result (").append(toolName == null ? "tool" : toolName).append(")");
         if (query != null && query.trim().length() > 0) b.append(" for: ").append(query.trim());
-        b.append("\n\n");
-        boolean search = toolName != null && toolName.toLowerCase(Locale.US).contains("search");
-        b.append(search ? withSearchAnswerHint(result) : clipResult(result));
+        b.append("\n\n").append(clipResult(result));
         o.put("role", "user");
         o.put("content", b.toString());
         return o;

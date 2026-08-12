@@ -33,6 +33,7 @@ public class ToolLoopHarness {
         testNativeToolLoop();
         testTextFallbackAfterToolsRejected();
         testUsableAnswerNotResearched();
+        testNativeFetchLoop();
         if (failed > 0) { System.err.println(failed + " failed"); System.exit(1); }
         System.out.println("all harness passed");
     }
@@ -69,6 +70,19 @@ public class ToolLoopHarness {
             String answer = runLoop(mock.url, true, "What do DDR5 kits cost?");
             assertTrue("kept the in-stream answer", answer.contains("$280"));
             assertTrue("did not search when answer already usable", mock.searches == 0);
+        } finally {
+            mock.stop();
+        }
+    }
+
+    private static void testNativeFetchLoop() throws Exception {
+        MockServer mock = MockServer.start("fetch");
+        try {
+            String answer = runLoop(mock.url, true, "What do DDR5-6000 64GB kits cost?");
+            assertTrue("fetch loop answers from page",
+                    answer.contains("259") || answer.contains("10.77") || answer.contains("$"));
+            assertTrue("fetch loop searched", mock.searches >= 1);
+            assertTrue("fetch loop fetched a page", mock.fetches >= 1);
         } finally {
             mock.stop();
         }
@@ -112,13 +126,20 @@ public class ToolLoopHarness {
             ArrayList<AgentTools.ToolCall> executed = new ArrayList<AgentTools.ToolCall>();
             for (int i = 0; i < calls.size(); i++) {
                 AgentTools.ToolCall call = calls.get(i);
+                if (call.isFetch()) {
+                    String url = call.url();
+                    String result = "Median $10.77/GB. Corsair Dominator 64GB DDR5-6000 CL30 about $259.99 at Newegg.";
+                    if (nativeThisRound) arr.put(AgentTools.toolResultMessage(call.id, result));
+                    else arr.put(AgentTools.textResultUserMessage("fetch", url, result));
+                    executed.add(call);
+                    continue;
+                }
                 if (!call.isSearch()) continue;
                 String q = call.query();
                 if (seen.contains(q.toLowerCase())) continue;
                 seen.add(q.toLowerCase());
-                String result = "Description: DDR5-6000 CL30 2x32GB kits are commonly listing around $280-$360 this week.\n"
-                        + "URL Source: https://example.com/ddr5\n";
-                if (nativeThisRound) arr.put(AgentTools.searchToolResultMessage(call.id, result));
+                String result = "1. Best 64GB DDR5 RAM\nhttps://rampricesusa.com/best-64gb-ddr5-ram\nDual-stick kits ranked by $/GB\n";
+                if (nativeThisRound) arr.put(AgentTools.toolResultMessage(call.id, result));
                 else arr.put(AgentTools.textResultUserMessage("web_search", q, result));
                 executed.add(call);
             }
@@ -181,6 +202,7 @@ public class ToolLoopHarness {
         final String mode;
         int completions = 0;
         int searches = 0;
+        int fetches = 0;
         int toolsAfterReject = 0;
         boolean rejectedOnce = false;
         boolean sawSearchDialect = false;
@@ -209,7 +231,10 @@ public class ToolLoopHarness {
                 JSONObject body = new JSONObject(req);
                 boolean hasTools = body.has("tools");
                 boolean hasToolRole = body.toString().contains("\"role\":\"tool\"");
-                boolean hasTextResult = body.toString().contains("Tool result (web_search)");
+                boolean hasTextSearch = body.toString().contains("Tool result (web_search)");
+                boolean hasTextFetch = body.toString().contains("Tool result (fetch)");
+                boolean hasFetchResult = hasTextFetch || body.toString().contains("Median $10.77");
+                boolean hasSearchResult = hasTextSearch || body.toString().contains("rampricesusa.com");
                 if (req.contains("SEARCH:")) sawSearchDialect = true;
 
                 if ("reject-tools".equals(mode) && hasTools) {
@@ -226,7 +251,13 @@ public class ToolLoopHarness {
                 String sse;
                 if ("already-answered".equals(mode)) {
                     sse = sseContent("Typical DDR5-6000 64GB kits are about $280–$360 today.\nSEARCH: ddr5 6000 price");
-                } else if (hasToolRole || hasTextResult) {
+                } else if ("fetch".equals(mode) && (hasFetchResult)) {
+                    fetches++;
+                    sse = sseContent("64GB DDR5-6000 CL30 kits are about $259.99 right now.");
+                } else if ("fetch".equals(mode) && (hasToolRole || hasSearchResult)) {
+                    searches++;
+                    sse = sseFetchCall("https://rampricesusa.com/best-64gb-ddr5-ram");
+                } else if (hasToolRole || hasTextSearch) {
                     searches++;
                     sse = sseContent("Typical DDR5-6000 64GB kits are about $280-$360 today.");
                 } else if (hasTools) {
@@ -261,6 +292,20 @@ public class ToolLoopHarness {
                     new JSONObject().put("tool_calls", new JSONArray().put(new JSONObject()
                             .put("index", 0)
                             .put("function", new JSONObject().put("arguments", "{\"query\":\"" + query + "\"}")))))));
+            JSONObject done = new JSONObject().put("choices", new JSONArray().put(new JSONObject()
+                    .put("delta", new JSONObject()).put("finish_reason", "tool_calls")));
+            return "data: " + first + "\n\n" + "data: " + second + "\n\n" + "data: " + done + "\n\n" + "data: [DONE]\n\n";
+        }
+
+        static String sseFetchCall(String url) throws Exception {
+            JSONObject first = new JSONObject().put("choices", new JSONArray().put(new JSONObject().put("delta",
+                    new JSONObject().put("tool_calls", new JSONArray().put(new JSONObject()
+                            .put("index", 0).put("id", "call_2").put("type", "function")
+                            .put("function", new JSONObject().put("name", "fetch").put("arguments", "")))))));
+            JSONObject second = new JSONObject().put("choices", new JSONArray().put(new JSONObject().put("delta",
+                    new JSONObject().put("tool_calls", new JSONArray().put(new JSONObject()
+                            .put("index", 0)
+                            .put("function", new JSONObject().put("arguments", "{\"url\":\"" + url + "\"}")))))));
             JSONObject done = new JSONObject().put("choices", new JSONArray().put(new JSONObject()
                     .put("delta", new JSONObject()).put("finish_reason", "tool_calls")));
             return "data: " + first + "\n\n" + "data: " + second + "\n\n" + "data: " + done + "\n\n" + "data: [DONE]\n\n";
