@@ -321,6 +321,37 @@ public class ToolTextTest {
         assertTrue("recency falls back to message", ToolText.recencyMillis(0, "10", 20) == 20);
         assertTrue("recency falls back to id", ToolText.recencyMillis(0, "12345", 0) == 12345);
 
+        assertTrue("apk magic pk", ToolText.isApkMagic(new byte[] { 'P', 'K', 3, 4 }));
+        assertTrue("html not apk", !ToolText.isApkMagic(new byte[] { '<', '!' }));
+        assertTrue("short not apk", !ToolText.isApkMagic(new byte[] { 'P' }));
+        assertTrue("redirect 302", ToolText.isHttpRedirect(302));
+        assertTrue("redirect 307", ToolText.isHttpRedirect(307));
+        assertTrue("200 not redirect", !ToolText.isHttpRedirect(200));
+        assertEq("absolute redirect",
+                "https://release-assets.githubusercontent.com/github-production-release-asset/foo",
+                ToolText.resolveRedirectUrl(
+                        "https://github.com/awpsec/lightui/releases/download/v1.0.33/lightui-release.apk",
+                        "https://release-assets.githubusercontent.com/github-production-release-asset/foo"));
+        assertEq("relative redirect",
+                "https://github.com/bar",
+                ToolText.resolveRedirectUrl("https://github.com/awpsec/lightui/x", "/bar"));
+        assertTrue("empty location", ToolText.resolveRedirectUrl("https://github.com/x", "  ") == null);
+        assertTrue("length mismatch", ToolText.downloadLengthMismatch(100, 40));
+        assertTrue("length match", !ToolText.downloadLengthMismatch(100, 100));
+        assertTrue("unknown length ok", !ToolText.downloadLengthMismatch(-1, 40));
+        assertTrue("stream cutoff is transient",
+                ToolText.isTransientDownloadError(new java.io.IOException("unexpected end of stream on com.android.okhttp.Address@1")));
+        assertEq("cutoff toast",
+                "download cut off - retry or open in browser",
+                ToolText.friendlyDownloadError(new java.io.IOException("unexpected end of stream on com.android.okhttp.Address@1")));
+        String[] apkUrls = ToolText.updateDownloadUrls(
+                "https://github.com/awpsec/lightui/releases/download/v1.0.33/lightui-release.apk", "v1.0.33");
+        assertTrue("primary first", apkUrls.length == 2);
+        assertEq("versioned url",
+                "https://github.com/awpsec/lightui/releases/download/v1.0.33/lightui-release.apk", apkUrls[0]);
+        assertEq("latest url",
+                "https://github.com/awpsec/lightui/releases/latest/download/lightui-release.apk", apkUrls[1]);
+
         if (failed > 0) { System.err.println(failed + " failed"); System.exit(1); }
         System.out.println("all passed");
     }
