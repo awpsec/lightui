@@ -109,15 +109,15 @@ import java.util.Locale;
 public class MainActivity extends Activity {
     private static final String OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1";
     private static final int VOICE = 11;
-    private static final int MESSAGE_WINDOW = 80;
-    private static final int MESSAGE_PAGE = 30;
+    private static final int MESSAGE_WINDOW = 40;
+    private static final int MESSAGE_PAGE = 20;
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
     private static final String SEARCHING = "__searching__";
-    private static final String APP_VERSION = "1.0.39";
+    private static final String APP_VERSION = "1.0.40";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
-    private static final long STREAM_RENDER_MIN_MS = 120;
+    private static final long STREAM_RENDER_MIN_MS = 48;
     private static final long MODEL_AUTO_REFRESH_MS = 60L * 60L * 1000L;
     private static final long VERSION_CHECK_MS = 3L * 60L * 60L * 1000L;
     private static final int CONTACTS_PERM = 12;
@@ -130,6 +130,7 @@ public class MainActivity extends Activity {
     private SharedPreferences prefs;
     private Runnable pendingPersist;
     private Runnable pendingStreamRender;
+    private Runnable pendingChatFilter;
     private long lastStreamRenderAt = 0;
     private boolean chatsDirty = false;
     private boolean modelsRefreshing = false;
@@ -140,7 +141,17 @@ public class MainActivity extends Activity {
     private String pendingInstallVersion = "";
     private String pendingInstallApkUrl = "";
     private Dialog updateDialog;
-    private FrameLayout screen;
+    private FrameLayout screen, paneHost;
+    private final LinearLayout[] paneRoots = new LinearLayout[3];
+    private final boolean[] paneReady = new boolean[3];
+    private String chatsBoundProject = "\u0001";
+    private String chatBoundId = "\u0001";
+    private String settingsBoundPage = "\u0001";
+    private int chatRenderGen;
+    private int messageTokKey = Integer.MIN_VALUE;
+    private int messageTokCached = 0;
+    private int bgTokKey = Integer.MIN_VALUE;
+    private int bgTokCached = 0;
     private LinearLayout root, messageList, folderList, chatList;
     private ScrollView scroll, settingsScrollView;
     private ScrollIndicator scrollIndicator;
@@ -279,12 +290,56 @@ public class MainActivity extends Activity {
     private void buildChrome() {
         screen = new FrameLayout(this);
         screen.setBackgroundColor(hookVoiceMode ? Color.TRANSPARENT : Color.BLACK);
-        root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(26), dp(14), dp(26), dp(10));
-        root.setBackgroundColor(hookVoiceMode ? Color.TRANSPARENT : Color.BLACK);
-        screen.addView(root, new FrameLayout.LayoutParams(-1, -1));
+        paneHost = new FrameLayout(this);
+        paneHost.setBackgroundColor(hookVoiceMode ? Color.TRANSPARENT : Color.BLACK);
+        screen.addView(paneHost, new FrameLayout.LayoutParams(-1, -1));
         setContentView(screen);
+    }
+
+    private LinearLayout makePaneRoot() {
+        LinearLayout p = new LinearLayout(this);
+        p.setOrientation(LinearLayout.VERTICAL);
+        p.setBackgroundColor(hookVoiceMode ? Color.TRANSPARENT : Color.BLACK);
+        return p;
+    }
+
+    private void switchToPane(int which) {
+        if (paneHost == null) return;
+        if (paneRoots[which] == null) {
+            paneRoots[which] = makePaneRoot();
+            paneHost.addView(paneRoots[which], new FrameLayout.LayoutParams(-1, -1));
+        }
+        for (int i = 0; i < 3; i++) {
+            LinearLayout p = paneRoots[i];
+            if (p == null) continue;
+            boolean on = i == which;
+            if (!on) {
+                p.animate().cancel();
+                p.setAlpha(1f);
+                p.setTranslationX(0);
+            }
+            p.setVisibility(on ? View.VISIBLE : View.GONE);
+        }
+        root = paneRoots[which];
+    }
+
+    private boolean paneIsShowing(int which) {
+        return root != null && paneRoots[which] != null && root == paneRoots[which]
+                && paneRoots[which].getVisibility() == View.VISIBLE;
+    }
+
+    private boolean chatsPaneReusable() {
+        return paneReady[0] && paneRoots[0] != null && chatList != null && !projectEditorOpen
+                && projectView.equals(chatsBoundProject);
+    }
+
+    private boolean chatPaneReusable() {
+        return paneReady[1] && paneRoots[1] != null && messageList != null && scroll != null && input != null;
+    }
+
+    private boolean settingsPaneReusable() {
+        return paneReady[2] && paneRoots[2] != null && settingsScrollView != null
+                && settingsPage.equals(settingsBoundPage);
     }
 
     @Override public boolean dispatchTouchEvent(MotionEvent e) {
@@ -361,7 +416,7 @@ public class MainActivity extends Activity {
 
     private void renderPane() {
         hideKeyboard();
-        flushSettingsInputs();
+        if (pane != 2) flushSettingsInputs();
         removeScreenChild(bulkButton); bulkButton = null;
         if (pane == 0) showChatsPane(); else if (pane == 2) showSettingsPane(); else showChatPane();
     }
@@ -371,39 +426,83 @@ public class MainActivity extends Activity {
             root.animate().cancel();
             root.setAlpha(1f);
             root.setTranslationX(0);
+            root.removeAllViews();
         }
-        root.removeAllViews();
-        input = null;
-        composerAction = null;
-        apiKey = null;
-        endpointInput = null;
-        endpointKeyInput = null;
-        jinaKeyInput = null;
-        braveKeyInput = null;
-        voiceEndpointInput = null;
-        chatSearch = null;
-        chatsSelectBar = null;
-        chatsSelectCount = null;
-        contextText = null;
-        attachText = null;
-        replyChip = null;
-        slashSuggestRow = null;
+        if (pane == 0) {
+            chatSearch = null;
+            chatsSelectBar = null;
+            chatsSelectCount = null;
+            chatList = null;
+            paneReady[0] = false;
+            chatsBoundProject = "\u0001";
+        } else if (pane == 2) {
+            apiKey = null;
+            endpointInput = null;
+            endpointKeyInput = null;
+            jinaKeyInput = null;
+            braveKeyInput = null;
+            voiceEndpointInput = null;
+            settingsScrollView = null;
+            paneReady[2] = false;
+            settingsBoundPage = "\u0001";
+        } else {
+            input = null;
+            composerAction = null;
+            contextText = null;
+            attachText = null;
+            replyChip = null;
+            slashSuggestRow = null;
+            modelText = null;
+            meter = null;
+            emptyPrompt = null;
+            webSearchIcon = null;
+            scroll = null;
+            messageList = null;
+            paneReady[1] = false;
+            chatBoundId = "\u0001";
+        }
         removeScreenChild(notice); notice = null;
         dismissImagePreview();
-        modelText = null;
-        meter = null;
-        emptyPrompt = null;
-        webSearchIcon = null;
         removeScreenChild(bulkButton); bulkButton = null;
         removeScreenChild(scrollIndicator); scrollIndicator = null;
         removeScreenChild(chatFade); chatFade = null;
         removeScreenChild(bottomButton); bottomButton = null;
         emptyPromptRun++;
-        if (pane != 1) {
-            scroll = null;
-            messageList = null;
+    }
+
+    private void refreshChatChrome() {
+        if (modelText != null) modelText.setText(modelLabel() + " >");
+        if (meter != null) { meter.percent = contextPercent(); meter.invalidate(); }
+        if (contextText != null) contextText.setText(contextPercentText());
+        if (webSearchIcon != null) {
+            webSearchIcon.active = webSearchChat;
+            webSearchIcon.setClickable(webSearchChat);
+            webSearchIcon.invalidate();
         }
-        root.requestLayout();
+        updateComposerAction();
+        updateAttachChip();
+        updateReplyChip();
+    }
+
+    private void finishChatPane(boolean messagesReady) {
+        paneReady[1] = true;
+        chatBoundId = currentChatId == null ? "" : currentChatId;
+        if (messagesReady) {
+            slidePaneIn();
+            return;
+        }
+        boolean animate = paneSlide != 0;
+        if (!animate) {
+            renderMessages();
+            slidePaneIn();
+            return;
+        }
+        slidePaneIn();
+        final int gen = ++chatRenderGen;
+        ui.post(new Runnable() { @Override public void run() {
+            if (pane != 1 || gen != chatRenderGen || messageList == null) return;
+            renderMessages();
+        } });
     }
 
     private void removeScreenChild(View v) {
@@ -413,10 +512,27 @@ public class MainActivity extends Activity {
     private void showChatPane() {
         projectEditorOpen = false;
         pane = 1;
+        boolean reuse = chatPaneReusable();
+        boolean sameChat = reuse && (currentChatId == null ? "" : currentChatId).equals(chatBoundId);
+        chatRenderGen++;
+        switchToPane(1);
+        if (reuse) {
+            refreshChatChrome();
+            if (sameChat) {
+                finishChatPane(true);
+                return;
+            }
+            restoreScrollOnce = savedChatScrollKnown;
+            paneReady[1] = true;
+            chatBoundId = currentChatId == null ? "" : currentChatId;
+            renderMessages();
+            slidePaneIn();
+            return;
+        }
+        restoreScrollOnce = savedChatScrollKnown;
         clearPaneViews();
         root.setOnClickListener(null);
         root.setPadding(dp(26), dp(14), dp(26), dp(10));
-        restoreScrollOnce = savedChatScrollKnown;
         LinearLayout header = row();
         modelText = text(modelLabel() + " >", 13, Color.WHITE);
         modelText.setGravity(Gravity.CENTER_VERTICAL);
@@ -469,6 +585,7 @@ public class MainActivity extends Activity {
         messageList.setBackgroundColor(Color.BLACK);
         scroll.addView(messageList);
         scroll.setVerticalScrollBarEnabled(false);
+        scroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
         scroll.setOnScrollChangeListener(new View.OnScrollChangeListener() {
             @Override public void onScrollChange(View v, int sx, int sy, int oldSx, int oldSy) {
                 if (scrollIndicator != null) scrollIndicator.invalidate();
@@ -550,16 +667,22 @@ public class MainActivity extends Activity {
         updateComposerAction();
         updateAttachChip();
         updateSlashSuggestions(input.getText() == null ? "" : input.getText().toString());
-        renderMessages();
-        slidePaneIn();
+        finishChatPane(false);
     }
 
     private void showSettingsPane() {
+        boolean arriving = !paneIsShowing(2);
         projectEditorOpen = false;
         flushSettingsInputs();
         if (pane == 2 && settingsPage.length() == 0 && settingsScrollView != null) savedSettingsScrollY = settingsScrollView.getScrollY();
         pane = 2;
         captureChatScroll();
+        boolean reuse = arriving && settingsPaneReusable();
+        switchToPane(2);
+        if (reuse) {
+            slidePaneIn();
+            return;
+        }
         clearPaneViews();
         root.setOnClickListener(null);
         root.setPadding(dp(16), dp(8), dp(16), dp(8));
@@ -577,6 +700,7 @@ public class MainActivity extends Activity {
         settings.setGravity(Gravity.TOP | Gravity.START);
         settings.setBackgroundColor(Color.BLACK);
         settingsScroll.setFillViewport(true);
+        settingsScroll.setOverScrollMode(View.OVER_SCROLL_NEVER);
         settingsScroll.addView(settings, new ScrollView.LayoutParams(-1, -2));
         settingsScroll.setVerticalScrollBarEnabled(false);
 
@@ -588,6 +712,8 @@ public class MainActivity extends Activity {
         else if ("memory".equals(settingsPage)) addMemorySettings(settings);
         else if ("models".equals(settingsPage)) addModelsSettings(settings);
         root.addView(settingsScroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        paneReady[2] = true;
+        settingsBoundPage = settingsPage;
         settingsScroll.post(new Runnable() { @Override public void run() { settingsScroll.scrollTo(0, settingsPage.length() == 0 ? savedSettingsScrollY : 0); } });
         slidePaneIn();
     }
@@ -2096,13 +2222,26 @@ public class MainActivity extends Activity {
 
     private void showChatsPane() {
         projectEditorOpen = false;
-        reloadChatStorePreservingCurrent();
-        saveCurrentChat();
+        syncCurrentChatInMemory();
+        persistChatStore(false);
         pane = 0;
         renderingMessages = false;
         forceAutoScrollBottom = false;
         restoreScrollOnce = false;
         captureChatScroll();
+        boolean already = paneIsShowing(0);
+        boolean reuse = chatsPaneReusable();
+        switchToPane(0);
+        if (chatList != null) chatList.setEnabled(true);
+        if (reuse) {
+            renderChatList();
+            if (!already) slidePaneIn();
+            else {
+                paneSlide = 0;
+                if (root != null) { root.setAlpha(1f); root.setTranslationX(0); }
+            }
+            return;
+        }
         clearPaneViews();
         root.setOnClickListener(null);
         root.setPadding(dp(16), dp(8), dp(16), dp(8));
@@ -2150,7 +2289,7 @@ public class MainActivity extends Activity {
             @Override public void beforeTextChanged(CharSequence s, int st, int c, int a) { }
             @Override public void onTextChanged(CharSequence s, int st, int b, int c) {
                 chatFilter = s == null ? "" : s.toString();
-                renderChatList();
+                scheduleChatListRender(chatFilter.trim().length() == 0 ? 0 : 50);
             }
             @Override public void afterTextChanged(Editable e) { }
         });
@@ -2160,9 +2299,8 @@ public class MainActivity extends Activity {
         root.addView(chatSearch, searchLp);
 
         ScrollView s = new ScrollView(this);
-        s.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
+        s.setOverScrollMode(View.OVER_SCROLL_NEVER);
         chatList = new LinearLayout(this); chatList.setOrientation(LinearLayout.VERTICAL);
-        chatList.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
         s.addView(chatList);
         s.setVerticalScrollBarEnabled(false);
         root.addView(s, new LinearLayout.LayoutParams(-1, 0, 1));
@@ -2190,11 +2328,25 @@ public class MainActivity extends Activity {
         barLp.topMargin = dp(6);
         root.addView(chatsSelectBar, barLp);
 
-        renderChatList();
-        slidePaneIn();
+        paneReady[0] = true;
+        chatsBoundProject = projectView;
+        boolean animate = paneSlide != 0;
+        if (animate) {
+            slidePaneIn();
+            ui.post(new Runnable() { @Override public void run() {
+                if (pane == 0 && chatList != null) renderChatList();
+            } });
+        } else {
+            renderChatList();
+            slidePaneIn();
+        }
     }
 
     private void renderChatList() {
+        if (pendingChatFilter != null) {
+            ui.removeCallbacks(pendingChatFilter);
+            pendingChatFilter = null;
+        }
         if (chatList == null) return;
         chatList.removeAllViews();
         chatList.setPadding(0, dp(3), 0, dp(14));
@@ -2229,6 +2381,20 @@ public class MainActivity extends Activity {
         if (visibleInbox.size() == 0) chatList.addView(emptyLine(q.trim().length() > 0 ? "no matches" : "no chats yet"));
         for (int i = 0; i < visibleInbox.size(); i++) chatList.addView(chatCard(visibleInbox.get(i), false, i));
         updateBulkButton();
+    }
+
+    private void scheduleChatListRender(int delayMs) {
+        if (pendingChatFilter != null) ui.removeCallbacks(pendingChatFilter);
+        if (delayMs <= 0) {
+            pendingChatFilter = null;
+            renderChatList();
+            return;
+        }
+        pendingChatFilter = new Runnable() { @Override public void run() {
+            pendingChatFilter = null;
+            renderChatList();
+        } };
+        ui.postDelayed(pendingChatFilter, delayMs);
     }
 
     private View folderCard(final String folder, int index) {
@@ -2323,6 +2489,11 @@ public class MainActivity extends Activity {
     private String chatListTitle(Chat c) { String title = c.title.length() == 0 ? "untitled" : c.title; return chatIsLoading(c) ? title + "..." : title; }
 
     private void openChatFromList(final Chat c) {
+        if (c != null && c.id.equals(currentChatId) && chatPaneReusable()) {
+            pane = 1;
+            showChatPane();
+            return;
+        }
         if (chatList != null) chatList.setEnabled(false);
         ui.post(new Runnable() { @Override public void run() {
             loadChat(c);
@@ -2332,8 +2503,17 @@ public class MainActivity extends Activity {
     }
 
     private String chatPreview(Chat c) {
-        for (int i = c.messages.size() - 1; i >= 0; i--) {
-            Msg m = c.messages.get(i);
+        if (c == null) return "empty chat";
+        if (c.id.equals(currentChatId) && messages.size() > 0) return computeChatPreview(messages);
+        if (c.listPreview != null) return c.listPreview;
+        c.listPreview = computeChatPreview(c.messages);
+        return c.listPreview;
+    }
+
+    private String computeChatPreview(ArrayList<Msg> msgs) {
+        if (msgs == null) return "empty chat";
+        for (int i = msgs.size() - 1; i >= 0; i--) {
+            Msg m = msgs.get(i);
             if (m.text == null || m.text.trim().length() == 0 || isBusyStats(m.stats)) continue;
             String text = chatPreviewText(m);
             if (text.length() > 72) text = text.substring(0, 72) + "...";
@@ -2363,8 +2543,24 @@ public class MainActivity extends Activity {
         if (artifacts > 0) return (s.length() > 0 ? s + "  " : "") + artifacts + " artifact" + (artifacts == 1 ? "" : "s");
         return s;
     }
+
     private static boolean isBusyStats(String stats) { return LOADING.equals(stats) || SEARCHING.equals(stats); }
-    private boolean chatIsLoading(Chat c) { for (Msg m : c.messages) if (isBusyStats(m.stats)) return true; if (c.id.equals(currentChatId)) for (Msg m : messages) if (isBusyStats(m.stats)) return true; return false; }
+
+    private boolean chatIsLoading(Chat c) {
+        if (c != null && messagesBusyTail(c.messages)) return true;
+        if (c != null && c.id.equals(currentChatId) && messagesBusyTail(messages)) return true;
+        return false;
+    }
+
+    private boolean messagesBusyTail(ArrayList<Msg> msgs) {
+        if (msgs == null) return false;
+        int n = msgs.size();
+        for (int i = n - 1; i >= 0 && i >= n - 6; i--) {
+            Msg m = msgs.get(i);
+            if (m != null && isBusyStats(m.stats)) return true;
+        }
+        return false;
+    }
 
     private boolean chatMatchesFilter(Chat c) {
         return ToolText.textMatchesQuery(chatFilter, chatListTitle(c), chatPreview(c));
@@ -2377,16 +2573,27 @@ public class MainActivity extends Activity {
 
     private long chatRecency(Chat c) {
         if (c == null) return 0;
-        long last = 0;
-        for (int i = 0; i < c.messages.size(); i++) {
-            Msg m = c.messages.get(i);
-            if (m != null && m.startedAt > last) last = m.startedAt;
+        if (c.id.equals(currentChatId) && messages.size() > 0) {
+            return ToolText.recencyMillis(c.updatedAt, c.id, lastMessageAt(messages));
         }
-        return ToolText.recencyMillis(c.updatedAt, c.id, last);
+        if (c.listRecency > 0) return c.listRecency;
+        c.listRecency = ToolText.recencyMillis(c.updatedAt, c.id, lastMessageAt(c.messages));
+        return c.listRecency;
+    }
+
+    private long lastMessageAt(ArrayList<Msg> msgs) {
+        if (msgs == null) return 0;
+        for (int i = msgs.size() - 1; i >= 0; i--) {
+            Msg m = msgs.get(i);
+            if (m != null && m.startedAt > 0) return m.startedAt;
+        }
+        return 0;
     }
 
     private void touchChat(Chat c) {
         if (c == null) return;
+        c.listPreview = null;
+        c.listRecency = 0;
         c.updatedAt = System.currentTimeMillis();
         chats.remove(c);
         chats.add(0, c);
@@ -2448,7 +2655,7 @@ public class MainActivity extends Activity {
             chatsSelectBar.setVisibility(View.VISIBLE);
             chatsSelectBar.setAlpha(0f);
             chatsSelectBar.setTranslationY(dp(10));
-            chatsSelectBar.animate().alpha(1f).translationY(0).setDuration(140).setInterpolator(new DecelerateInterpolator()).start();
+            chatsSelectBar.animate().alpha(1f).translationY(0).setDuration(90).setInterpolator(new DecelerateInterpolator()).start();
         } else if (!show) {
             chatsSelectBar.animate().cancel();
             chatsSelectBar.setVisibility(View.GONE);
@@ -2482,8 +2689,16 @@ public class MainActivity extends Activity {
         } });
     }
 
+    private boolean chatPaneVisible() {
+        return pane == 1 && paneRoots[1] != null && paneRoots[1].getVisibility() == View.VISIBLE && messageList != null;
+    }
+
     private void renderMessages() {
         if (messageList == null) return;
+        if (!chatPaneVisible()) {
+            chatBoundId = "\u0001";
+            return;
+        }
         if (!messageWindowReady) resetMessageWindowToLatest();
         clampMessageWindow();
         final boolean showBottom = messageEnd >= messages.size();
@@ -3810,6 +4025,10 @@ public class MainActivity extends Activity {
     }
 
     private void requestStreamingRender() {
+        if (!chatPaneVisible()) {
+            chatBoundId = "\u0001";
+            return;
+        }
         if (patchStreamingIfPossible(liveStreamMsg)) return;
         long now = System.currentTimeMillis();
         long wait = STREAM_RENDER_MIN_MS - (now - lastStreamRenderAt);
@@ -3835,6 +4054,10 @@ public class MainActivity extends Activity {
             pendingStreamRender = null;
         }
         lastStreamRenderAt = 0;
+        if (!chatPaneVisible()) {
+            chatBoundId = "\u0001";
+            return;
+        }
         renderMessages();
     }
 
@@ -7470,6 +7693,9 @@ public class MainActivity extends Activity {
         projectEditorOpen = true;
         pane = 0;
         hideKeyboard();
+        switchToPane(0);
+        paneReady[0] = false;
+        chatsBoundProject = "\u0001";
         clearPaneViews();
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN);
         root.setPadding(dp(26), dp(18), dp(26), dp(10));
@@ -7729,7 +7955,7 @@ public class MainActivity extends Activity {
         showPanel(d, box);
     }
 
-    private void newChat() { saveCurrentChat(); currentChatId = ""; messages.clear(); selectedFolder = projectView.length() > 0 ? projectView : "Inbox"; webSearchChat = false; savedChatScrollKnown = false; forceAutoScrollBottom = false; resetMessageWindowToLatest(); if (messageList != null) renderMessages(); }
+    private void newChat() { saveCurrentChat(); currentChatId = ""; messages.clear(); selectedFolder = projectView.length() > 0 ? projectView : "Inbox"; webSearchChat = false; savedChatScrollKnown = false; forceAutoScrollBottom = false; resetMessageWindowToLatest(); chatBoundId = "\u0001"; if (messageList != null) renderMessages(); }
     private void loadChat(Chat c) { currentChatId = c.id; selectedFolder = c.folder; if (!"Inbox".equals(c.folder)) projectView = c.folder; messages.clear(); messages.addAll(c.messages); webSearchChat = c.webSearch; if (c.model.length() > 0) prefs.edit().putString("model", c.model).putBoolean("modelSelected", true).apply(); savedChatScrollKnown = false; forceAutoScrollBottom = true; resetMessageWindowToLatest(); }
     private void saveCurrentChat() {
         if (!syncCurrentChatInMemory()) return;
@@ -7755,6 +7981,8 @@ public class MainActivity extends Activity {
         t.model = chatModelForSave();
         t.messages.clear();
         t.messages.addAll(messages);
+        t.listPreview = null;
+        t.listRecency = 0;
         return true;
     }
 
@@ -7808,9 +8036,13 @@ public class MainActivity extends Activity {
             currentChatId = "";
             messages.clear();
         }
+        if (pane == 0 && chatList != null) renderChatList();
+        else paneReady[0] = false;
+        chatBoundId = "\u0001";
         if (!chatWorkInFlight() && pane == 1 && messageList != null) {
             resetMessageWindowToLatest();
             renderMessages();
+            chatBoundId = currentChatId == null ? "" : currentChatId;
         }
     }
     private String chatModelForSave() { for (int i = messages.size() - 1; i >= 0; i--) if (messages.get(i).role.equals("assistant") && messages.get(i).model.length() > 0) return expandShortModel(messages.get(i).model); return activeAnswerModel(); }
@@ -8228,10 +8460,13 @@ public class MainActivity extends Activity {
     private void writeChatStoreIfDirty() {
         if (!chatsDirty) return;
         chatsDirty = false;
-        final String payload;
-        try { payload = chatStoreJson().toString(); }
+        final JSONObject snap;
+        try { snap = chatStoreJson(); }
         catch (Exception e) { chatsDirty = true; return; }
         new Thread(new Runnable() { @Override public void run() {
+            final String payload;
+            try { payload = snap.toString(); }
+            catch (Exception e) { chatsDirty = true; return; }
             synchronized (chatStoreWriteLock) {
                 try {
                     File dir = getFilesDir();
@@ -8320,6 +8555,13 @@ public class MainActivity extends Activity {
         return t;
     }
     private int messageTokens() {
+        int key = messages.size() * 997;
+        if (messages.size() > 0) {
+            Msg last = messages.get(messages.size() - 1);
+            key += (last.text == null ? 0 : last.text.length()) + last.promptTokens + last.toolTokens;
+            if (last.reasoning != null) key += last.reasoning.length();
+        }
+        if (key == messageTokKey) return messageTokCached;
         int t = 0;
         for (Msg m : messages) {
             if (isBusyStats(m.stats)) continue;
@@ -8327,15 +8569,23 @@ public class MainActivity extends Activity {
                     + (m.reasoning.length() == 0 ? 0 : estimateTokens(m.reasoning))
                     + requestImages(m).size() * 1200;
         }
+        messageTokKey = key;
+        messageTokCached = t;
         return t;
     }
     private int backgroundContextTokens() {
+        String folder = selectedFolder == null ? "" : selectedFolder;
+        int key = (webSearchAvailable() ? 1 : 0) + (memoryEnabled() ? 2 : 0);
+        key = 31 * key + folder.hashCode();
+        key = 31 * key + folderInstruction(folder).length();
+        key = 31 * key + memoryMd().length();
+        if (key == bgTokKey) return bgTokCached;
         int t = estimateTokens(buildCurrentTimeContext());
         try {
             String toolMemory = buildToolMemoryContext();
             if (toolMemory.length() > 0) t += estimateTokens(toolMemory);
-            String folder = buildFolderInstructionContext();
-            if (folder.length() > 0) t += estimateTokens(folder);
+            String folderCtx = buildFolderInstructionContext();
+            if (folderCtx.length() > 0) t += estimateTokens(folderCtx);
             String mem = buildUserMemoryContext();
             if (mem.length() > 0) t += estimateTokens(mem);
         } catch (Exception ignored) { }
@@ -8343,7 +8593,10 @@ public class MainActivity extends Activity {
         boolean memory = memoryEnabled();
         if (search || memory) t += estimateTokens(AgentTools.leanToolsPrompt(search, memory, false, false));
         if (search) t += 120;
-        return t + 24;
+        t += 24;
+        bgTokKey = key;
+        bgTokCached = t;
+        return t;
     }
     private Msg lastAssistantMessage() {
         if (messages.size() == 0) return null;
@@ -8432,7 +8685,12 @@ public class MainActivity extends Activity {
     private int dp(int v) { return Math.max(1, Math.round(v * uiScale())); }
     private float uiScale() { return getResources().getDisplayMetrics().widthPixels / BASE_WIDTH_DP; }
     private int fontOffset() { return prefs == null ? -1 : prefs.getInt("fontOffset", -1); }
-    private void setFontOffset(int offset) { prefs.edit().putInt("fontOffset", Math.max(-4, Math.min(4, offset))).apply(); }
+    private void setFontOffset(int offset) {
+        prefs.edit().putInt("fontOffset", Math.max(-4, Math.min(4, offset))).apply();
+        paneReady[0] = false;
+        paneReady[1] = false;
+        paneReady[2] = false;
+    }
     private void applyKeepScreenAwake() { if (prefs != null && prefs.getBoolean("keepScreenAwake", false)) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON); else if (!voiceMode || !voiceFullMode) getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON); }
     private void setTextPx(TextView v, int sp) { v.setTextSize(TypedValue.COMPLEX_UNIT_PX, dp(Math.max(8, sp + fontOffset()))); }
     private void toast(String s) { showNotice(s); }
@@ -8449,7 +8707,11 @@ public class MainActivity extends Activity {
         final TextView shown = notice;
         shown.postDelayed(new Runnable() { @Override public void run() { if (notice == shown) { removeScreenChild(shown); notice = null; } } }, 1800);
     }
-    private void hideKeyboard() { try { ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(root.getWindowToken(), 0); } catch (Exception ignored) { } }
+    private void hideKeyboard() {
+        View focused = getCurrentFocus();
+        if (!(focused instanceof EditText)) return;
+        hideKeyboardFrom(focused);
+    }
     private void hideKeyboardFrom(View v) { try { ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(v.getWindowToken(), 0); } catch (Exception ignored) { } }
 
     private void bindScrollIndicator(ScrollView target, int topMargin, int bottomMargin) {
@@ -8599,12 +8861,16 @@ public class MainActivity extends Activity {
     private void slidePaneIn() {
         if (root == null) return;
         root.animate().cancel();
-        float from = paneSlide == 0 ? 0f : (paneSlide < 0 ? dp(18) : -dp(18));
-        root.setAlpha(paneSlide == 0 ? 1f : 0.4f);
-        root.setTranslationX(from);
-        if (paneSlide == 0 && from == 0f) { root.setAlpha(1f); return; }
-        root.animate().alpha(1f).translationX(0).setDuration(150).setInterpolator(new DecelerateInterpolator()).withLayer().start();
+        if (paneSlide == 0) {
+            root.setAlpha(1f);
+            root.setTranslationX(0);
+            return;
+        }
+        float from = paneSlide < 0 ? dp(10) : -dp(10);
         paneSlide = 0;
+        root.setAlpha(0.82f);
+        root.setTranslationX(from);
+        root.animate().alpha(1f).translationX(0).setDuration(90).setInterpolator(new DecelerateInterpolator()).withLayer().start();
     }
 
     private void bindPress(final View v) {
@@ -8612,8 +8878,8 @@ public class MainActivity extends Activity {
         v.setOnTouchListener(new View.OnTouchListener() {
             @Override public boolean onTouch(View view, MotionEvent e) {
                 int action = e.getAction();
-                if (action == MotionEvent.ACTION_DOWN) view.animate().alpha(0.55f).setDuration(60).start();
-                else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) view.animate().alpha(1f).setDuration(120).start();
+                if (action == MotionEvent.ACTION_DOWN) view.animate().alpha(0.55f).setDuration(32).start();
+                else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) view.animate().alpha(1f).setDuration(70).start();
                 return false;
             }
         });
@@ -8922,8 +9188,12 @@ public class MainActivity extends Activity {
         }
         private void animateJump() {
             if (!isAttachedToWindow()) return;
+            if (!isShown()) {
+                postDelayed(tick, 90);
+                return;
+            }
             invalidate();
-            postDelayed(tick, 40);
+            postDelayed(tick, 32);
         }
         @Override protected void onDraw(Canvas c) {
             String w = word == null || word.length() == 0 ? "thinking..." : word;
@@ -9153,6 +9423,8 @@ public class MainActivity extends Activity {
         String id="", title="", folder="Inbox", model="";
         boolean webSearch=false, titleGenerated=false;
         long updatedAt = 0;
+        transient String listPreview;
+        transient long listRecency;
         ArrayList<Msg> messages=new ArrayList<Msg>();
         JSONObject toJson() throws Exception {
             JSONArray a=new JSONArray();
