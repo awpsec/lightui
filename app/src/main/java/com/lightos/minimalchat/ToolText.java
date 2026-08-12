@@ -5,6 +5,9 @@ import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
 /** Pure helpers for stripping tool markup and judging search follow-up needs (JVM-testable). */
 public final class ToolText {
     private ToolText() {}
@@ -1121,5 +1124,104 @@ public final class ToolText {
         int n = 0;
         for (SlashCommand c : SLASH_COMMANDS) n = Math.max(n, c.paletteName().length());
         return n;
+    }
+
+    /** OpenRouter-style `vendor/model` prefix, or empty. */
+    public static String modelVendor(String id) {
+        if (id == null) return "";
+        String s = id.trim();
+        int slash = s.indexOf('/');
+        if (slash <= 0) return "";
+        String v = s.substring(0, slash).trim();
+        if (v.length() == 0) return "";
+        if (v.contains(":") || v.contains(".")) return "";
+        return v.toLowerCase(Locale.US);
+    }
+
+    /**
+     * Provider shown in the model list: vendor (`anthropic`, `openai`) for OpenRouter ids,
+     * `endpoint` for custom servers.
+     */
+    public static String modelProviderLabel(String id, String source) {
+        if ("custom".equals(source)) return "endpoint";
+        String vendor = modelVendor(id);
+        if (vendor.length() > 0) return vendor;
+        return "openrouter";
+    }
+
+    /** Pinned models first (in pin order), then the rest in the original order. */
+    public static ArrayList<String> orderedModels(ArrayList<String> models, ArrayList<String> pinned) {
+        ArrayList<String> out = new ArrayList<String>();
+        if (pinned != null) {
+            for (int i = 0; i < pinned.size(); i++) {
+                String p = pinned.get(i);
+                if (p == null || p.trim().length() == 0) continue;
+                String clean = p.trim();
+                if (models != null && models.contains(clean) && !out.contains(clean)) out.add(clean);
+            }
+        }
+        if (models != null) {
+            for (int i = 0; i < models.size(); i++) {
+                String m = models.get(i);
+                if (m == null || m.trim().length() == 0) continue;
+                String clean = m.trim();
+                if (!out.contains(clean)) out.add(clean);
+            }
+        }
+        return out;
+    }
+
+    /** Rough token estimate: ~3.15 chars or 1.35× words, whichever is larger. */
+    public static int estimateTokens(String s) {
+        String text = s == null ? "" : s.trim();
+        if (text.length() == 0) return 0;
+        int chars = text.length();
+        int words = text.split("\\s+").length;
+        int byChars = (int) Math.ceil(chars / 3.15);
+        int byWords = (int) Math.ceil(words * 1.35);
+        return Math.max(1, Math.max(byChars, byWords));
+    }
+
+    /**
+     * Tokens in a chat-completions request body. Walks JSON so image data URLs
+     * are counted as a flat 1200 each instead of the base64 blob.
+     */
+    public static int estimateRequestTokens(JSONArray arr, JSONArray tools) {
+        int t = 24;
+        if (arr != null) {
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject o = arr.optJSONObject(i);
+                if (o == null) continue;
+                t += 12 + estimateTokens(o.optString("role", ""));
+                Object content = o.opt("content");
+                if (content instanceof String) t += estimateTokens((String) content);
+                else if (content instanceof JSONArray) {
+                    JSONArray parts = (JSONArray) content;
+                    for (int j = 0; j < parts.length(); j++) {
+                        JSONObject p = parts.optJSONObject(j);
+                        if (p == null) continue;
+                        String type = p.optString("type", "");
+                        if ("text".equals(type)) t += estimateTokens(p.optString("text", ""));
+                        else if ("image_url".equals(type)) t += 1200;
+                        else t += estimateTokens(p.optString("text", ""));
+                    }
+                }
+                t += estimateTokens(o.optString("tool_call_id", ""));
+                JSONArray calls = o.optJSONArray("tool_calls");
+                if (calls != null && calls.length() > 0) t += Math.max(24, estimateTokens(calls.toString()) / 4);
+            }
+        }
+        if (tools != null && tools.length() > 0) t += 80 + estimateTokens(tools.toString()) / 6;
+        return t;
+    }
+
+    public static int usagePromptTokens(JSONObject o) {
+        if (o == null) return 0;
+        JSONObject usage = o.optJSONObject("usage");
+        if (usage == null) return 0;
+        int n = usage.optInt("prompt_tokens", 0);
+        if (n <= 0) n = usage.optInt("input_tokens", 0);
+        if (n <= 0) n = usage.optInt("promptTokens", 0);
+        return Math.max(0, n);
     }
 }

@@ -108,7 +108,7 @@ public class MainActivity extends Activity {
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
     private static final String SEARCHING = "__searching__";
-    private static final String APP_VERSION = "1.0.30";
+    private static final String APP_VERSION = "1.0.31";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 120;
@@ -165,6 +165,7 @@ public class MainActivity extends Activity {
     private BorderWaveView voiceBorder;
     private final ArrayList<String> models = new ArrayList<String>();
     private final ArrayList<String> myModels = new ArrayList<String>();
+    private final ArrayList<String> pinnedModels = new ArrayList<String>();
     private final ArrayList<String> customEndpoints = new ArrayList<String>();
     private final HashMap<String, String> endpointKeys = new HashMap<String, String>();
     private final HashMap<String, Integer> modelContexts = new HashMap<String, Integer>();
@@ -999,27 +1000,29 @@ public class MainActivity extends Activity {
         LinearLayout list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
         if (myModels.size() == 0) list.addView(text("none added", 13, Color.rgb(120,120,120)));
-        for (int i = 0; i < myModels.size(); i++) {
-            final String m = myModels.get(i).trim();
+        ArrayList<String> ordered = ToolText.orderedModels(myModels, pinnedModels);
+        for (int i = 0; i < ordered.size(); i++) {
+            final String m = ordered.get(i).trim();
             if (m.length() == 0) continue;
-            LinearLayout line = row();
-            line.setPadding(0, dp(7), 0, dp(7));
-            TextView name = text(shortModel(m), 15, Color.WHITE);
+            LinearLayout wrap = new LinearLayout(this);
+            wrap.setOrientation(LinearLayout.HORIZONTAL);
+            wrap.setGravity(Gravity.CENTER_VERTICAL);
+            View row = modelListRow(m, m.equals(selectedModel()), pinnedModels.contains(m), i, true);
+            row.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { setModel(m); } });
+            row.setOnLongClickListener(new View.OnLongClickListener() { @Override public boolean onLongClick(View v) {
+                togglePinnedModel(m);
+                showSettingsPane();
+                return true;
+            } });
+            wrap.addView(row, new LinearLayout.LayoutParams(0, -2, 1));
             TextView remove = text("remove", 12, Color.LTGRAY);
             remove.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
+            remove.setPadding(dp(10), 0, 0, 0);
             remove.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { removeMyModel(m); } });
-            if ("custom".equals(modelSources.get(m))) {
-                ImageView link = new ImageView(this);
-                link.setImageResource(R.drawable.ic_link);
-                link.setColorFilter(Color.WHITE);
-                link.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-                link.setPadding(0, dp(5), dp(2), dp(11));
-                link.setTranslationY(-dp(2));
-                line.addView(link, new LinearLayout.LayoutParams(dp(15), dp(32)));
-            }
-            line.addView(name, new LinearLayout.LayoutParams(0, dp(32), 1));
-            line.addView(remove, new LinearLayout.LayoutParams(dp(82), dp(32)));
-            list.addView(line);
+            wrap.addView(remove, new LinearLayout.LayoutParams(-2, -2));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+            if (i > 0) lp.topMargin = dp(6);
+            list.addView(wrap, lp);
         }
         settings.addView(list);
     }
@@ -2620,6 +2623,7 @@ public class MainActivity extends Activity {
             long end = start;
             for (int round = 0; round < maxRounds; round++) {
                 boolean lastRound = round == maxRounds - 1;
+                rememberPromptTokens(assistant, arr, nativeTools && !lastRound ? tools : null);
                 JSONObject req = AgentTools.completionBody(model, arr, nativeTools ? tools : null, true, lastRound);
                 if (source.equals("openrouter")) req.put("usage", new JSONObject().put("include", true));
                 StreamRound sr;
@@ -2636,6 +2640,7 @@ public class MainActivity extends Activity {
                     throw e;
                 }
                 end = sr.endAt;
+                if (sr.promptTokens > 0) applyPromptTokens(assistant, sr.promptTokens);
                 if (sr.reasoning.length() > 0) {
                     if (allReasoning.length() > 0) allReasoning.append('\n');
                     allReasoning.append(sr.reasoning);
@@ -2662,6 +2667,7 @@ public class MainActivity extends Activity {
                             if (result.length() > 0) {
                                 arr.put(new JSONObject().put("role", "assistant").put("content", visible));
                                 arr.put(AgentTools.textResultUserMessage("fetch", fetchUrl, result));
+                                rememberPromptTokens(assistant, arr, nativeTools ? tools : null);
                                 continue;
                             }
                         }
@@ -2674,10 +2680,12 @@ public class MainActivity extends Activity {
                             if (result == null) result = "";
                             arr.put(new JSONObject().put("role", "assistant").put("content", visible));
                             arr.put(AgentTools.textResultUserMessage("web_search", refined, result));
+                            rememberPromptTokens(assistant, arr, nativeTools ? tools : null);
                             continue;
                         }
                     }
                     if (maybeForceWebSearch(round, includeSearchTool, seenSearchQueries, forceSearch, userText, assistant, arr, nativeTools, visible)) {
+                        rememberPromptTokens(assistant, arr, nativeTools ? tools : null);
                         continue;
                     }
                     finalAnswer = visible;
@@ -2750,7 +2758,9 @@ public class MainActivity extends Activity {
                         executed.add(call);
                     }
                 }
+                rememberPromptTokens(assistant, arr, nativeTools ? tools : null);
                 if (maybeForceWebSearch(round, includeSearchTool, seenSearchQueries, forceSearch, userText, assistant, arr, nativeTools, "")) {
+                    rememberPromptTokens(assistant, arr, nativeTools ? tools : null);
                     continue;
                 }
                 if (!AgentTools.continueAfter(executed, usable, round, maxRounds)) {
@@ -2805,6 +2815,7 @@ public class MainActivity extends Activity {
         String content = "";
         String reasoning = "";
         AgentTools.RoundState tools = new AgentTools.RoundState();
+        int promptTokens = 0;
         long endAt;
     }
 
@@ -2892,6 +2903,7 @@ public class MainActivity extends Activity {
             }
         }
         if (result == null) result = "";
+        addToolTokens(assistant, result);
         if (result.length() > 0 && assistant != null) {
             assistant.searchSources.clear();
             assistant.searchSources.addAll(extractSearchSources(result));
@@ -2907,6 +2919,7 @@ public class MainActivity extends Activity {
         String host = ToolText.sourceHost(url);
         ToolStep step = beginToolStep(assistant, "fetch", host.length() > 0 ? host : url);
         String result = fetchUrlForTool(url);
+        addToolTokens(assistant, result);
         if (assistant != null && url != null && url.length() > 0 && !assistant.searchSources.contains(url)) {
             assistant.searchSources.add(url);
             prefetchFavicons(assistant.searchSources);
@@ -3137,6 +3150,8 @@ public class MainActivity extends Activity {
             JSONObject err = chunk.optJSONObject("error");
             if (err != null) throw new RuntimeException(err.optString("message", err.toString()));
             AgentTools.absorbChunk(round.tools, chunk);
+            int used = ToolText.usagePromptTokens(chunk);
+            if (used > round.promptTokens) round.promptTokens = used;
             JSONArray choices = chunk.optJSONArray("choices");
             if (choices == null || choices.length() == 0) continue;
             JSONObject delta = choices.getJSONObject(0).optJSONObject("delta");
@@ -3156,6 +3171,8 @@ public class MainActivity extends Activity {
             AgentTools.absorbChunk(round.tools, resp);
             answer.append(extractMessageText(resp));
             reasoning.append(extractMessageReasoning(resp));
+            int used = ToolText.usagePromptTokens(resp);
+            if (used > round.promptTokens) round.promptTokens = used;
         }
         round.content = answer.toString();
         round.reasoning = reasoning.toString();
@@ -4750,25 +4767,103 @@ public class MainActivity extends Activity {
         final Dialog d = panel("models");
         LinearLayout box = panelBox();
         box.addView(panelTitle("models"));
+        TextView hint = text("hold to pin a favorite", 11, Color.rgb(120, 120, 120));
+        hint.setPadding(0, 0, 0, dp(8));
+        box.addView(hint);
         ScrollView scroller = new ScrollView(this);
         scroller.setVerticalScrollBarEnabled(false);
-        LinearLayout list = new LinearLayout(this);
+        final LinearLayout list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
         scroller.addView(list);
-        for (int i = 0; i < myModels.size(); i++) {
-            final String m = myModels.get(i);
-            TextView item = panelItem(shortModel(m), "");
-            if (m.equals(selectedModel())) item.setText(shortModel(m) + " *");
-            item.setSingleLine(true);
-            item.setEllipsize(android.text.TextUtils.TruncateAt.END);
-            item.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); setModel(m); } });
-            list.addView(item);
-        }
+        final Runnable[] render = new Runnable[1];
+        render[0] = new Runnable() { @Override public void run() {
+            list.removeAllViews();
+            ArrayList<String> ordered = ToolText.orderedModels(myModels, pinnedModels);
+            for (int i = 0; i < ordered.size(); i++) {
+                final String m = ordered.get(i);
+                boolean selected = m.equals(selectedModel());
+                boolean pinned = pinnedModels.contains(m);
+                View row = modelListRow(m, selected, pinned, i, false);
+                row.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); setModel(m); } });
+                row.setOnLongClickListener(new View.OnLongClickListener() { @Override public boolean onLongClick(View v) {
+                    togglePinnedModel(m);
+                    render[0].run();
+                    return true;
+                } });
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+                if (i > 0) lp.topMargin = dp(6);
+                list.addView(row, lp);
+            }
+        } };
+        render[0].run();
         box.addView(scroller, new LinearLayout.LayoutParams(-1, 0, 1));
         TextView cancel = panelAction("cancel");
         cancel.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); } });
         box.addView(cancel, new LinearLayout.LayoutParams(-1, dp(48)));
         showPanel(d, box);
+    }
+
+    private View modelListRow(String model, boolean selected, boolean pinned, int index, boolean settings) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setPadding(dp(10), dp(9), dp(10), dp(9));
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(index % 2 == 0 ? Color.BLACK : Color.rgb(16, 16, 16));
+        bg.setStroke(1, selected ? Color.rgb(88, 88, 88) : Color.rgb(34, 34, 34));
+        bg.setCornerRadius(dp(3));
+        row.setBackground(bg);
+
+        LinearLayout top = row();
+        top.setBackgroundColor(Color.TRANSPARENT);
+        TextView name = text(shortModel(model), 15, Color.WHITE);
+        name.setSingleLine(true);
+        name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        name.setBackgroundColor(Color.TRANSPARENT);
+        top.addView(name, new LinearLayout.LayoutParams(0, -2, 1));
+        if (pinned) {
+            TextView pin = text("pin", 11, Color.rgb(135, 135, 135));
+            pin.setBackgroundColor(Color.TRANSPARENT);
+            pin.setPadding(dp(8), 0, 0, 0);
+            top.addView(pin, new LinearLayout.LayoutParams(-2, -2));
+        }
+        if (selected && !settings) {
+            TextView on = text("on", 11, Color.rgb(180, 180, 180));
+            on.setBackgroundColor(Color.TRANSPARENT);
+            on.setPadding(dp(8), 0, 0, 0);
+            top.addView(on, new LinearLayout.LayoutParams(-2, -2));
+        }
+        row.addView(top, new LinearLayout.LayoutParams(-1, -2));
+        TextView sub = text(modelRowSubtitle(model), 11, Color.rgb(135, 135, 135));
+        sub.setSingleLine(true);
+        sub.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        sub.setBackgroundColor(Color.TRANSPARENT);
+        sub.setPadding(0, dp(2), 0, 0);
+        row.addView(sub, new LinearLayout.LayoutParams(-1, -2));
+        return row;
+    }
+
+    private String modelRowSubtitle(String model) {
+        String src = modelSource(model);
+        String label = ToolText.modelProviderLabel(model, src);
+        if ("custom".equals(src)) {
+            String host = ToolText.sourceHost(modelEndpoint(model));
+            return host.length() > 0 ? "endpoint · " + host : "endpoint";
+        }
+        Integer ctx = modelContexts.get(model);
+        if (ctx != null && ctx > 0) return label + " · " + shortTokens(ctx);
+        return label;
+    }
+
+    private void togglePinnedModel(String model) {
+        if (model == null || model.length() == 0 || !myModels.contains(model)) return;
+        if (pinnedModels.contains(model)) {
+            pinnedModels.remove(model);
+            toast("unpinned");
+        } else {
+            pinnedModels.add(model);
+            toast("pinned · top of list");
+        }
+        savePinnedModels();
     }
 
     private void addModel() {
@@ -4812,7 +4907,7 @@ public class MainActivity extends Activity {
             for (int i = 0; i < models.size(); i++) {
                 final String m = models.get(i);
                 if (modelMatches(m, q)) {
-                    TextView item = searchResultItem(shortModel(m), modelSourceLabel(m));
+                    TextView item = searchResultItem(shortModel(m), modelRowSubtitle(m));
                     item.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); addMyModel(m); } });
                     list.addView(item);
                     shown++;
@@ -4845,7 +4940,9 @@ public class MainActivity extends Activity {
 
     private void removeMyModel(String m) {
         myModels.remove(m);
+        pinnedModels.remove(m);
         saveMyModels();
+        savePinnedModels();
         if (m.equals(selectedModel())) prefs.edit().remove("model").putBoolean("modelSelected", false).apply();
         showSettingsPane();
     }
@@ -4913,7 +5010,7 @@ public class MainActivity extends Activity {
                     }
                     models.clear(); models.addAll(found); modelContexts.clear(); modelContexts.putAll(foundContexts); modelSources.clear(); modelSources.putAll(foundSources); modelEndpoints.clear(); modelEndpoints.putAll(foundEndpoints); audioOutputModels.clear(); audioOutputModels.addAll(foundAudioOutput); audioInputModels.clear(); audioInputModels.addAll(foundAudioInput); reasoningModels.clear(); reasoningModels.addAll(foundReasoning); speedModels.clear(); speedModels.addAll(foundSpeed);
                     for (String m : found) if ("custom".equals(foundSources.get(m)) && !myModels.contains(m)) myModels.add(m);
-                    saveCustomEndpoints(); saveEndpointKeys(); saveModels(); saveModelContexts(); saveModelSources(); saveModelEndpoints(); saveAudioOutputModels(); saveAudioInputModels(); saveReasoningModels(); saveSpeedModels(); saveMyModels();
+                    saveCustomEndpoints(); saveEndpointKeys(); saveModels(); saveModelContexts(); saveModelSources(); saveModelEndpoints(); saveAudioOutputModels(); saveAudioInputModels(); saveReasoningModels(); saveSpeedModels(); saveMyModels(); savePinnedModels();
                     prefs.edit().putLong("modelsRefreshedAt", System.currentTimeMillis()).apply();
                     if (manual) toast("models updated");
                     if (manual || pane == 2) renderPane();
@@ -5114,10 +5211,10 @@ public class MainActivity extends Activity {
         endpointKeys.remove(endpoint);
         for (int i = models.size() - 1; i >= 0; i--) {
             String m = models.get(i);
-            if (endpoint.equals(modelEndpoints.get(m))) { if (m.equals(selectedModel())) removedSelected = true; models.remove(i); myModels.remove(m); modelContexts.remove(m); modelSources.remove(m); modelEndpoints.remove(m); }
+            if (endpoint.equals(modelEndpoints.get(m))) { if (m.equals(selectedModel())) removedSelected = true; models.remove(i); myModels.remove(m); pinnedModels.remove(m); modelContexts.remove(m); modelSources.remove(m); modelEndpoints.remove(m); }
         }
         if (removedSelected) prefs.edit().remove("model").putBoolean("modelSelected", false).apply();
-        saveCustomEndpoints(); saveEndpointKeys(); saveModels(); saveMyModels(); saveModelContexts(); saveModelSources(); saveModelEndpoints();
+        saveCustomEndpoints(); saveEndpointKeys(); saveModels(); saveMyModels(); savePinnedModels(); saveModelContexts(); saveModelSources(); saveModelEndpoints();
     }
 
     private void initTts() {
@@ -7662,10 +7759,12 @@ public class MainActivity extends Activity {
         for (String m : models) if (!modelSources.containsKey(m)) modelSources.put(m, "openrouter");
         for (String m : models) if ("custom".equals(modelSources.get(m)) && !modelEndpoints.containsKey(m) && customEndpointBase().length() > 0) modelEndpoints.put(m, customEndpointBase());
         String savedMyModels = prefs.getString("myModels", ""); if (savedMyModels.length() > 0) for (String m : savedMyModels.split("\\n")) { String clean = m.trim(); if (clean.length() > 0 && !myModels.contains(clean)) myModels.add(clean); }
+        String savedPins = prefs.getString("pinnedModels", ""); if (savedPins.length() > 0) for (String m : savedPins.split("\\n")) { String clean = m.trim(); if (clean.length() > 0 && myModels.contains(clean) && !pinnedModels.contains(clean)) pinnedModels.add(clean); }
         String selected = prefs.getString("model", "").trim();
         if (prefs.getBoolean("modelSelected", false) && selected.length() > 0 && !myModels.contains(selected)) myModels.add(selected);
         saveModels();
         saveMyModels();
+        savePinnedModels();
     }
     private JSONObject folderInstructionsJson() { JSONObject o = new JSONObject(); try { for (String folder : folderInstructions.keySet()) { String instruction = folderInstructions.get(folder); if (instruction != null && instruction.trim().length() > 0 && folders.contains(folder)) o.put(folder, instruction.trim()); } } catch (Exception ignored) { } return o; }
     private String folderInstruction(String folder) { String s = folderInstructions.get(folder == null ? "" : folder); return s == null ? "" : s.trim(); }
@@ -7758,6 +7857,7 @@ public class MainActivity extends Activity {
         prefs.edit().putString("endpointKeys", o.toString()).apply();
     }
     private void saveMyModels() { prefs.edit().putString("myModels", join(myModels)).apply(); }
+    private void savePinnedModels() { prefs.edit().putString("pinnedModels", join(pinnedModels)).apply(); }
     private String savedApiKey() { return prefs.getString("apiKey", ""); }
     private void saveApiKey() {
         SharedPreferences.Editor e = prefs.edit();
@@ -7768,7 +7868,7 @@ public class MainActivity extends Activity {
     private void removeCustomModels() {
         for (int i = models.size() - 1; i >= 0; i--) {
             String m = models.get(i);
-            if ("custom".equals(modelSources.get(m))) { models.remove(i); myModels.remove(m); modelContexts.remove(m); modelSources.remove(m); modelEndpoints.remove(m); }
+            if ("custom".equals(modelSources.get(m))) { models.remove(i); myModels.remove(m); pinnedModels.remove(m); modelContexts.remove(m); modelSources.remove(m); modelEndpoints.remove(m); }
         }
     }
     private String selectedModel() { return prefs.getBoolean("modelSelected", false) ? prefs.getString("model", "") : ""; }
@@ -7777,20 +7877,22 @@ public class MainActivity extends Activity {
     private String activeAnswerModel() { return voiceMode && voiceFullMode && voiceAnswerModel().length() > 0 ? voiceAnswerModel() : selectedModel(); }
     private String modelSource(String model) { return modelSources.containsKey(model) ? modelSources.get(model) : "openrouter"; }
     private String modelEndpoint(String model) { String endpoint = modelEndpoints.get(model); return endpoint == null ? customEndpointBase() : endpoint; }
-    private String modelSourceLabel(String m) { return "custom".equals(modelSources.get(m)) ? "endpoint" : "openrouter"; }
-    private String modelLabel() { String m = selectedModel(); return m.length() == 0 ? "model" : shortModel(m); }
+    private String modelSourceLabel(String m) { return ToolText.modelProviderLabel(m, modelSource(m)); }
+    private String modelLabel() {
+        String m = selectedModel();
+        if (m.length() == 0) return "model";
+        String name = shortModel(m);
+        if ("custom".equals(selectedModelSource())) return name;
+        String vendor = ToolText.modelVendor(m);
+        if (vendor.length() == 0) return name;
+        String lower = name.toLowerCase(Locale.US);
+        if (lower.startsWith(vendor) || lower.contains(vendor)) return name;
+        return vendor + " · " + name;
+    }
     private String messageModelLabel(Msg m) { return m.model.length() == 0 ? "assistant" : m.model; }
     private String shortModel(String m) { int slash = m.lastIndexOf('/'); return slash >= 0 ? m.substring(slash + 1) : m; }
     private String thoughtDuration(long ms) { long s = Math.max(1, Math.round(ms / 1000f)); long m = s / 60; long r = s % 60; return m > 0 ? m + " minutes and " + r + " seconds" : s + " seconds"; }
-    private int estimateTokens(String s) {
-        String text = s == null ? "" : s.trim();
-        if (text.length() == 0) return 0;
-        int chars = text.length();
-        int words = text.split("\\s+").length;
-        int byChars = (int)Math.ceil(chars / 3.15);
-        int byWords = (int)Math.ceil(words * 1.35);
-        return Math.max(1, Math.max(byChars, byWords));
-    }
+    private int estimateTokens(String s) { return ToolText.estimateTokens(s); }
     private String requestText(Msg m) {
         String t = m.text == null ? "" : m.text;
         if ("assistant".equals(m.role)) t = sanitizeAssistantText(t);
@@ -7799,7 +7901,7 @@ public class MainActivity extends Activity {
         }
         return t;
     }
-    private int contextTokens() {
+    private int messageTokens() {
         int t = 0;
         for (Msg m : messages) {
             if (isBusyStats(m.stats)) continue;
@@ -7807,12 +7909,85 @@ public class MainActivity extends Activity {
                     + (m.reasoning.length() == 0 ? 0 : estimateTokens(m.reasoning))
                     + requestImages(m).size() * 1200;
         }
+        return t;
+    }
+    private int backgroundContextTokens() {
+        int t = estimateTokens(buildCurrentTimeContext());
+        try {
+            String toolMemory = buildToolMemoryContext();
+            if (toolMemory.length() > 0) t += estimateTokens(toolMemory);
+            String folder = buildFolderInstructionContext();
+            if (folder.length() > 0) t += estimateTokens(folder);
+            String mem = buildUserMemoryContext();
+            if (mem.length() > 0) t += estimateTokens(mem);
+        } catch (Exception ignored) { }
+        boolean search = webSearchAvailable();
+        boolean memory = memoryEnabled();
+        if (search || memory) t += estimateTokens(AgentTools.leanToolsPrompt(search, memory, false, false));
+        if (search) t += 120;
         return t + 24;
+    }
+    private Msg lastAssistantMessage() {
+        if (messages.size() == 0) return null;
+        Msg last = messages.get(messages.size() - 1);
+        return last != null && "assistant".equals(last.role) ? last : null;
+    }
+    private int lastPromptTokens() {
+        Msg m = lastAssistantMessage();
+        return m == null ? 0 : m.promptTokens;
+    }
+    private int lastToolTokens() {
+        Msg m = lastAssistantMessage();
+        return m == null ? 0 : m.toolTokens;
+    }
+    private int contextTokens() {
+        int live = messageTokens() + backgroundContextTokens() + lastToolTokens();
+        int prompt = lastPromptTokens();
+        return prompt > live ? prompt : live;
     }
     private int contextMaxTokens() { Integer max = modelContexts.get(selectedModel()); return max == null ? 0 : max; }
     private float contextPercent() { int max = contextMaxTokens(); return max <= 0 ? 0f : Math.min(100f, (float) (contextTokens() * 100.0 / max)); }
     private String contextPercentText() { return String.format(Locale.US, "%.1f%%", contextPercent()); }
-    private void showContext() { int max = contextMaxTokens(); toast(max <= 0 ? shortTokens(contextTokens()) + "/? - refresh model catalog" : shortTokens(contextTokens()) + "/" + shortTokens(max) + " - " + contextPercentText()); }
+    private void showContext() {
+        int used = contextTokens();
+        int max = contextMaxTokens();
+        int chat = messageTokens();
+        int sys = backgroundContextTokens();
+        int tools = lastToolTokens();
+        int prompt = lastPromptTokens();
+        String cap = max <= 0 ? "?" : shortTokens(max);
+        StringBuilder b = new StringBuilder();
+        b.append(shortTokens(used)).append("/").append(cap);
+        b.append("  chat ").append(shortTokens(chat));
+        if (sys > 0) b.append("  sys ").append(shortTokens(sys));
+        if (tools > 0) b.append("  tools ").append(shortTokens(tools));
+        if (prompt > chat + sys) b.append("  req ").append(shortTokens(prompt));
+        if (max <= 0) b.append("  refresh model catalog");
+        toast(b.toString());
+    }
+    private void applyPromptTokens(final Msg assistant, int n) {
+        if (assistant == null || n <= 0) return;
+        if (n > assistant.promptTokens) assistant.promptTokens = n;
+        refreshContextMeter();
+    }
+    private void rememberPromptTokens(final Msg assistant, JSONArray arr, JSONArray tools) {
+        applyPromptTokens(assistant, ToolText.estimateRequestTokens(arr, tools));
+    }
+    private void addToolTokens(Msg assistant, String payload) {
+        if (assistant == null) return;
+        int n = estimateTokens(payload);
+        if (n > 0) assistant.toolTokens += n;
+        refreshContextMeter();
+    }
+    private void refreshContextMeter() {
+        runOnUiThread(new Runnable() { @Override public void run() {
+            if (meter != null) { meter.percent = contextPercent(); meter.invalidate(); }
+            if (contextText != null) contextText.setText(contextPercentText());
+        } });
+    }
+    private int estimateRequestTokens(JSONArray arr, JSONArray tools) {
+        return ToolText.estimateRequestTokens(arr, tools);
+    }
     private String shortTokens(int n) { return n >= 1000 ? Math.round(n / 1000.0) + "k" : String.valueOf(n); }
     private String friendlyError(Exception e) { String msg = e.getMessage(); if (msg == null || msg.length() == 0) msg = e.getClass().getSimpleName(); msg = msg.replace('\n', ' ').trim(); return msg.length() > 120 ? msg.substring(0, 120) : msg; }
     private String detailedError(Exception e) { String msg = e.getMessage(); if (msg == null || msg.length() == 0) msg = e.getClass().getSimpleName(); msg = msg.replace('\n', ' ').trim(); return msg.length() > 700 ? msg.substring(0, 700) : msg; }
@@ -7969,13 +8144,31 @@ public class MainActivity extends Activity {
     private String shortPanelText(String s) { String clean = (s == null ? "" : s).replace('\n', ' ').trim(); return clean.length() > 52 ? clean.substring(0, 52) + "..." : clean; }
 
     private TextView searchResultItem(String primary, String secondary) {
-        TextView v = text(primary == null ? "" : primary.toLowerCase(Locale.US), 18, Color.WHITE);
+        String p = primary == null ? "" : primary;
+        String s = secondary == null ? "" : secondary;
+        TextView v = text("", 16, Color.WHITE);
+        if (s.length() == 0) v.setText(p);
+        else {
+            SpannableStringBuilder b = new SpannableStringBuilder();
+            b.append(p);
+            b.append('\n');
+            int start = b.length();
+            b.append(s);
+            b.setSpan(new RelativeSizeSpan(0.7f), start, b.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            b.setSpan(new ForegroundColorSpan(Color.rgb(135, 135, 135)), start, b.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            v.setText(b);
+        }
         v.setGravity(Gravity.CENTER_VERTICAL);
-        v.setPadding(dp(26), 0, dp(18), 0);
-        v.setMinHeight(dp(64));
-        v.setSingleLine(true);
-        v.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        v.setBackground(grayBorder());
+        v.setPadding(dp(12), dp(10), dp(12), dp(10));
+        v.setMinHeight(dp(52));
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(Color.BLACK);
+        bg.setStroke(1, Color.rgb(34, 34, 34));
+        bg.setCornerRadius(dp(3));
+        v.setBackground(bg);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.topMargin = dp(6);
+        v.setLayoutParams(lp);
         return v;
     }
 
@@ -8310,7 +8503,7 @@ public class MainActivity extends Activity {
     public static class Msg {
         String role, text, imageBase64 = "", imageMime = "", stats, model, replyQuote, reasoning = "", memorySavedText = "";
         boolean slowVoice = false, reasoningCapable = false, thinkingExpanded = false, searchExpanded = false, memorySaved = false, memoryExpanded = false, ttsRequested = false, ttsPrefetching = false, ttsStarted = false, ttsPlaying = false, ttsStartDelayDone = false, streamDone = false, skipImagesInRequest = false;
-        int spokenChars = 0, ttsPlaybackFailures = 0, voiceSessionId = 0, thinkingAnimStep = 0;
+        int spokenChars = 0, ttsPlaybackFailures = 0, voiceSessionId = 0, thinkingAnimStep = 0, promptTokens = 0, toolTokens = 0;
         long startedAt = System.currentTimeMillis(), thoughtMs = 0, jumpAnimStartMs = 0;
         String jumpAnimWord = "";
         transient CharSequence bodyDisplay;
@@ -8354,7 +8547,7 @@ public class MainActivity extends Activity {
                 if (img == null || img.base64 == null || img.base64.length() == 0) continue;
                 imgs.put(new JSONObject().put("data", img.base64).put("mime", img.mime == null || img.mime.length() == 0 ? "image/jpeg" : img.mime));
             }
-            return new JSONObject().put("role",role).put("text",text).put("image",imageBase64).put("mime",imageMime).put("images",imgs).put("skipImagesInRequest",skipImagesInRequest).put("stats",stats).put("model",model).put("replyQuote",replyQuote).put("reasoning",reasoning).put("thoughtMs",thoughtMs).put("memorySaved",memorySaved).put("memorySavedText",memorySavedText).put("searchSources",src).put("toolSteps",steps);
+            return new JSONObject().put("role",role).put("text",text).put("image",imageBase64).put("mime",imageMime).put("images",imgs).put("skipImagesInRequest",skipImagesInRequest).put("stats",stats).put("model",model).put("replyQuote",replyQuote).put("reasoning",reasoning).put("thoughtMs",thoughtMs).put("memorySaved",memorySaved).put("memorySavedText",memorySavedText).put("searchSources",src).put("toolSteps",steps).put("promptTokens",promptTokens).put("toolTokens",toolTokens);
         }
         static Msg fromJson(JSONObject o) {
             Msg m = new Msg(o.optString("role"),o.optString("text"),o.optString("image"),o.optString("mime"),o.optString("stats"),o.optString("model"),o.optString("replyQuote"));
@@ -8363,6 +8556,8 @@ public class MainActivity extends Activity {
             m.memorySaved = o.optBoolean("memorySaved", false);
             m.memorySavedText = o.optString("memorySavedText", "");
             m.skipImagesInRequest = o.optBoolean("skipImagesInRequest", false);
+            m.promptTokens = o.optInt("promptTokens", 0);
+            m.toolTokens = o.optInt("toolTokens", 0);
             JSONArray imgs = o.optJSONArray("images");
             if (imgs != null && imgs.length() > 0) {
                 m.images.clear();

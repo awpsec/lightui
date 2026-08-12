@@ -2,6 +2,9 @@ package com.lightos.minimalchat;
 
 import java.util.ArrayList;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
 public class ToolTextTest {
     private static int failed = 0;
 
@@ -260,6 +263,52 @@ public class ToolTextTest {
         assertTrue("unknown slash is not parsed", ToolText.parseSlash("/nope") == null);
         assertTrue("search takes args", ToolText.slashByName("search") != null && ToolText.slashByName("search").takesArgs);
         assertTrue("help has no args", ToolText.slashByName("help") != null && !ToolText.slashByName("help").takesArgs);
+
+        assertEq("vendor from openrouter id", "anthropic", ToolText.modelVendor("anthropic/claude-sonnet-4"));
+        assertEq("vendor openai", "openai", ToolText.modelVendor("openai/gpt-4o-mini"));
+        assertEq("vendor none for bare id", "", ToolText.modelVendor("gpt-4o-mini"));
+        assertEq("vendor none for url", "", ToolText.modelVendor("https://api.example.com/v1"));
+        assertEq("provider custom", "endpoint", ToolText.modelProviderLabel("llama3", "custom"));
+        assertEq("provider vendor", "anthropic", ToolText.modelProviderLabel("anthropic/claude-sonnet-4", "openrouter"));
+        assertEq("provider fallback", "openrouter", ToolText.modelProviderLabel("gpt-4o-mini", "openrouter"));
+
+        ArrayList<String> models = new ArrayList<String>();
+        models.add("openai/gpt-4o-mini");
+        models.add("anthropic/claude-sonnet-4");
+        models.add("google/gemini-2.0-flash-001");
+        ArrayList<String> pinned = new ArrayList<String>();
+        pinned.add("google/gemini-2.0-flash-001");
+        pinned.add("missing/gone");
+        pinned.add("anthropic/claude-sonnet-4");
+        ArrayList<String> ordered = ToolText.orderedModels(models, pinned);
+        assertEq("pin first", "google/gemini-2.0-flash-001", ordered.get(0));
+        assertEq("pin second", "anthropic/claude-sonnet-4", ordered.get(1));
+        assertEq("rest after pins", "openai/gpt-4o-mini", ordered.get(2));
+        assertTrue("pin order size", ordered.size() == 3);
+
+        try {
+            JSONArray arr = new JSONArray();
+            arr.put(new JSONObject().put("role", "user").put("content", "why is ddr5 expensive"));
+            int small = ToolText.estimateRequestTokens(arr, null);
+            StringBuilder dump = new StringBuilder();
+            for (int i = 0; i < 80; i++) dump.append("[1] Title: The DDR5 Price Crisis\nURL: https://example.com/ddr5\nRAM prices surged in 2026 because of supply.\n\n");
+            arr.put(new JSONObject().put("role", "tool").put("tool_call_id", "call_1").put("content", dump.toString()));
+            int big = ToolText.estimateRequestTokens(arr, null);
+            assertTrue("search dump counted in request", big > small + 800);
+            JSONArray parts = new JSONArray();
+            parts.put(new JSONObject().put("type", "text").put("text", "see photo"));
+            parts.put(new JSONObject().put("type", "image_url").put("image_url",
+                    new JSONObject().put("url", "data:image/jpeg;base64," + dump.toString())));
+            JSONArray imgArr = new JSONArray();
+            imgArr.put(new JSONObject().put("role", "user").put("content", parts));
+            int imgTok = ToolText.estimateRequestTokens(imgArr, null);
+            assertTrue("image data url not counted as base64", imgTok < 5000);
+            JSONObject usage = new JSONObject().put("usage", new JSONObject().put("prompt_tokens", 6120));
+            assertTrue("usage prompt tokens", ToolText.usagePromptTokens(usage) == 6120);
+        } catch (Exception e) {
+            System.err.println("FAIL request token tests: " + e);
+            failed++;
+        }
 
         if (failed > 0) { System.err.println(failed + " failed"); System.exit(1); }
         System.out.println("all passed");
