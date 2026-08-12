@@ -107,7 +107,7 @@ public class MainActivity extends Activity {
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
     private static final String SEARCHING = "__searching__";
-    private static final String APP_VERSION = "1.0.25";
+    private static final String APP_VERSION = "1.0.26";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 64;
@@ -195,6 +195,7 @@ public class MainActivity extends Activity {
     private boolean messageWindowReady = false, renderingMessages = false, savedChatScrollKnown = false, restoreScrollOnce = false, forceAutoScrollBottom = false, userAtChatBottom = true, voiceMode = false, voiceFullMode = false, voiceThinking = false, voiceAwaitingSpeechResult = false, ttsReady = false, hookVoiceMode = false, projectEditorOpen = false, recordingFallback = false, wavRecording = false, wavSubmitAfterStop = false, webSearchChat = false;
     private boolean forceSearchThisTurn = false, researchThisTurn = false;
     private volatile boolean turnForceSearch = false, turnResearch = false;
+    private final HashSet<String> endpointsWithoutNativeTools = new HashSet<String>();
 
     @Override public void onCreate(Bundle b) {
         super.onCreate(b);
@@ -2537,13 +2538,19 @@ public class MainActivity extends Activity {
     }
 
     private void callOpenRouter(String key, String source, String model, final Msg assistant, String userText, String pendingUserMemoryNote, String pendingUserMemoryRemoval) {
-        long start = System.nanoTime(), headersAt = start;
+        long start = System.nanoTime();
         try {
-            JSONObject body = new JSONObject(); body.put("model", model);
+            boolean research = turnResearch;
+            turnResearch = false;
             JSONArray arr = new JSONArray();
             String searchContext = buildSearchContext(userText);
-            if (searchContext.length() > 0) { assistant.searchSources.clear(); assistant.searchSources.addAll(lastSearchSources); arr.put(new JSONObject().put("role", "system").put("content", searchContext)); }
-            addBackgroundSystemContext(arr, true, searchContext.length() > 0);
+            if (searchContext.length() > 0) {
+                assistant.searchSources.clear();
+                assistant.searchSources.addAll(lastSearchSources);
+                arr.put(new JSONObject().put("role", "system").put("content", searchContext));
+            }
+            boolean searchAlready = searchContext.length() > 0;
+            addBackgroundSystemContext(arr, true, searchAlready && !research, true, true);
             if (assistant.slowVoice) arr.put(new JSONObject().put("role", "system").put("content", "This is a spoken two-way voice conversation. Reply in plain text only. Do not use markdown, headings, bullets, tables, code blocks, or formatting symbols. Keep the response natural for text-to-speech."));
             for (Msg m : messages) {
                 if (isBusyStats(m.stats)) continue;
@@ -2560,114 +2567,115 @@ public class MainActivity extends Activity {
                 } else one.put("content", requestText(m));
                 arr.put(one);
             }
-            boolean streaming = true;
-            body.put("messages", arr);
-            if (source.equals("openrouter")) body.put("usage", new JSONObject().put("include", true));
-            body.put("stream", streaming);
-            HttpURLConnection c = (HttpURLConnection) new URL(chatCompletionsUrl(source, model)).openConnection();
-            c.setRequestMethod("POST"); c.setConnectTimeout(30000); c.setReadTimeout(120000); c.setDoOutput(true);
-            if (key.length() > 0) c.setRequestProperty("Authorization", "Bearer " + key);
-            c.setRequestProperty("Content-Type", "application/json");
-            c.setRequestProperty("Accept", "text/event-stream, application/json");
-            if (source.equals("openrouter")) { c.setRequestProperty("HTTP-Referer", "https://minimal.chat/android"); c.setRequestProperty("X-Title", "chat"); }
-            OutputStream os = c.getOutputStream(); os.write(body.toString().getBytes(StandardCharsets.UTF_8)); os.close();
-            headersAt = System.nanoTime(); int code = c.getResponseCode();
-            if (code >= 400) throw new RuntimeException(readAll(c.getErrorStream()));
-            final StringBuilder answer = new StringBuilder();
-            final StringBuilder reasoning = new StringBuilder();
-            if (streaming) {
-                BufferedReader br = new BufferedReader(new InputStreamReader(c.getInputStream(), StandardCharsets.UTF_8));
-                StringBuilder nonSse = new StringBuilder();
-                boolean[] inThinkTag = new boolean[]{false};
-                String line;
-                while ((line = br.readLine()) != null) {
-                    line = line.trim();
-                    if (!line.startsWith("data:")) { if (line.length() > 0) nonSse.append(line); continue; }
-                    String data = line.substring(5).trim();
-                    if ("[DONE]".equals(data)) break;
-                    JSONObject chunk = new JSONObject(data);
-                    JSONArray choices = chunk.optJSONArray("choices");
-                    if (choices == null || choices.length() == 0) continue;
-                    JSONObject delta = choices.getJSONObject(0).optJSONObject("delta");
-                    if (delta == null) continue;
-                    String content = cleanJsonString(delta, "content");
-                    String thought = reasoningDelta(delta);
-                    if (content.length() == 0 && thought.length() == 0) continue;
-                    appendReasoningAwareContent(content, answer, reasoning, inThinkTag);
-                    reasoning.append(thought);
-                    final String partial = answer.toString();
-                    final String partialReasoning = reasoning.toString();
-                    runOnUiThread(new Runnable() { @Override public void run() { updateStreamingAssistant(assistant, partial, partialReasoning); } });
-                }
-                br.close();
-                if (answer.length() == 0 && reasoning.length() == 0 && nonSse.length() > 0) {
-                    JSONObject resp = new JSONObject(nonSse.toString());
-                    answer.append(extractMessageText(resp));
-                    reasoning.append(extractMessageReasoning(resp));
-                }
-            } else {
-                JSONObject resp = new JSONObject(readAll(c.getInputStream()));
-                answer.append(extractMessageText(resp));
-                reasoning.append(extractMessageReasoning(resp));
-            }
-            long end = System.nanoTime();
-            String finalAnswer = sanitizeAssistantText(answer.toString());
-            String keptAnswer = finalAnswer;
-            boolean keptUsable = ToolText.isUsableFollowupAnswer(keptAnswer);
-            // Prefer tool calls in the visible answer. Only mine CoT when the answer itself is empty/unusable —
-            // thinking models narrate web_search(...) constantly and that must not wipe a finished reply.
-            String toolQuery = webSearchToolQuery(answer.toString());
-            if (toolQuery.length() == 0 && !keptUsable) toolQuery = webSearchToolQuery(reasoning.toString());
-            boolean hasSearchContext = lastSearchResult.length() > 0 || assistant.searchSources.size() > 0;
-            boolean research = turnResearch;
-            turnResearch = false;
-            // needsSearchFollowup keeps usable answers, but still honors brief-ack + SEARCH: tool calls.
-            boolean needsSearchAnswer = research
-                    || ToolText.needsSearchFollowup(answer.toString(), finalAnswer, hasSearchContext)
-                    || (toolQuery.length() > 0 && !keptUsable)
-                    || (hasSearchContext && !keptUsable);
-            if (needsSearchAnswer) {
-                runOnUiThread(new Runnable() { @Override public void run() {
-                    if (assistant.thoughtMs == 0 && assistant.reasoningCapable) {
-                        assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt);
+            String endpointUrl = chatCompletionsUrl(source, model);
+            boolean nativeTools = !endpointsWithoutNativeTools.contains(endpointUrl);
+            boolean includeSearchTool = webSearchAvailable() && (!searchAlready || research);
+            JSONArray tools = AgentTools.openaiTools(includeSearchTool, memoryEnabled());
+            if (tools.length() == 0) nativeTools = false;
+            int maxRounds = AgentTools.maxRounds(research);
+            StringBuilder allReasoning = new StringBuilder();
+            String finalAnswer = "";
+            String lastRaw = "";
+            ArrayList<String> seenSearchQueries = new ArrayList<String>();
+            long end = start;
+            for (int round = 0; round < maxRounds; round++) {
+                boolean lastRound = round == maxRounds - 1;
+                JSONObject req = AgentTools.completionBody(model, arr, nativeTools ? tools : null, true, lastRound);
+                if (source.equals("openrouter")) req.put("usage", new JSONObject().put("include", true));
+                StreamRound sr;
+                try {
+                    sr = streamChatCompletion(req, key, source, assistant);
+                } catch (RuntimeException e) {
+                    if (nativeTools && AgentTools.looksLikeToolsUnsupported(e.getMessage())) {
+                        nativeTools = false;
+                        endpointsWithoutNativeTools.add(endpointUrl);
+                        round--;
+                        continue;
                     }
-                    // Keep a usable partial on screen unless we're replacing it; only clear when empty.
-                    if (!keptUsable) assistant.text = "";
-                    assistant.stats = SEARCHING;
-                    // Fresh wave phase for "searching" (don't continue the thinking cycle mid-pause).
-                    assistant.jumpAnimStartMs = 0L;
-                    assistant.jumpAnimWord = "";
-                    forceAutoScrollBottom = userAtChatBottom;
-                    renderMessages();
-                } });
-                String result = lastSearchResult;
-                String queryForFollowup = lastSearchQuery.length() > 0 ? lastSearchQuery : (userText == null ? "" : userText.trim());
-                if (toolQuery.length() > 0) {
-                    queryForFollowup = toolQuery;
-                    try {
-                        result = webSearch(toolQuery);
-                        rememberSearchResult(toolQuery, result);
-                    } catch (Exception searchErr) {
-                        if (result == null || result.length() == 0) {
-                            result = "Search failed: " + (searchErr.getMessage() == null ? "unknown error" : searchErr.getMessage());
-                        }
-                    }
+                    throw e;
                 }
-                if (result == null) result = "";
-                if (result.length() > 0) {
-                    assistant.searchSources.clear();
-                    assistant.searchSources.addAll(extractSearchSources(result));
+                end = sr.endAt;
+                if (sr.reasoning.length() > 0) {
+                    if (allReasoning.length() > 0) allReasoning.append('\n');
+                    allReasoning.append(sr.reasoning);
                 }
-                String synth = answerAfterWebSearch(key, source, model, queryForFollowup, result, userText, research ? 3 : 2);
-                // Never overwrite a usable in-stream answer with an apology / weaker fallback.
-                if (!keptUsable) {
-                    finalAnswer = synth;
-                } else if (ToolText.isUsableFollowupAnswer(synth) && synth.length() >= keptAnswer.length()) {
-                    finalAnswer = synth;
+                lastRaw = sr.content;
+                String visible = sanitizeAssistantText(sr.content);
+                boolean usable = ToolText.isUsableFollowupAnswer(visible);
+                ArrayList<AgentTools.ToolCall> calls = AgentTools.resolveCalls(sr.tools, sr.content, sr.reasoning, usable);
+                if (calls.size() == 0) {
+                    finalAnswer = visible;
+                    break;
+                }
+                boolean nativeThisRound = nativeTools && sr.tools.nativeCalls().size() > 0;
+                if (nativeThisRound) {
+                    arr.put(AgentTools.assistantNativeMessage(sr.content, calls));
                 } else {
-                    finalAnswer = keptAnswer;
+                    arr.put(new JSONObject().put("role", "assistant").put("content", visible.length() > 0 ? visible : sr.content));
                 }
+                ArrayList<AgentTools.ToolCall> executed = new ArrayList<AgentTools.ToolCall>();
+                for (int i = 0; i < calls.size(); i++) {
+                    AgentTools.ToolCall call = calls.get(i);
+                    if (call == null) continue;
+                    if (call.isSearch()) {
+                        String q = call.query();
+                        if (q.length() == 0) q = userText == null ? "" : userText.trim();
+                        String keyQ = q.toLowerCase(Locale.US);
+                        if (seenSearchQueries.contains(keyQ)) continue;
+                        seenSearchQueries.add(keyQ);
+                        showSearchingStatus(assistant, usable);
+                        String result;
+                        try {
+                            result = webSearch(q);
+                            rememberSearchResult(q, result);
+                        } catch (Exception searchErr) {
+                            result = lastSearchResult;
+                            if (result == null || result.length() == 0) {
+                                result = "Search failed: " + (searchErr.getMessage() == null ? "unknown error" : searchErr.getMessage());
+                            }
+                        }
+                        if (result == null) result = "";
+                        if (result.length() > 0) {
+                            assistant.searchSources.clear();
+                            assistant.searchSources.addAll(extractSearchSources(result));
+                        }
+                        if (nativeThisRound) arr.put(AgentTools.toolResultMessage(call.id, result));
+                        else arr.put(AgentTools.textResultUserMessage("web_search", q, result));
+                        executed.add(call);
+                    } else if (call.isSaveMemory()) {
+                        String note = call.note();
+                        String result;
+                        if (!memoryEnabled()) result = "Memory is turned off.";
+                        else if (note.length() == 0) result = "No note provided.";
+                        else {
+                            String saved = appendMemory(note, "model");
+                            if (saved.length() > 0) { assistant.memorySaved = true; assistant.memorySavedText = saved; }
+                            result = saved.length() > 0 ? "Saved." : "Not saved (duplicate or empty).";
+                        }
+                        if (nativeThisRound) arr.put(AgentTools.toolResultMessage(call.id, result));
+                        else arr.put(AgentTools.textResultUserMessage("save_memory", note, result));
+                        executed.add(call);
+                    } else if (call.isRemoveMemory()) {
+                        String note = call.note();
+                        String result;
+                        if (!memoryEnabled()) result = "Memory is turned off.";
+                        else {
+                            String removed = removeMemory(note);
+                            if (removed.length() > 0) appendRemovedMemory(assistant, removed);
+                            result = removed.length() > 0 ? "Removed." : "Nothing matched.";
+                        }
+                        if (nativeThisRound) arr.put(AgentTools.toolResultMessage(call.id, result));
+                        else arr.put(AgentTools.textResultUserMessage("remove_memory", note, result));
+                        executed.add(call);
+                    }
+                }
+                if (!AgentTools.continueAfter(executed, usable, round, maxRounds)) {
+                    finalAnswer = visible;
+                    break;
+                }
+                finalAnswer = visible;
             }
+            if (finalAnswer.length() == 0) finalAnswer = sanitizeAssistantText(lastRaw);
             String memoryNote = memoryToolNote(finalAnswer);
             ArrayList<String> removeNotes = memoryRemoveToolNotes(finalAnswer);
             boolean hasRemoveTool = removeNotes.size() > 0 || finalAnswer.toLowerCase(Locale.US).contains("remove_memory");
@@ -2686,12 +2694,12 @@ public class MainActivity extends Activity {
                 String savedMemory = appendMemory(pendingUserMemoryNote, "user");
                 if (savedMemory.length() > 0) { assistant.memorySaved = true; assistant.memorySavedText = savedMemory; }
             }
-            // Never finish a turn with a blank body after thinking — recover like memory/search paths.
-            finalAnswer = recoverEmptyAssistantReply(key, source, model, userText, answer.toString(), finalAnswer, reasoning.toString(), assistant);
+            finalAnswer = recoverEmptyAssistantReply(key, source, model, userText, lastRaw, finalAnswer, allReasoning.toString(), assistant);
             final String finishedAnswer = finalAnswer;
-            int completionTokens = estimateTokens(finishedAnswer) + (reasoning.length() == 0 ? 0 : estimateTokens(reasoning.toString()));
+            int completionTokens = estimateTokens(finishedAnswer) + (allReasoning.length() == 0 ? 0 : estimateTokens(allReasoning.toString()));
             final String stats = String.format(Locale.US, "%.1f tok/s", completionTokens / Math.max(0.001, (end - start) / 1e9));
-            runOnUiThread(new Runnable() { @Override public void run() { finishStreamingAssistant(assistant, finishedAnswer, reasoning.toString(), stats, key, source, model); } });
+            final String finishedReasoning = allReasoning.toString();
+            runOnUiThread(new Runnable() { @Override public void run() { finishStreamingAssistant(assistant, finishedAnswer, finishedReasoning, stats, key, source, model); } });
         } catch (Exception e) {
             final String msg = friendlyError(e);
             runOnUiThread(new Runnable() { @Override public void run() {
@@ -2706,6 +2714,83 @@ public class MainActivity extends Activity {
                 renderMessages();
             } });
         }
+    }
+
+    private static final class StreamRound {
+        String content = "";
+        String reasoning = "";
+        AgentTools.RoundState tools = new AgentTools.RoundState();
+        long endAt;
+    }
+
+    private void showSearchingStatus(final Msg assistant, final boolean keepText) {
+        runOnUiThread(new Runnable() { @Override public void run() {
+            if (assistant.thoughtMs == 0 && assistant.reasoningCapable) {
+                assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt);
+            }
+            if (!keepText) assistant.text = "";
+            assistant.stats = SEARCHING;
+            assistant.jumpAnimStartMs = 0L;
+            assistant.jumpAnimWord = "";
+            forceAutoScrollBottom = userAtChatBottom;
+            renderMessages();
+        } });
+    }
+
+    private StreamRound streamChatCompletion(JSONObject body, String key, String source, final Msg assistant) throws Exception {
+        StreamRound round = new StreamRound();
+        HttpURLConnection c = (HttpURLConnection) new URL(chatCompletionsUrl(source, body.optString("model", ""))).openConnection();
+        c.setRequestMethod("POST"); c.setConnectTimeout(30000); c.setReadTimeout(120000); c.setDoOutput(true);
+        if (key.length() > 0) c.setRequestProperty("Authorization", "Bearer " + key);
+        c.setRequestProperty("Content-Type", "application/json");
+        c.setRequestProperty("Accept", "text/event-stream, application/json");
+        if (source.equals("openrouter")) { c.setRequestProperty("HTTP-Referer", "https://minimal.chat/android"); c.setRequestProperty("X-Title", "chat"); }
+        OutputStream os = c.getOutputStream(); os.write(body.toString().getBytes(StandardCharsets.UTF_8)); os.close();
+        int code = c.getResponseCode();
+        if (code >= 400) {
+            InputStream es = c.getErrorStream();
+            throw new RuntimeException(es == null ? ("HTTP " + code) : readAll(es));
+        }
+        final StringBuilder answer = new StringBuilder();
+        final StringBuilder reasoning = new StringBuilder();
+        BufferedReader br = new BufferedReader(new InputStreamReader(c.getInputStream(), StandardCharsets.UTF_8));
+        StringBuilder nonSse = new StringBuilder();
+        boolean[] inThinkTag = new boolean[]{false};
+        String line;
+        while ((line = br.readLine()) != null) {
+            line = line.trim();
+            if (!line.startsWith("data:")) { if (line.length() > 0) nonSse.append(line); continue; }
+            String data = line.substring(5).trim();
+            if ("[DONE]".equals(data)) break;
+            JSONObject chunk = new JSONObject(data);
+            JSONObject err = chunk.optJSONObject("error");
+            if (err != null) throw new RuntimeException(err.optString("message", err.toString()));
+            AgentTools.absorbChunk(round.tools, chunk);
+            JSONArray choices = chunk.optJSONArray("choices");
+            if (choices == null || choices.length() == 0) continue;
+            JSONObject delta = choices.getJSONObject(0).optJSONObject("delta");
+            if (delta == null) continue;
+            String content = cleanJsonString(delta, "content");
+            String thought = reasoningDelta(delta);
+            if (content.length() == 0 && thought.length() == 0) continue;
+            appendReasoningAwareContent(content, answer, reasoning, inThinkTag);
+            reasoning.append(thought);
+            final String partial = answer.toString();
+            final String partialReasoning = reasoning.toString();
+            runOnUiThread(new Runnable() { @Override public void run() { updateStreamingAssistant(assistant, partial, partialReasoning); } });
+        }
+        br.close();
+        if (answer.length() == 0 && reasoning.length() == 0 && nonSse.length() > 0) {
+            JSONObject resp = new JSONObject(nonSse.toString());
+            AgentTools.absorbChunk(round.tools, resp);
+            answer.append(extractMessageText(resp));
+            reasoning.append(extractMessageReasoning(resp));
+        }
+        round.content = answer.toString();
+        round.reasoning = reasoning.toString();
+        round.endAt = System.nanoTime();
+        if (round.tools.error.length() > 0) throw new RuntimeException(round.tools.error);
+        return round;
     }
 
     private boolean isImageInputUnsupported(String msg) {
@@ -3604,10 +3689,14 @@ public class MainActivity extends Activity {
     }
 
     private void addBackgroundSystemContext(JSONArray arr, boolean includeMemoryTools) throws Exception {
-        addBackgroundSystemContext(arr, includeMemoryTools, false);
+        addBackgroundSystemContext(arr, includeMemoryTools, false, true, true);
     }
 
     private void addBackgroundSystemContext(JSONArray arr, boolean includeMemoryTools, boolean searchContextAlreadyInjected) throws Exception {
+        addBackgroundSystemContext(arr, includeMemoryTools, searchContextAlreadyInjected, true, true);
+    }
+
+    private void addBackgroundSystemContext(JSONArray arr, boolean includeMemoryTools, boolean searchContextAlreadyInjected, boolean allowSearch, boolean textFallback) throws Exception {
         arr.put(new JSONObject().put("role", "system").put("content", buildCurrentTimeContext()));
         String toolMemory = buildToolMemoryContext();
         if (toolMemory.length() > 0) arr.put(new JSONObject().put("role", "system").put("content", toolMemory));
@@ -3615,13 +3704,12 @@ public class MainActivity extends Activity {
         if (folderInstruction.length() > 0) arr.put(new JSONObject().put("role", "system").put("content", folderInstruction));
         String userMemory = buildUserMemoryContext();
         if (userMemory.length() > 0) arr.put(new JSONObject().put("role", "system").put("content", userMemory));
-        if (includeMemoryTools && memoryEnabled()) {
-            arr.put(new JSONObject().put("role", "system").put("content", memoryToolsPrompt()));
-        }
-        // Don't teach tool-call syntax in the same turn we already injected search results —
-        // weak/local models pattern-match the examples and emit another SEARCH:/tool_call anyway.
-        if (includeMemoryTools && webSearchAvailable() && !searchContextAlreadyInjected) {
-            arr.put(new JSONObject().put("role", "system").put("content", ToolText.webSearchToolsPrompt()));
+        if (!includeMemoryTools) return;
+        boolean search = allowSearch && webSearchAvailable();
+        boolean memory = memoryEnabled();
+        if (search || memory) {
+            arr.put(new JSONObject().put("role", "system").put("content",
+                    AgentTools.leanToolsPrompt(search, memory, textFallback, searchContextAlreadyInjected)));
         }
     }
 
@@ -5148,7 +5236,7 @@ public class MainActivity extends Activity {
             body.put("modalities", new JSONArray().put("text").put("audio"));
             body.put("audio", new JSONObject().put("voice", ttsVoiceForModel(model)).put("format", "pcm16"));
             JSONArray arr = new JSONArray();
-            addBackgroundSystemContext(arr, true, false);
+            addBackgroundSystemContext(arr, true, false, false, false);
             arr.put(new JSONObject().put("role", "system").put("content", "This is a spoken two-way voice conversation. Reply in plain text only. Do not use markdown, headings, bullets, tables, code blocks, or formatting symbols. Keep the response natural for text-to-speech."));
             for (int i = 0; i < messages.size(); i++) {
                 Msg m = messages.get(i);

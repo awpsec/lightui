@@ -487,12 +487,7 @@ public final class ToolText {
     }
 
     public static String webSearchToolsPrompt() {
-        return "When you need fresh facts (scores, news, prices, schedules, weather, look-ups), "
-                + "do not answer yet. End your message with EXACTLY ONE of these tool forms:\n"
-                + "1) Preferred (simple): SEARCH: short search query\n"
-                + "2) XML: <tool_call><function=web_search><parameter=query>short search query</parameter></function></tool_call>\n"
-                + "Put the tool call at the very end. No markdown fences around it. "
-                + "If search results were already provided, answer directly — do not emit another tool call.";
+        return AgentTools.leanToolsPrompt(true, false, true, false);
     }
 
     public static String webSearchFollowupSystem(boolean retry) {

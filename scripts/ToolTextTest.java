@@ -68,8 +68,9 @@ public class ToolTextTest {
         String proseMentions = "I won't invent a web_search call; here's what I know.";
         assertEq("prose mention not cut by stream", proseMentions, ToolText.visibleStreamingAnswer(proseMentions));
 
-        assertTrue("prompt teaches format", ToolText.webSearchToolsPrompt().contains("<function=web_search>"));
         assertTrue("prompt teaches SEARCH fallback", ToolText.webSearchToolsPrompt().contains("SEARCH:"));
+        assertTrue("lean prompt lists web_search", ToolText.webSearchToolsPrompt().contains("web_search"));
+        assertTrue("lean prompt has no XML dump", !ToolText.webSearchToolsPrompt().contains("<function=web_search>"));
 
         // DDR5-style Jina dump must not become the chat answer.
         String jina = "[1] Title: The DDR5 Price Crisis: Why RAM Costs So Much in 2026 and How to Buy Smart\n"
