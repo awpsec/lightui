@@ -114,7 +114,7 @@ public class MainActivity extends Activity {
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
     private static final String SEARCHING = "__searching__";
-    private static final String APP_VERSION = "1.0.38";
+    private static final String APP_VERSION = "1.0.39";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 120;
@@ -952,18 +952,25 @@ public class MainActivity extends Activity {
         updateDownloading = true;
         toast("downloading " + version + "...");
         new Thread(new Runnable() { @Override public void run() {
-            File out = new File(getCacheDir(), "lightui-update.apk");
+            File out = new File(getCacheDir(), ToolText.updateApkFileName(version));
+            deleteStaleUpdateFiles(out);
             Exception last = null;
             String[] urls = ToolText.updateDownloadUrls(apkUrl, version);
             String ua = "Mozilla/5.0 (Linux; Android 14; Mobile) lightui/" + APP_VERSION;
             try {
-                if (UpdateDownload.isUsableApk(out, -1)) {
+                if (apkHasVersion(out, version)) {
                     finishUpdateDownload(version, out);
                     return;
                 }
+                if (out.exists()) out.delete();
                 for (int i = 0; i < urls.length; i++) {
                     try {
                         UpdateDownload.downloadApk(urls[i], out, ua);
+                        if (!apkHasVersion(out, version)) {
+                            last = new Exception("apk version mismatch");
+                            if (out.exists()) out.delete();
+                            continue;
+                        }
                         finishUpdateDownload(version, out);
                         return;
                     } catch (Exception e) {
@@ -972,8 +979,12 @@ public class MainActivity extends Activity {
                 }
                 try {
                     if (urls.length > 0 && downloadWithManager(urls[0], out)) {
-                        finishUpdateDownload(version, out);
-                        return;
+                        if (apkHasVersion(out, version)) {
+                            finishUpdateDownload(version, out);
+                            return;
+                        }
+                        last = new Exception("apk version mismatch");
+                        if (out.exists()) out.delete();
                     }
                 } catch (Exception e) {
                     last = e;
@@ -998,9 +1009,49 @@ public class MainActivity extends Activity {
     private void finishUpdateDownload(final String version, final File apk) {
         runOnUiThread(new Runnable() { @Override public void run() {
             updateDownloading = false;
+            if (!apkHasVersion(apk, version)) {
+                toast("downloaded apk was not " + version);
+                showUpdateDownloadFailed(version, prefs.getString("latestGitHubApkUrl", ""));
+                return;
+            }
             toast("installing " + version);
             installUpdateApk(apk);
         } });
+    }
+
+    private boolean apkHasVersion(File apk, String version) {
+        if (apk == null || !UpdateDownload.isUsableApk(apk, -1)) return false;
+        try {
+            android.content.pm.PackageInfo info = getPackageManager().getPackageArchiveInfo(apk.getAbsolutePath(), 0);
+            if (info == null) return false;
+            String name = info.versionName == null ? "" : info.versionName.trim();
+            if (name.length() == 0) return false;
+            return compareVersions(name, version) >= 0;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private void deleteStaleUpdateFiles(File keep) {
+        String keepPath = keep == null ? "" : keep.getAbsolutePath();
+        String keepPart = keepPath.length() == 0 ? "" : keepPath + ".part";
+        File[] dirs = new File[] { getCacheDir(), getFilesDir(), getExternalFilesDir(null) };
+        for (int d = 0; d < dirs.length; d++) {
+            File dir = dirs[d];
+            if (dir == null) continue;
+            File[] files = dir.listFiles();
+            if (files == null) continue;
+            for (int i = 0; i < files.length; i++) {
+                File f = files[i];
+                if (f == null) continue;
+                String n = f.getName();
+                if (!n.startsWith("lightui-update")) continue;
+                if (!n.endsWith(".apk") && !n.endsWith(".apk.part")) continue;
+                String path = f.getAbsolutePath();
+                if (path.equals(keepPath) || path.equals(keepPart)) continue;
+                f.delete();
+            }
+        }
     }
 
     private boolean downloadWithManager(String url, File dest) throws Exception {
@@ -1008,7 +1059,7 @@ public class MainActivity extends Activity {
         if (dm == null) return false;
         File extDir = getExternalFilesDir(null);
         if (extDir == null) return false;
-        File ext = new File(extDir, "lightui-update.apk");
+        File ext = new File(extDir, dest.getName());
         if (ext.exists() && !ext.delete()) return false;
         DownloadManager.Request req = new DownloadManager.Request(Uri.parse(url));
         req.setMimeType("application/vnd.android.package-archive");
@@ -1019,7 +1070,7 @@ public class MainActivity extends Activity {
         req.setAllowedOverRoaming(true);
         req.addRequestHeader("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) lightui/" + APP_VERSION);
         req.addRequestHeader("Accept", "application/octet-stream");
-        req.setDestinationInExternalFilesDir(this, null, "lightui-update.apk");
+        req.setDestinationInExternalFilesDir(this, null, dest.getName());
         long id = dm.enqueue(req);
         long start = System.currentTimeMillis();
         try {

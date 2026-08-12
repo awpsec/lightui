@@ -364,6 +364,10 @@ public class ToolTextTest {
         float fall = ToolText.followVoiceShown(0.8f, 0.1f);
         assertTrue("attack is fast", rise >= 0.55f);
         assertTrue("decay is slower than attack", (0.8f - fall) < (rise - 0.1f));
+        assertEq("update apk name", "lightui-update-1.0.39.apk", ToolText.updateApkFileName("v1.0.39"));
+        assertTrue("version code 1.0.39", ToolText.versionCodeFromName("1.0.39") == 10039);
+        assertTrue("version code from tag", ToolText.versionCodeFromName("v1.0.38") == 10038);
+        assertTrue("empty version code", ToolText.versionCodeFromName("") == 0);
 
         if (failed > 0) { System.err.println(failed + " failed"); System.exit(1); }
         System.out.println("all passed");
