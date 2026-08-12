@@ -46,7 +46,23 @@ rm -rf "$out"
 mkdir -p "$out/compiled" "$out/generated" "$out/classes" "$out/dex"
 
 "$build_tools/aapt2" compile --dir "$res_dir" -o "$out/compiled/res.zip"
-"$build_tools/aapt2" link -I "$platform_jar" --manifest "$manifest" -o "$out/unsigned.apk" --java "$out/generated" --auto-add-overlay -R "$out/compiled/res.zip"
+
+app_version="$(sed -n 's/.*APP_VERSION = "\([^"]*\)".*/\1/p' app/src/main/java/com/lightos/minimalchat/MainActivity.java | head -1)"
+if [[ -z "$app_version" ]]; then
+  echo "could not read APP_VERSION from MainActivity.java" >&2
+  exit 1
+fi
+maj="${app_version%%.*}"
+rest="${app_version#*.}"
+min="${rest%%.*}"
+pat="${rest#*.}"
+pat="${pat%%.*}"
+version_code=$((10#${maj:-0} * 10000 + 10#${min:-0} * 100 + 10#${pat:-0}))
+echo "stamping AndroidManifest versionName=$app_version versionCode=$version_code"
+
+"$build_tools/aapt2" link -I "$platform_jar" --manifest "$manifest" \
+  --version-code "$version_code" --version-name "$app_version" --replace-version \
+  -o "$out/unsigned.apk" --java "$out/generated" --auto-add-overlay -R "$out/compiled/res.zip"
 
 mapfile -t sources < <(find "$src_dir" "$out/generated" -type f -name '*.java' | sort)
 "$javac_bin" -g:none -encoding UTF-8 --release 8 -classpath "$platform_jar" -d "$out/classes" "${sources[@]}"
