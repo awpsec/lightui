@@ -938,6 +938,92 @@ public final class ToolText {
                 + "Cite a URL only when helpful.\n\n";
     }
 
+    /** Hostname for a source URL, without scheme/www/port. */
+    public static String sourceHost(String url) {
+        if (url == null) return "";
+        String u = url.trim();
+        int scheme = u.indexOf("://");
+        if (scheme >= 0) u = u.substring(scheme + 3);
+        int slash = u.indexOf('/');
+        if (slash >= 0) u = u.substring(0, slash);
+        int at = u.lastIndexOf('@');
+        if (at >= 0) u = u.substring(at + 1);
+        int colon = u.indexOf(':');
+        if (colon >= 0) u = u.substring(0, colon);
+        if (u.toLowerCase(Locale.US).startsWith("www.")) u = u.substring(4);
+        return u.trim();
+    }
+
+    public static String sourceLetter(String host) {
+        if (host == null) return "?";
+        String h = host.trim();
+        if (h.length() == 0) return "?";
+        return h.substring(0, 1).toUpperCase(Locale.US);
+    }
+
+    public static String shortToolDetail(String detail, int max) {
+        String d = detail == null ? "" : detail.replace('\n', ' ').replace('\r', ' ').trim();
+        d = d.replaceAll("\\s+", " ");
+        int cap = max < 8 ? 8 : max;
+        if (d.length() > cap) d = d.substring(0, cap).trim() + "…";
+        return d;
+    }
+
+    /** Live status while a tool is running — Pi/Hermes wording, same gray wave. */
+    public static String toolLiveLabel(String name) {
+        String n = name == null ? "" : name.toLowerCase(Locale.US).trim();
+        if ("web_search".equals(n) || "search".equals(n) || "google".equals(n)) return "searching the web...";
+        if ("fetch".equals(n) || "fetch_content".equals(n) || "read_url".equals(n)) return "fetching...";
+        if ("save_memory".equals(n)) return "saving memory...";
+        if ("remove_memory".equals(n)) return "updating memory...";
+        if (n.length() == 0) return "working...";
+        return n.replace('_', ' ') + "...";
+    }
+
+    /** Completed tool row, Claude Code / Cursor style: `name  detail`. */
+    public static String toolDoneLabel(String name, String detail) {
+        String n = name == null || name.trim().length() == 0 ? "tool" : name.trim();
+        String d = shortToolDetail(detail, 52);
+        if ("fetch".equals(n) || "fetch_content".equals(n) || "read_url".equals(n)) {
+            String host = sourceHost(d);
+            if (host.length() > 0) d = host;
+        }
+        return d.length() == 0 ? n : n + "  " + d;
+    }
+
+    /**
+     * Explicit "please go use the web" intent — not every question.
+     * /search is usually stripped before this runs; globe/research flags cover that.
+     */
+    public static boolean wantsWebSearch(String userText) {
+        if (userText == null) return false;
+        String t = userText.trim().toLowerCase(Locale.US);
+        if (t.length() == 0) return false;
+        if (t.startsWith("/search") || t.startsWith("/research")) return true;
+        if (t.contains("search the web") || t.contains("search online") || t.contains("web search")) return true;
+        if (t.matches("(?s).*\\bsearch for\\b.*")) return true;
+        if (t.matches("(?s).*\\blook\\s*up\\b.*") || t.contains("lookup")) return true;
+        if (t.startsWith("google ") || t.startsWith("search ")) return true;
+        return false;
+    }
+
+    public static String extractSearchQuery(String userText) {
+        if (userText == null) return "";
+        String t = userText.trim();
+        if (t.length() == 0) return "";
+        SlashParse slash = parseSlash(t);
+        if (slash != null && ("search".equals(slash.name) || "research".equals(slash.name))) {
+            return slash.args == null ? "" : slash.args.trim();
+        }
+        String stripped = t.replaceFirst(
+                "(?i)^(?:please\\s+|can you\\s+|could you\\s+|would you\\s+)?"
+                        + "(?:search\\s+the\\s+web(?:\\s+for)?|search\\s+online(?:\\s+for)?|"
+                        + "search\\s+for|look\\s*up|google|find(?:\\s+me)?)\\s+",
+                "");
+        stripped = stripped.replaceFirst("[?!.,]+$", "").trim();
+        return stripped.length() > 0 ? stripped : t;
+    }
+
     public static final class SlashCommand {
         public final String name;
         public final String description;

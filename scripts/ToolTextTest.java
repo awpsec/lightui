@@ -231,6 +231,23 @@ public class ToolTextTest {
         String fallback = ToolText.searchAnswerFallback("Page facts (https://rampricesusa.com):\nMedian $10.77/GB · kits from $114.95\n\nSources:\n1. youtube");
         assertTrue("answer fallback uses page facts", fallback.contains("114.95") || fallback.contains("10.77"));
 
+        assertEq("host strips www", "rampricesusa.com", ToolText.sourceHost("https://www.rampricesusa.com/best-64gb-ddr5-ram"));
+        assertEq("host ignores port", "newegg.com", ToolText.sourceHost("https://www.newegg.com:443/p/x"));
+        assertEq("letter", "R", ToolText.sourceLetter("rampricesusa.com"));
+        assertEq("live search", "searching the web...", ToolText.toolLiveLabel("web_search"));
+        assertEq("live fetch", "fetching...", ToolText.toolLiveLabel("fetch"));
+        assertEq("done search", "web_search  ddr5 64gb 6000", ToolText.toolDoneLabel("web_search", "ddr5 64gb 6000"));
+        assertEq("done fetch uses host", "fetch  rampricesusa.com",
+                ToolText.toolDoneLabel("fetch", "https://www.rampricesusa.com/best-64gb-ddr5-ram"));
+        assertTrue("search for wants web", ToolText.wantsWebSearch("search for ddr5 64gb 6000 price"));
+        assertTrue("look up wants web", ToolText.wantsWebSearch("look up the lakers score"));
+        assertTrue("/search wants web", ToolText.wantsWebSearch("/search bitcoin"));
+        assertTrue("plain question does not force search", !ToolText.wantsWebSearch("what is 2+2"));
+        assertTrue("price question does not force search", !ToolText.wantsWebSearch("how much is a 64GB DDR5 6000 kit"));
+        assertEq("extract search for", "ddr5 64gb 6000 price", ToolText.extractSearchQuery("search for ddr5 64gb 6000 price"));
+        assertEq("extract slash", "bitcoin price", ToolText.extractSearchQuery("/search bitcoin price"));
+        assertEq("extract look up", "the lakers score", ToolText.extractSearchQuery("look up the lakers score"));
+
         if (failed > 0) { System.err.println(failed + " failed"); System.exit(1); }
         System.out.println("all passed");
     }

@@ -68,6 +68,7 @@ import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -107,7 +108,7 @@ public class MainActivity extends Activity {
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
     private static final String SEARCHING = "__searching__";
-    private static final String APP_VERSION = "1.0.28";
+    private static final String APP_VERSION = "1.0.29";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 64;
@@ -196,6 +197,9 @@ public class MainActivity extends Activity {
     private boolean forceSearchThisTurn = false, researchThisTurn = false;
     private volatile boolean turnForceSearch = false, turnResearch = false;
     private final HashSet<String> endpointsWithoutNativeTools = new HashSet<String>();
+    private final HashMap<String, Bitmap> faviconCache = new HashMap<String, Bitmap>();
+    private final HashSet<String> faviconLoading = new HashSet<String>();
+    private final HashSet<String> faviconFailed = new HashSet<String>();
 
     @Override public void onCreate(Bundle b) {
         super.onCreate(b);
@@ -2068,12 +2072,20 @@ public class MainActivity extends Activity {
         if (messageStart > 0) messageList.addView(windowMarker("older messages above"));
         for (int i = messageStart; i < messageEnd; i++) {
             Msg m = messages.get(i);
+            ArrayList<ToolStep> toolSteps = copyToolSteps(m);
+            boolean hasRunningTool = false;
+            for (int ti = 0; ti < toolSteps.size(); ti++) {
+                ToolStep ts = toolSteps.get(ti);
+                if (ts != null && "running".equals(ts.status)) hasRunningTool = true;
+            }
             final boolean isSearching = SEARCHING.equals(m.stats);
-            // While searching, show only the searching wave — stacking "thought for X" + searching left a big empty gap.
-            final boolean hasThinkingRow = m.role.equals("assistant") && !isSearching
-                    && ((m.reasoning.length() > 0 && !m.reasoning.trim().equals("null")) || (LOADING.equals(m.stats) && m.reasoningCapable));
-            // Only show gathered sources after the turn finishes — mid-stream URL lists feel like a premature "search done".
-            final boolean hasSearchRow = m.role.equals("assistant") && m.searchSources.size() > 0 && m.streamDone && !isSearching;
+            boolean thinkingLive = m.role.equals("assistant") && !m.streamDone && LOADING.equals(m.stats)
+                    && (m.text == null || m.text.length() == 0) && !hasRunningTool && !isSearching;
+            final boolean hasThinkingRow = m.role.equals("assistant") && (
+                    thinkingLive
+                    || (m.reasoning.length() > 0 && !m.reasoning.trim().equals("null"))
+                    || m.thoughtMs > 0);
+            final boolean hasSearchRow = m.role.equals("assistant") && m.searchSources.size() > 0;
             final boolean hasMemoryRow = m.role.equals("assistant") && m.streamDone && m.memorySaved;
             TextView body = text("", 16, Color.WHITE);
             String bodyText = "assistant".equals(m.role) ? sanitizeAssistantText(m.text) : (m.text == null ? "" : m.text);
@@ -2099,23 +2111,15 @@ public class MainActivity extends Activity {
             }
             if (hasThinkingRow) {
                 final Msg thinkingMessage = m;
-                LinearLayout thinkRow = row();
-                thinkRow.setClipChildren(false);
-                thinkRow.setClipToPadding(false);
-                thinkRow.setPadding(0, dp(4), 0, dp(4));
+                LinearLayout thinkRow = compactStatusRow();
                 TextView thinking;
-                if (!m.streamDone && m.text.length() == 0 && !isSearching) {
-                    JumpTextView jump = new JumpTextView(this);
-                    jump.word = "thinking";
-                    jump.bind(m);
-                    thinking = jump;
+                if (thinkingLive) {
+                    thinking = liveStatus("thinking", m);
                 } else {
                     long doneMs = m.thoughtMs > 0 ? m.thoughtMs : Math.max(1, System.currentTimeMillis() - m.startedAt);
-                    thinking = text("thought for " + thoughtDuration(doneMs), 11, Color.rgb(135,135,135));
+                    thinking = statusText("thought for " + thoughtDuration(doneMs));
                 }
-                thinking.setTextColor(Color.rgb(135,135,135)); thinking.setGravity(Gravity.CENTER_VERTICAL); setTextPx(thinking, 11); thinking.setPadding(0, dp(2), 0, dp(2));
                 thinking.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { toggleThinking(thinkingMessage); } });
-                thinking.setMinHeight(dp(32));
                 thinkRow.addView(thinking, new LinearLayout.LayoutParams(-1, -2));
                 thinkRow.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { toggleThinking(thinkingMessage); } });
                 messageList.addView(thinkRow, new LinearLayout.LayoutParams(-1, -2));
@@ -2127,27 +2131,36 @@ public class MainActivity extends Activity {
                     messageList.addView(reason, new LinearLayout.LayoutParams(-1, -2));
                 }
             }
-            if (isSearching) {
-                LinearLayout searchRow = row();
-                searchRow.setClipChildren(false);
-                searchRow.setClipToPadding(false);
-                searchRow.setPadding(0, dp(4), 0, dp(4));
-                JumpTextView searching = new JumpTextView(this);
-                searching.word = "searching";
-                searching.bind(m);
-                searching.setTextColor(Color.rgb(135,135,135));
-                searching.setGravity(Gravity.CENTER_VERTICAL);
-                setTextPx(searching, 11);
-                searching.setPadding(0, dp(2), 0, dp(2));
-                searching.setMinHeight(dp(32));
-                searchRow.addView(searching, new LinearLayout.LayoutParams(-1, -2));
+            for (int ti = 0; ti < toolSteps.size(); ti++) {
+                ToolStep ts = toolSteps.get(ti);
+                if (ts == null) continue;
+                LinearLayout stepRow = compactStatusRow();
+                boolean running = "running".equals(ts.status) && !m.streamDone;
+                if (running) {
+                    stepRow.addView(liveStatus(ToolText.toolLiveLabel(ts.name), m), new LinearLayout.LayoutParams(-1, -2));
+                } else {
+                    stepRow.addView(toolDoneView(ts), new LinearLayout.LayoutParams(-1, -2));
+                }
+                messageList.addView(stepRow, new LinearLayout.LayoutParams(-1, -2));
+            }
+            if (isSearching && !hasRunningTool && !m.streamDone && m.searchSources.size() == 0) {
+                LinearLayout searchRow = compactStatusRow();
+                searchRow.addView(liveStatus("searching the web...", m), new LinearLayout.LayoutParams(-1, -2));
                 messageList.addView(searchRow, new LinearLayout.LayoutParams(-1, -2));
-            } else if (hasSearchRow) {
+            }
+            if (hasSearchRow) {
+                prefetchFavicons(m.searchSources);
                 final Msg searchMessage = m;
-                TextView gathered = text("gathered " + m.searchSources.size() + " sources" + (m.searchExpanded ? " ˅" : " ›"), 11, Color.rgb(135,135,135));
-                gathered.setGravity(Gravity.CENTER_VERTICAL);
+                LinearLayout srcRow = compactStatusRow();
+                TextView gathered = statusText("searched " + m.searchSources.size() + " sources" + (m.searchExpanded ? " ˅" : " ›"));
                 gathered.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { searchMessage.searchExpanded = !searchMessage.searchExpanded; renderMessages(); } });
-                messageList.addView(gathered, new LinearLayout.LayoutParams(-1, dp(24)));
+                srcRow.addView(gathered, new LinearLayout.LayoutParams(-2, -2));
+                View thumbs = sourceThumbStrip(m.searchSources);
+                LinearLayout.LayoutParams thumbLp = new LinearLayout.LayoutParams(0, -2, 1f);
+                thumbLp.leftMargin = dp(8);
+                srcRow.addView(thumbs, thumbLp);
+                srcRow.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { searchMessage.searchExpanded = !searchMessage.searchExpanded; renderMessages(); } });
+                messageList.addView(srcRow, new LinearLayout.LayoutParams(-1, -2));
                 if (m.searchExpanded) {
                     TextView src = text(join(m.searchSources), 12, Color.rgb(160,160,160));
                     src.setLineSpacing(dp(1), 1.0f);
@@ -2155,7 +2168,7 @@ public class MainActivity extends Activity {
                     messageList.addView(src, new LinearLayout.LayoutParams(-1, -2));
                 }
             }
-            if (!m.role.equals("user") && !isSearching && hasText) {
+            if (!m.role.equals("user") && !isSearching && hasText && !LOADING.equals(m.stats)) {
                 messageList.addView(body, new LinearLayout.LayoutParams(-1, -2));
             }
             if (hasMemoryRow) {
@@ -2541,6 +2554,7 @@ public class MainActivity extends Activity {
         long start = System.nanoTime();
         try {
             boolean research = turnResearch;
+            boolean forceSearch = turnForceSearch || research;
             turnResearch = false;
             JSONArray arr = new JSONArray();
             String searchContext = buildSearchContext(userText);
@@ -2619,10 +2633,8 @@ public class MainActivity extends Activity {
                         }
                         if (fetchUrl.length() > 0) {
                             seenFetchUrls.add(fetchUrl.toLowerCase(Locale.US));
-                            showSearchingStatus(assistant, false);
-                            String result = fetchUrlForTool(fetchUrl);
+                            String result = runFetchForTurn(assistant, fetchUrl);
                             if (result.length() > 0) {
-                                if (!assistant.searchSources.contains(fetchUrl)) assistant.searchSources.add(fetchUrl);
                                 arr.put(new JSONObject().put("role", "assistant").put("content", visible));
                                 arr.put(AgentTools.textResultUserMessage("fetch", fetchUrl, result));
                                 continue;
@@ -2633,26 +2645,15 @@ public class MainActivity extends Activity {
                         String keyQ = refined.toLowerCase(Locale.US);
                         if (refined.length() > 0 && !seenSearchQueries.contains(keyQ)) {
                             seenSearchQueries.add(keyQ);
-                            showSearchingStatus(assistant, false);
-                            String result;
-                            try {
-                                result = webSearch(refined, nativeTools);
-                                rememberSearchResult(refined, result);
-                            } catch (Exception searchErr) {
-                                result = lastSearchResult;
-                                if (result == null || result.length() == 0) {
-                                    result = "Search failed: " + (searchErr.getMessage() == null ? "unknown error" : searchErr.getMessage());
-                                }
-                            }
+                            String result = runWebSearchForTurn(assistant, refined, nativeTools);
                             if (result == null) result = "";
-                            if (result.length() > 0) {
-                                assistant.searchSources.clear();
-                                assistant.searchSources.addAll(extractSearchSources(result));
-                            }
                             arr.put(new JSONObject().put("role", "assistant").put("content", visible));
                             arr.put(AgentTools.textResultUserMessage("web_search", refined, result));
                             continue;
                         }
+                    }
+                    if (maybeForceWebSearch(round, includeSearchTool, seenSearchQueries, forceSearch, userText, assistant, arr, nativeTools, visible)) {
+                        continue;
                     }
                     finalAnswer = visible;
                     break;
@@ -2673,25 +2674,10 @@ public class MainActivity extends Activity {
                         String keyQ = q.toLowerCase(Locale.US);
                         if (seenSearchQueries.contains(keyQ)) continue;
                         seenSearchQueries.add(keyQ);
-                        showSearchingStatus(assistant, usable);
-                        String result;
-                        try {
-                            result = webSearch(q, nativeTools);
-                            rememberSearchResult(q, result);
-                        } catch (Exception searchErr) {
-                            result = lastSearchResult;
-                            if (result == null || result.length() == 0) {
-                                result = "Search failed: " + (searchErr.getMessage() == null ? "unknown error" : searchErr.getMessage());
-                            }
-                        }
+                        String result = runWebSearchForTurn(assistant, q, nativeTools);
                         if (result == null) result = "";
-                        if (result.length() > 0) {
-                            assistant.searchSources.clear();
-                            assistant.searchSources.addAll(extractSearchSources(result));
-                        }
-                        String packed = result;
-                        if (nativeThisRound) arr.put(AgentTools.toolResultMessage(call.id, packed));
-                        else arr.put(AgentTools.textResultUserMessage("web_search", q, packed));
+                        if (nativeThisRound) arr.put(AgentTools.toolResultMessage(call.id, result));
+                        else arr.put(AgentTools.textResultUserMessage("web_search", q, result));
                         executed.add(call);
                     } else if (call.isFetch()) {
                         String url = call.url();
@@ -2703,15 +2689,14 @@ public class MainActivity extends Activity {
                             executed.add(call);
                         } else {
                             seenFetchUrls.add(keyU);
-                            showSearchingStatus(assistant, usable);
-                            String result = fetchUrlForTool(url);
-                            if (url.length() > 0 && !assistant.searchSources.contains(url)) assistant.searchSources.add(url);
+                            String result = runFetchForTurn(assistant, url);
                             if (nativeThisRound) arr.put(AgentTools.toolResultMessage(call.id, result));
                             else arr.put(AgentTools.textResultUserMessage("fetch", url, result));
                             executed.add(call);
                         }
                     } else if (call.isSaveMemory()) {
                         String note = call.note();
+                        ToolStep memStep = beginToolStep(assistant, "save_memory", note);
                         String result;
                         if (!memoryEnabled()) result = "Memory is turned off.";
                         else if (note.length() == 0) result = "No note provided.";
@@ -2720,11 +2705,13 @@ public class MainActivity extends Activity {
                             if (saved.length() > 0) { assistant.memorySaved = true; assistant.memorySavedText = saved; }
                             result = saved.length() > 0 ? "Saved." : "Not saved (duplicate or empty).";
                         }
+                        finishToolStep(memStep, result);
                         if (nativeThisRound) arr.put(AgentTools.toolResultMessage(call.id, result));
                         else arr.put(AgentTools.textResultUserMessage("save_memory", note, result));
                         executed.add(call);
                     } else if (call.isRemoveMemory()) {
                         String note = call.note();
+                        ToolStep memStep = beginToolStep(assistant, "remove_memory", note);
                         String result;
                         if (!memoryEnabled()) result = "Memory is turned off.";
                         else {
@@ -2732,10 +2719,14 @@ public class MainActivity extends Activity {
                             if (removed.length() > 0) appendRemovedMemory(assistant, removed);
                             result = removed.length() > 0 ? "Removed." : "Nothing matched.";
                         }
+                        finishToolStep(memStep, result);
                         if (nativeThisRound) arr.put(AgentTools.toolResultMessage(call.id, result));
                         else arr.put(AgentTools.textResultUserMessage("remove_memory", note, result));
                         executed.add(call);
                     }
+                }
+                if (maybeForceWebSearch(round, includeSearchTool, seenSearchQueries, forceSearch, userText, assistant, arr, nativeTools, "")) {
+                    continue;
                 }
                 if (!AgentTools.continueAfter(executed, usable, round, maxRounds)) {
                     finalAnswer = visible;
@@ -2772,6 +2763,7 @@ public class MainActivity extends Activity {
             final String msg = friendlyError(e);
             runOnUiThread(new Runnable() { @Override public void run() {
                 stopVoiceThinking();
+                completeRunningToolSteps(assistant);
                 assistant.stats = "";
                 assistant.streamDone = true;
                 assistant.text = isModelRefusal(msg) ? "model refused\n" + msg : "failed to load model\n" + msg;
@@ -2793,9 +2785,7 @@ public class MainActivity extends Activity {
 
     private void showSearchingStatus(final Msg assistant, final boolean keepText) {
         runOnUiThread(new Runnable() { @Override public void run() {
-            if (assistant.thoughtMs == 0 && assistant.reasoningCapable) {
-                assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt);
-            }
+            freezeThinking(assistant);
             if (!keepText) assistant.text = "";
             assistant.stats = SEARCHING;
             assistant.jumpAnimStartMs = 0L;
@@ -2803,6 +2793,285 @@ public class MainActivity extends Activity {
             forceAutoScrollBottom = userAtChatBottom;
             renderMessages();
         } });
+    }
+
+    private void freezeThinking(Msg assistant) {
+        if (assistant == null) return;
+        if (assistant.thoughtMs == 0) {
+            assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt);
+        }
+    }
+
+    private ArrayList<ToolStep> copyToolSteps(Msg m) {
+        ArrayList<ToolStep> out = new ArrayList<ToolStep>();
+        if (m == null || m.toolSteps == null) return out;
+        synchronized (m.toolSteps) {
+            out.addAll(m.toolSteps);
+        }
+        return out;
+    }
+
+    private ToolStep beginToolStep(final Msg m, String name, String detail) {
+        final ToolStep s = new ToolStep();
+        s.name = name == null ? "" : name;
+        s.detail = detail == null ? "" : detail;
+        s.status = "running";
+        if (m != null) {
+            freezeThinking(m);
+            synchronized (m.toolSteps) {
+                m.toolSteps.add(s);
+            }
+        }
+        runOnUiThread(new Runnable() { @Override public void run() {
+            if (m != null) {
+                m.jumpAnimStartMs = 0L;
+                m.jumpAnimWord = "";
+            }
+            forceAutoScrollBottom = userAtChatBottom;
+            renderMessages();
+        } });
+        return s;
+    }
+
+    private void finishToolStep(final ToolStep s, String preview) {
+        if (s == null) return;
+        s.status = "done";
+        s.preview = preview == null ? "" : preview;
+        runOnUiThread(new Runnable() { @Override public void run() {
+            forceAutoScrollBottom = userAtChatBottom;
+            renderMessages();
+        } });
+    }
+
+    private void completeRunningToolSteps(Msg m) {
+        if (m == null || m.toolSteps == null) return;
+        synchronized (m.toolSteps) {
+            for (int i = 0; i < m.toolSteps.size(); i++) {
+                ToolStep s = m.toolSteps.get(i);
+                if (s != null && "running".equals(s.status)) s.status = "done";
+            }
+        }
+    }
+
+    private String runWebSearchForTurn(Msg assistant, String query, boolean nativeTools) {
+        showSearchingStatus(assistant, false);
+        ToolStep step = beginToolStep(assistant, "web_search", query);
+        String result;
+        try {
+            result = webSearch(query, nativeTools);
+            rememberSearchResult(query, result);
+        } catch (Exception searchErr) {
+            result = lastSearchResult;
+            if (result == null || result.length() == 0) {
+                result = "Search failed: " + (searchErr.getMessage() == null ? "unknown error" : searchErr.getMessage());
+            }
+        }
+        if (result == null) result = "";
+        if (result.length() > 0 && assistant != null) {
+            assistant.searchSources.clear();
+            assistant.searchSources.addAll(extractSearchSources(result));
+            prefetchFavicons(assistant.searchSources);
+        }
+        int n = assistant == null ? 0 : assistant.searchSources.size();
+        finishToolStep(step, n > 0 ? (n + " sources") : "no sources");
+        return result;
+    }
+
+    private String runFetchForTurn(Msg assistant, String url) {
+        showSearchingStatus(assistant, false);
+        String host = ToolText.sourceHost(url);
+        ToolStep step = beginToolStep(assistant, "fetch", host.length() > 0 ? host : url);
+        String result = fetchUrlForTool(url);
+        if (assistant != null && url != null && url.length() > 0 && !assistant.searchSources.contains(url)) {
+            assistant.searchSources.add(url);
+            prefetchFavicons(assistant.searchSources);
+        }
+        finishToolStep(step, host.length() > 0 ? host : "done");
+        return result;
+    }
+
+    private boolean maybeForceWebSearch(int round, boolean includeSearchTool, ArrayList<String> seenSearchQueries,
+                                        boolean forceSearch, String userText, Msg assistant, JSONArray arr,
+                                        boolean nativeTools, String visibleAssistant) {
+        if (round != 0 || !includeSearchTool || seenSearchQueries.size() > 0) return false;
+        if (!(forceSearch || ToolText.wantsWebSearch(userText))) return false;
+        String q = ToolText.extractSearchQuery(userText);
+        if (q.length() == 0) q = userText == null ? "" : userText.trim();
+        if (q.length() == 0) return false;
+        seenSearchQueries.add(q.toLowerCase(Locale.US));
+        String result = runWebSearchForTurn(assistant, q, nativeTools);
+        try {
+            if (visibleAssistant != null && visibleAssistant.length() > 0) {
+                arr.put(new JSONObject().put("role", "assistant").put("content", visibleAssistant));
+            }
+            arr.put(AgentTools.textResultUserMessage("web_search", q, result == null ? "" : result));
+        } catch (Exception e) {
+            return true;
+        }
+        return true;
+    }
+
+    private LinearLayout compactStatusRow() {
+        LinearLayout row = row();
+        row.setClipChildren(false);
+        row.setClipToPadding(false);
+        row.setPadding(0, dp(1), 0, dp(1));
+        row.setMinimumHeight(dp(22));
+        return row;
+    }
+
+    private TextView statusText(String label) {
+        TextView v = text(label, 11, Color.rgb(135, 135, 135));
+        v.setGravity(Gravity.CENTER_VERTICAL);
+        v.setIncludeFontPadding(false);
+        v.setPadding(0, dp(1), 0, dp(1));
+        v.setMinHeight(dp(22));
+        return v;
+    }
+
+    private JumpTextView liveStatus(String word, Msg m) {
+        JumpTextView jump = new JumpTextView(this);
+        jump.word = word == null || word.length() == 0 ? "thinking" : word;
+        jump.bind(m);
+        jump.setTextColor(Color.rgb(135, 135, 135));
+        jump.setGravity(Gravity.CENTER_VERTICAL);
+        setTextPx(jump, 11);
+        jump.setIncludeFontPadding(false);
+        jump.setPadding(0, dp(1), 0, dp(1));
+        jump.setMinHeight(dp(22));
+        return jump;
+    }
+
+    private TextView toolDoneView(ToolStep step) {
+        String name = step == null || step.name == null ? "tool" : step.name;
+        String detail = step == null ? "" : step.detail;
+        String label = ToolText.toolDoneLabel(name, detail);
+        SpannableStringBuilder b = new SpannableStringBuilder(label);
+        int nameEnd = name.length();
+        if (nameEnd > 0 && nameEnd <= b.length()) {
+            b.setSpan(new TypefaceSpan("monospace"), 0, nameEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+        TextView v = statusText("");
+        v.setText(b);
+        return v;
+    }
+
+    private View sourceThumbStrip(ArrayList<String> urls) {
+        HorizontalScrollView scroller = new HorizontalScrollView(this);
+        scroller.setHorizontalScrollBarEnabled(false);
+        scroller.setFillViewport(false);
+        scroller.setBackgroundColor(Color.BLACK);
+        LinearLayout row = row();
+        row.setPadding(0, 0, 0, 0);
+        if (urls != null) {
+            int n = Math.min(8, urls.size());
+            for (int i = 0; i < n; i++) {
+                String url = urls.get(i);
+                if (url == null || url.length() == 0) continue;
+                row.addView(sourceThumb(url), sourceThumbParams(i == 0));
+            }
+        }
+        scroller.addView(row, new FrameLayout.LayoutParams(-2, -2));
+        return scroller;
+    }
+
+    private LinearLayout.LayoutParams sourceThumbParams(boolean first) {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(18), dp(18));
+        lp.leftMargin = first ? 0 : dp(4);
+        return lp;
+    }
+
+    private View sourceThumb(final String url) {
+        String host = ToolText.sourceHost(url);
+        Bitmap icon = null;
+        synchronized (faviconCache) {
+            icon = host.length() == 0 ? null : faviconCache.get(host);
+        }
+        if (icon != null && !icon.isRecycled()) {
+            ImageView img = new ImageView(this);
+            img.setImageBitmap(icon);
+            img.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            img.setBackgroundColor(Color.BLACK);
+            img.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { openHttpUrl(url); } });
+            return img;
+        }
+        TextView letter = new TextView(this);
+        letter.setText(ToolText.sourceLetter(host));
+        letter.setTextColor(Color.rgb(135, 135, 135));
+        letter.setGravity(Gravity.CENTER);
+        letter.setIncludeFontPadding(false);
+        setTextPx(letter, 9);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(Color.rgb(28, 28, 28));
+        bg.setCornerRadius(dp(3));
+        letter.setBackground(bg);
+        letter.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { openHttpUrl(url); } });
+        return letter;
+    }
+
+    private void prefetchFavicons(ArrayList<String> urls) {
+        if (urls == null) return;
+        for (int i = 0; i < urls.size(); i++) {
+            final String host = ToolText.sourceHost(urls.get(i));
+            if (host.length() == 0) continue;
+            synchronized (faviconCache) {
+                if (faviconCache.containsKey(host) || faviconLoading.contains(host) || faviconFailed.contains(host)) continue;
+                faviconLoading.add(host);
+            }
+            new Thread(new Runnable() { @Override public void run() {
+                Bitmap b = downloadFavicon(host);
+                synchronized (faviconCache) {
+                    faviconLoading.remove(host);
+                    if (b != null) faviconCache.put(host, b);
+                    else faviconFailed.add(host);
+                }
+                if (b != null) runOnUiThread(new Runnable() { @Override public void run() { renderMessages(); } });
+            } }, "favicon").start();
+        }
+    }
+
+    private Bitmap downloadFavicon(String host) {
+        if (host == null || host.length() == 0) return null;
+        String[] urls = new String[]{
+                "https://www.google.com/s2/favicons?sz=64&domain_url=" + host,
+                "https://www.google.com/s2/favicons?sz=32&domain=" + host,
+                "https://icons.duckduckgo.com/ip3/" + host + ".ico"
+        };
+        for (int i = 0; i < urls.length; i++) {
+            HttpURLConnection c = null;
+            try {
+                c = (HttpURLConnection) new URL(urls[i]).openConnection();
+                c.setConnectTimeout(4000);
+                c.setReadTimeout(4000);
+                c.setInstanceFollowRedirects(true);
+                c.setRequestProperty("User-Agent", "lightui/1.0");
+                int code = c.getResponseCode();
+                if (code < 200 || code >= 300) continue;
+                Bitmap b = BitmapFactory.decodeStream(c.getInputStream());
+                if (b == null || b.getWidth() <= 0) continue;
+                if (b.getWidth() > 64 || b.getHeight() > 64) {
+                    Bitmap scaled = Bitmap.createScaledBitmap(b, 32, 32, true);
+                    if (scaled != b) b.recycle();
+                    b = scaled;
+                }
+                return b;
+            } catch (Exception ignored) {
+            } finally {
+                if (c != null) c.disconnect();
+            }
+        }
+        return null;
+    }
+
+    private void openHttpUrl(String url) {
+        if (url == null || url.length() == 0) return;
+        try {
+            Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+        } catch (Exception e) {
+            toast("can't open link");
+        }
     }
 
     private StreamRound streamChatCompletion(JSONObject body, String key, String source, final Msg assistant) throws Exception {
@@ -3040,6 +3309,7 @@ public class MainActivity extends Activity {
 
     private void finishStreamingAssistant(Msg assistant, String finalAnswer, String reasoning, String stats, String key, String source, String model) {
         stopVoiceThinking();
+        completeRunningToolSteps(assistant);
         assistant.stats = stats;
         assistant.streamDone = true;
         String cleanedFinal = sanitizeAssistantText(finalAnswer.length() == 0 ? assistant.text : finalAnswer);
@@ -3050,8 +3320,8 @@ public class MainActivity extends Activity {
         }
         if (cleanedFinal.length() == 0) cleanedFinal = fallbackWhenNoReply(assistant);
         assistant.text = cleanedFinal;
-        if (reasoning.length() > 0) { assistant.reasoning = reasoning; if (assistant.thoughtMs == 0) assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt); }
-        else if (assistant.thoughtMs == 0 && assistant.reasoningCapable) assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt);
+        if (assistant.thoughtMs == 0) assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt);
+        if (reasoning.length() > 0) assistant.reasoning = reasoning;
         if (assistant.slowVoice && isModelRefusal(assistant.text)) {
             assistant.ttsQueue.clear();
             assistant.ttsRequested = false;
@@ -3122,7 +3392,7 @@ public class MainActivity extends Activity {
         }
 
         runOnUiThread(new Runnable() { @Override public void run() {
-            if (assistant.thoughtMs == 0 && assistant.reasoningCapable) {
+            if (assistant.thoughtMs == 0) {
                 assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt);
             }
             assistant.text = "";
@@ -7876,6 +8146,28 @@ public class MainActivity extends Activity {
             mime = mimeType == null || mimeType.length() == 0 ? "image/jpeg" : mimeType;
         }
     }
+    public static class ToolStep {
+        String name = "";
+        String detail = "";
+        String status = "done";
+        String preview = "";
+        JSONObject toJson() throws Exception {
+            return new JSONObject().put("name", name == null ? "" : name)
+                    .put("detail", detail == null ? "" : detail)
+                    .put("status", "running".equals(status) ? "done" : (status == null ? "done" : status))
+                    .put("preview", preview == null ? "" : preview);
+        }
+        static ToolStep fromJson(JSONObject o) {
+            ToolStep s = new ToolStep();
+            if (o == null) return s;
+            s.name = o.optString("name", "");
+            s.detail = o.optString("detail", "");
+            s.status = o.optString("status", "done");
+            if ("running".equals(s.status)) s.status = "done";
+            s.preview = o.optString("preview", "");
+            return s;
+        }
+    }
     public static class Msg {
         String role, text, imageBase64 = "", imageMime = "", stats, model, replyQuote, reasoning = "", memorySavedText = "";
         boolean slowVoice = false, reasoningCapable = false, thinkingExpanded = false, searchExpanded = false, memorySaved = false, memoryExpanded = false, ttsRequested = false, ttsPrefetching = false, ttsStarted = false, ttsPlaying = false, ttsStartDelayDone = false, streamDone = false, skipImagesInRequest = false;
@@ -7885,6 +8177,7 @@ public class MainActivity extends Activity {
         ArrayList<AttachedImage> images = new ArrayList<AttachedImage>();
         ArrayList<String> ttsQueue = new ArrayList<String>();
         ArrayList<String> searchSources = new ArrayList<String>();
+        ArrayList<ToolStep> toolSteps = new ArrayList<ToolStep>();
         Msg(String r, String t, String i, String m, String s) { this(r,t,i,m,s,"",""); }
         Msg(String r, String t, String i, String m, String s, String modelName) { this(r,t,i,m,s,modelName,""); }
         Msg(String r, String t, String i, String m, String s, String modelName, String reply) {
@@ -7908,12 +8201,19 @@ public class MainActivity extends Activity {
             syncLegacyImageFields();
             JSONArray src = new JSONArray();
             for (String s : searchSources) src.put(s);
+            JSONArray steps = new JSONArray();
+            synchronized (toolSteps) {
+                for (ToolStep step : toolSteps) {
+                    if (step == null) continue;
+                    try { steps.put(step.toJson()); } catch (Exception ignored) {}
+                }
+            }
             JSONArray imgs = new JSONArray();
             for (AttachedImage img : images) {
                 if (img == null || img.base64 == null || img.base64.length() == 0) continue;
                 imgs.put(new JSONObject().put("data", img.base64).put("mime", img.mime == null || img.mime.length() == 0 ? "image/jpeg" : img.mime));
             }
-            return new JSONObject().put("role",role).put("text",text).put("image",imageBase64).put("mime",imageMime).put("images",imgs).put("skipImagesInRequest",skipImagesInRequest).put("stats",stats).put("model",model).put("replyQuote",replyQuote).put("reasoning",reasoning).put("thoughtMs",thoughtMs).put("memorySaved",memorySaved).put("memorySavedText",memorySavedText).put("searchSources",src);
+            return new JSONObject().put("role",role).put("text",text).put("image",imageBase64).put("mime",imageMime).put("images",imgs).put("skipImagesInRequest",skipImagesInRequest).put("stats",stats).put("model",model).put("replyQuote",replyQuote).put("reasoning",reasoning).put("thoughtMs",thoughtMs).put("memorySaved",memorySaved).put("memorySavedText",memorySavedText).put("searchSources",src).put("toolSteps",steps);
         }
         static Msg fromJson(JSONObject o) {
             Msg m = new Msg(o.optString("role"),o.optString("text"),o.optString("image"),o.optString("mime"),o.optString("stats"),o.optString("model"),o.optString("replyQuote"));
@@ -7938,6 +8238,15 @@ public class MainActivity extends Activity {
             }
             JSONArray src = o.optJSONArray("searchSources");
             if (src != null) for (int i = 0; i < src.length(); i++) { String s = src.optString(i, ""); if (s.length() > 0) m.searchSources.add(s); }
+            JSONArray steps = o.optJSONArray("toolSteps");
+            if (steps != null) {
+                for (int i = 0; i < steps.length(); i++) {
+                    JSONObject so = steps.optJSONObject(i);
+                    if (so == null) continue;
+                    ToolStep ts = ToolStep.fromJson(so);
+                    if (ts.name != null && ts.name.length() > 0) m.toolSteps.add(ts);
+                }
+            }
             m.streamDone = !isBusyStats(m.stats);
             return m;
         }
