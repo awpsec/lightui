@@ -1304,13 +1304,13 @@ public final class ToolText {
         if (e == null) return "download failed";
         String m = (e.getMessage() == null ? "" : e.getMessage()).toLowerCase(Locale.US);
         if (m.contains("unexpected end of stream") || m.contains("truncated") || m.contains("content-length")) {
-            return "download cut off - retry or open in browser";
+            return "download cut off - retry";
         }
         if (m.contains("not an apk") || m.contains("html")) {
-            return "github sent a webpage instead of the apk - open in browser";
+            return "github sent a webpage instead of the apk - retry";
         }
         if (isTransientDownloadError(e)) {
-            return "network dropped - retry or open in browser";
+            return "network dropped - retry";
         }
         String raw = e.getMessage() == null || e.getMessage().trim().length() == 0
                 ? e.getClass().getSimpleName()
