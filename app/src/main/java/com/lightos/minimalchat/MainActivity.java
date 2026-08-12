@@ -112,7 +112,7 @@ public class MainActivity extends Activity {
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
     private static final String SEARCHING = "__searching__";
-    private static final String APP_VERSION = "1.0.35";
+    private static final String APP_VERSION = "1.0.36";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 120;
@@ -5641,6 +5641,10 @@ public class MainActivity extends Activity {
 
     private void beginListening() {
         if (voiceReply != null) voiceReply.setVisibility(View.GONE);
+        if (voiceWaves != null) {
+            voiceWaves.animate().cancel();
+            voiceWaves.setAlpha(1f);
+        }
         voiceAwaitingSpeechResult = true;
         vibrateListenStarted();
         if (voiceFullMode) renderVoiceConversation();
@@ -6673,8 +6677,8 @@ public class MainActivity extends Activity {
         voiceReply.setVisibility(View.GONE);
         if (full) voiceReply.setBackgroundColor(Color.TRANSPARENT);
         voiceReply.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { voiceReply.setVisibility(View.GONE); beginListening(); } });
-        box.addView(voiceStatus, new LinearLayout.LayoutParams(-1, full ? dp(62) : dp(28)));
-        if (!full) box.addView(voiceWaves, new LinearLayout.LayoutParams(-1, dp(64)));
+        box.addView(voiceStatus, new LinearLayout.LayoutParams(-1, full ? dp(48) : dp(28)));
+        box.addView(voiceWaves, new LinearLayout.LayoutParams(-1, full ? dp(52) : dp(64)));
         if (full) {
             voiceTextScroll = new ScrollView(this);
             voiceTextScroll.setVerticalScrollBarEnabled(false);
@@ -6784,13 +6788,7 @@ public class MainActivity extends Activity {
         voiceReply = null;
     }
 
-    private void updateVoiceStatus(String s) {
-        if (voiceStatus != null) voiceStatus.setText(s);
-        if (voiceBorder != null) {
-            voiceBorder.phase = s == null ? "" : s;
-            voiceBorder.invalidate();
-        }
-    }
+    private void updateVoiceStatus(String s) { if (voiceStatus != null) voiceStatus.setText(s); }
     private void setVoiceLevel(float level) { if (voiceWaves != null) { voiceWaves.level = level; voiceWaves.invalidate(); } if (voiceBorder != null) { voiceBorder.level = level; voiceBorder.invalidate(); } }
     private void fadeVoiceWaves() { if (voiceWaves != null) voiceWaves.animate().alpha(0f).setDuration(260).start(); }
 
@@ -8746,20 +8744,23 @@ public class MainActivity extends Activity {
         Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
         float level = 0.05f;
         float shown = 0.05f;
-        long born = android.os.SystemClock.uptimeMillis();
-        final Runnable tick = new Runnable() { @Override public void run() { shown += (level - shown) * 0.28f; invalidate(); postDelayed(this, 32); } };
-        public WaveView(Context c) { super(c); }
-        @Override protected void onAttachedToWindow() { super.onAttachedToWindow(); born = android.os.SystemClock.uptimeMillis(); removeCallbacks(tick); post(tick); }
+        final Runnable tick = new Runnable() {
+            @Override public void run() {
+                shown += (level - shown) * (level < shown ? 0.5f : 0.35f);
+                invalidate();
+                postDelayed(this, 50);
+            }
+        };
+        public WaveView(Context c) { super(c); setBackgroundColor(Color.TRANSPARENT); }
+        @Override protected void onAttachedToWindow() { super.onAttachedToWindow(); removeCallbacks(tick); post(tick); }
         @Override protected void onDetachedFromWindow() { removeCallbacks(tick); super.onDetachedFromWindow(); }
         @Override protected void onDraw(Canvas c) {
             int bars = 9; int gap = dp(8); int barW = dp(3); int total = bars * barW + (bars - 1) * gap; int start = (getWidth() - total) / 2; int mid = getHeight() / 2;
-            float breath = 0.5f + 0.5f * (float) Math.sin((android.os.SystemClock.uptimeMillis() - born) / 1800.0 * 2.0 * Math.PI);
-            float energy = Math.max(0.06f, shown + 0.035f * breath);
             p.setColor(Color.WHITE); p.setStyle(Paint.Style.FILL);
             for (int i = 0; i < bars; i++) {
                 float distance = Math.abs(i - (bars - 1) / 2f);
                 float scale = Math.max(0.15f, 1f - distance * 0.14f);
-                int h = Math.max(dp(8), Math.round(dp(78) * energy * scale));
+                int h = Math.max(dp(8), Math.round(getHeight() * 0.92f * shown * scale));
                 int x = start + i * (barW + gap);
                 c.drawRect(x, mid - h / 2f, x + barW, mid + h / 2f, p);
             }
@@ -8769,50 +8770,39 @@ public class MainActivity extends Activity {
         Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
         float level = 0.05f;
         float shown = 0.05f;
-        String phase = "listening";
         long born = android.os.SystemClock.uptimeMillis();
-        final Runnable tick = new Runnable() { @Override public void run() { shown += (level - shown) * 0.22f; invalidate(); postDelayed(this, 32); } };
-        public BorderWaveView(Context c) { super(c); }
+        final Runnable tick = new Runnable() {
+            @Override public void run() {
+                shown += (level - shown) * (level < shown ? 0.5f : 0.35f);
+                invalidate();
+                postDelayed(this, 50);
+            }
+        };
+        public BorderWaveView(Context c) {
+            super(c);
+            setBackgroundColor(Color.TRANSPARENT);
+            setClickable(false);
+            setFocusable(false);
+        }
         @Override protected void onAttachedToWindow() { super.onAttachedToWindow(); born = android.os.SystemClock.uptimeMillis(); removeCallbacks(tick); post(tick); }
         @Override protected void onDetachedFromWindow() { removeCallbacks(tick); super.onDetachedFromWindow(); }
         @Override protected void onDraw(Canvas c) {
             int w = getWidth(), h = getHeight();
             if (w < 8 || h < 8) return;
-            long t = android.os.SystemClock.uptimeMillis() - born;
-            String ph = phase == null ? "" : phase.toLowerCase(Locale.US);
-            boolean talking = ph.contains("speak") || ph.contains("respond");
-            boolean thinking = ph.contains("think") || ph.contains("transcrib");
-            float breathHz = thinking ? 2800f : (talking ? 900f : 2100f);
-            float breath = 0.5f + 0.5f * (float) Math.sin(t / breathHz * 2.0 * Math.PI);
-            float voice = Math.max(0f, Math.min(1f, (shown - 0.08f) / 0.85f));
-            float pulse = talking ? (0.42f + 0.58f * (0.5f + 0.5f * (float) Math.sin(t / 340.0 * 2.0 * Math.PI))) : 0f;
-            float energy = Math.max(voice, pulse);
+            float breath = 0.5f + 0.5f * (float) Math.sin((android.os.SystemClock.uptimeMillis() - born) / 2400.0 * 2.0 * Math.PI);
             p.setStyle(Paint.Style.STROKE);
             p.setStrokeCap(Paint.Cap.SQUARE);
             p.setStrokeJoin(Paint.Join.MITER);
-            p.setStrokeWidth(1);
-            int outerA = Math.round(108 + breath * 42 + energy * 36);
-            p.setColor(Color.argb(Math.min(220, outerA), 255, 255, 255));
-            float o = 1f;
-            c.drawRect(o, o, w - o, h - o, p);
-            float inset = dp(5) + breath * dp(1) * 1.1f + energy * dp(5);
-            int innerA = thinking ? Math.round(28 + breath * 22) : Math.round(36 + breath * 28 + energy * 120);
-            if (innerA > 18) {
-                p.setColor(Color.argb(Math.min(200, innerA), 210, 210, 210));
-                c.drawRect(inset, inset, w - inset, h - inset, p);
+            p.setStrokeWidth(dp(2));
+            p.setColor(Color.argb(Math.round(138 + breath * 22), 255, 255, 255));
+            float m = dp(1);
+            c.drawRect(m, m, w - m, h - m, p);
+            if (shown > 0.12f) {
+                p.setStrokeWidth(1);
+                p.setColor(Color.argb(Math.min(210, 90 + Math.round(shown * 120)), 255, 255, 255));
+                float in = dp(7);
+                c.drawRect(in, in, w - in, h - in, p);
             }
-            if (energy > 0.06f) {
-                float tickLen = dp(6) + energy * dp(5);
-                p.setColor(Color.argb(Math.min(230, Math.round(70 + energy * 130)), 255, 255, 255));
-                drawCorner(c, o, o, tickLen, 1, 1);
-                drawCorner(c, w - o, o, tickLen, -1, 1);
-                drawCorner(c, o, h - o, tickLen, 1, -1);
-                drawCorner(c, w - o, h - o, tickLen, -1, -1);
-            }
-        }
-        void drawCorner(Canvas c, float x, float y, float len, int dx, int dy) {
-            c.drawLine(x, y, x + dx * len, y, p);
-            c.drawLine(x, y, x, y + dy * len, p);
         }
     }
     public class GlobeButton extends View { Paint p = new Paint(Paint.ANTI_ALIAS_FLAG); boolean active = false; public GlobeButton(Context c) { super(c); } @Override protected void onDraw(Canvas c) { if (!active) return; int w=getWidth(), h=getHeight(); float r=Math.min(w,h)*0.25f, cx=w/2f, cy=h/2f; p.setColor(Color.WHITE); p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(Math.max(1f, dp(1))); p.setStrokeCap(Paint.Cap.ROUND); c.drawCircle(cx, cy, r, p); c.drawOval(cx-r*0.45f, cy-r, cx+r*0.45f, cy+r, p); c.drawArc(cx-r, cy-r*0.55f, cx+r, cy+r*0.55f, 0, 360, false, p); c.drawLine(cx-r*0.94f, cy, cx+r*0.94f, cy, p); } }
