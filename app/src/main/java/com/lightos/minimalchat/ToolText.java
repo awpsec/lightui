@@ -1251,4 +1251,91 @@ public final class ToolText {
         if (id == null) return 0;
         try { return Long.parseLong(id.trim()); } catch (Exception e) { return 0; }
     }
+
+    public static boolean isApkMagic(byte[] head) {
+        return isApkMagic(head, head == null ? 0 : head.length);
+    }
+
+    public static boolean isApkMagic(byte[] head, int len) {
+        return head != null && len >= 2 && head[0] == 'P' && head[1] == 'K';
+    }
+
+    public static boolean isHttpRedirect(int code) {
+        return code == 301 || code == 302 || code == 303 || code == 307 || code == 308;
+    }
+
+    public static String resolveRedirectUrl(String currentUrl, String location) {
+        if (location == null) return null;
+        String loc = location.trim();
+        if (loc.length() == 0) return null;
+        try {
+            return new java.net.URL(new java.net.URL(currentUrl), loc).toString();
+        } catch (Exception e) {
+            if (loc.startsWith("http://") || loc.startsWith("https://")) return loc;
+            return null;
+        }
+    }
+
+    public static boolean downloadLengthMismatch(long expected, long written) {
+        return expected > 0 && written != expected;
+    }
+
+    public static boolean isTransientDownloadError(Throwable e) {
+        if (e == null) return false;
+        String m = (e.getMessage() == null ? "" : e.getMessage()).toLowerCase(Locale.US);
+        String c = e.getClass().getName().toLowerCase(Locale.US);
+        return m.contains("unexpected end of stream")
+                || m.contains("connection reset")
+                || m.contains("connection closed")
+                || m.contains("software caused connection abort")
+                || m.contains("broken pipe")
+                || m.contains("timeout")
+                || m.contains("timed out")
+                || m.contains("failed to connect")
+                || m.contains("unable to resolve")
+                || m.contains("truncated")
+                || c.contains("unknownhost")
+                || c.contains("sockettimeout")
+                || c.contains("eofexception")
+                || c.contains("connectexception");
+    }
+
+    public static String friendlyDownloadError(Throwable e) {
+        if (e == null) return "download failed";
+        String m = (e.getMessage() == null ? "" : e.getMessage()).toLowerCase(Locale.US);
+        if (m.contains("unexpected end of stream") || m.contains("truncated") || m.contains("content-length")) {
+            return "download cut off - retry or open in browser";
+        }
+        if (m.contains("not an apk") || m.contains("html")) {
+            return "github sent a webpage instead of the apk - open in browser";
+        }
+        if (isTransientDownloadError(e)) {
+            return "network dropped - retry or open in browser";
+        }
+        String raw = e.getMessage() == null || e.getMessage().trim().length() == 0
+                ? e.getClass().getSimpleName()
+                : e.getMessage().replace('\n', ' ').trim();
+        if (raw.length() > 80) raw = raw.substring(0, 80);
+        return "update failed: " + raw;
+    }
+
+    public static String[] updateDownloadUrls(String primary, String version) {
+        ArrayList<String> urls = new ArrayList<String>();
+        addUniqueUrl(urls, primary);
+        String tag = version == null ? "" : version.trim();
+        if (tag.startsWith("v") || tag.startsWith("V")) tag = tag.substring(1);
+        if (tag.length() > 0) {
+            addUniqueUrl(urls, "https://github.com/awpsec/lightui/releases/download/v" + tag + "/lightui-release.apk");
+        }
+        addUniqueUrl(urls, "https://github.com/awpsec/lightui/releases/latest/download/lightui-release.apk");
+        return urls.toArray(new String[0]);
+    }
+
+    private static void addUniqueUrl(ArrayList<String> urls, String url) {
+        if (url == null) return;
+        String u = url.trim();
+        if (u.length() == 0) return;
+        for (int i = 0; i < urls.size(); i++) if (u.equals(urls.get(i))) return;
+        urls.add(u);
+    }
 }

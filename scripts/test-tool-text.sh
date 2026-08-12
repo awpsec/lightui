@@ -14,10 +14,13 @@ mkdir -p "$OUT"
 "$JAVA_HOME/bin/javac" -encoding UTF-8 -cp "$JSON_JAR" -d "$OUT" \
     app/src/main/java/com/lightos/minimalchat/ToolText.java \
     app/src/main/java/com/lightos/minimalchat/AgentTools.java \
+    app/src/main/java/com/lightos/minimalchat/UpdateDownload.java \
     scripts/ToolTextTest.java \
     scripts/AgentToolsTest.java \
-    scripts/ToolLoopHarness.java
+    scripts/ToolLoopHarness.java \
+    scripts/UpdateDownloadTest.java
 "$JAVA_HOME/bin/java" -Djava.net.preferIPv4Stack=true -cp "$OUT:$JSON_JAR" com.lightos.minimalchat.ToolTextTest
 "$JAVA_HOME/bin/java" -Djava.net.preferIPv4Stack=true -cp "$OUT:$JSON_JAR" com.lightos.minimalchat.AgentToolsTest
 "$JAVA_HOME/bin/java" -Djava.net.preferIPv4Stack=true -cp "$OUT:$JSON_JAR" com.lightos.minimalchat.ToolLoopHarness
+"$JAVA_HOME/bin/java" -Djava.net.preferIPv4Stack=true -cp "$OUT:$JSON_JAR" com.lightos.minimalchat.UpdateDownloadTest
 echo "All tool harness tests passed"
