@@ -62,11 +62,15 @@ import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.TouchDelegate;
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
+import android.animation.ValueAnimator;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
 import android.view.Window;
 import android.view.WindowManager;
+import android.view.animation.AccelerateInterpolator;
 import android.view.animation.DecelerateInterpolator;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
@@ -114,7 +118,7 @@ public class MainActivity extends Activity {
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
     private static final String SEARCHING = "__searching__";
-    private static final String APP_VERSION = "1.0.40";
+    private static final String APP_VERSION = "1.0.41";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 48;
@@ -131,6 +135,8 @@ public class MainActivity extends Activity {
     private Runnable pendingPersist;
     private Runnable pendingStreamRender;
     private Runnable pendingChatFilter;
+    private ValueAnimator chatSearchAnim;
+    private boolean chatSearchOpen = false;
     private long lastStreamRenderAt = 0;
     private boolean chatsDirty = false;
     private boolean modelsRefreshing = false;
@@ -156,7 +162,9 @@ public class MainActivity extends Activity {
     private ScrollView scroll, settingsScrollView;
     private ScrollIndicator scrollIndicator;
     private EditText input, apiKey, endpointInput, endpointKeyInput, jinaKeyInput, braveKeyInput, voiceEndpointInput, chatSearch;
-    private ImageButton composerAction;
+    private View chatSearchRow;
+    private ImageButton chatSearchBtn, composerAction;
+    private TextView chatSearchClear;
     private View photoPreviewOverlay;
     private TextView modelText, contextText, attachText, replyChip, notice, voiceStatus, voiceText, voiceReply, bulkButton, emptyPrompt, bottomButton, chatsSelectCount;
     private LinearLayout slashSuggestRow, chatsSelectBar;
@@ -377,6 +385,7 @@ public class MainActivity extends Activity {
             if (code == KeyEvent.KEYCODE_HOME || code == KeyEvent.KEYCODE_BACK || code == KeyEvent.KEYCODE_ESCAPE || code == KeyEvent.KEYCODE_MOVE_HOME) {
                 if (photoPreviewOverlay != null) { dismissImagePreview(); return true; }
                 if (voiceMode && voiceFullMode) stopVoiceMode();
+                else if (pane == 0 && chatSearchOpen) collapseChatSearch(true);
                 else if (projectEditorOpen) showChatsPane();
                 else if (pane == 0 && projectView.length() > 0) { paneSlide = 1; projectView = ""; showChatsPane(); }
                 else if (pane == 2 && settingsPage.length() > 0) { paneSlide = 1; settingsPage = ""; showSettingsPane(); }
@@ -397,6 +406,9 @@ public class MainActivity extends Activity {
     }
 
     private void collapseKeyboardIfOutsideInput(MotionEvent e) {
+        if (pane == 0 && chatSearchOpen && !eventInsideView(chatSearchRow, e) && !eventInsideView(chatSearchBtn, e) && !eventInsideView(chatSearchClear, e)) {
+            collapseChatSearch(true);
+        }
         View focused = getCurrentFocus();
         if (!(focused instanceof EditText)) return;
         int[] loc = new int[2];
@@ -404,6 +416,14 @@ public class MainActivity extends Activity {
         float x = e.getRawX(), y = e.getRawY();
         boolean inside = x >= loc[0] && x <= loc[0] + focused.getWidth() && y >= loc[1] && y <= loc[1] + focused.getHeight();
         if (!inside) clearFocusedTextField();
+    }
+
+    private boolean eventInsideView(View v, MotionEvent e) {
+        if (v == null || v.getVisibility() != View.VISIBLE || v.getWidth() <= 0) return false;
+        int[] loc = new int[2];
+        v.getLocationOnScreen(loc);
+        float x = e.getRawX(), y = e.getRawY();
+        return x >= loc[0] && x <= loc[0] + v.getWidth() && y >= loc[1] && y <= loc[1] + v.getHeight();
     }
 
     private boolean clearFocusedTextField() {
@@ -430,6 +450,9 @@ public class MainActivity extends Activity {
         }
         if (pane == 0) {
             chatSearch = null;
+            chatSearchRow = null;
+            chatSearchBtn = null;
+            chatSearchClear = null;
             chatsSelectBar = null;
             chatsSelectCount = null;
             chatList = null;
@@ -511,6 +534,7 @@ public class MainActivity extends Activity {
 
     private void showChatPane() {
         projectEditorOpen = false;
+        if (chatSearchOpen) collapseChatSearch(false);
         pane = 1;
         boolean reuse = chatPaneReusable();
         boolean sameChat = reuse && (currentChatId == null ? "" : currentChatId).equals(chatBoundId);
@@ -520,6 +544,7 @@ public class MainActivity extends Activity {
             refreshChatChrome();
             if (sameChat) {
                 finishChatPane(true);
+                restoreChatScrollAfterShow();
                 return;
             }
             restoreScrollOnce = savedChatScrollKnown;
@@ -527,6 +552,7 @@ public class MainActivity extends Activity {
             chatBoundId = currentChatId == null ? "" : currentChatId;
             renderMessages();
             slidePaneIn();
+            restoreChatScrollAfterShow();
             return;
         }
         restoreScrollOnce = savedChatScrollKnown;
@@ -581,7 +607,7 @@ public class MainActivity extends Activity {
         scroll = new ScrollView(this);
         messageList = new LinearLayout(this);
         messageList.setOrientation(LinearLayout.VERTICAL);
-        messageList.setPadding(0, dp(12), 0, dp(8));
+        messageList.setPadding(0, dp(12), 0, dp(16));
         messageList.setBackgroundColor(Color.BLACK);
         scroll.addView(messageList);
         scroll.setVerticalScrollBarEnabled(false);
@@ -673,6 +699,7 @@ public class MainActivity extends Activity {
     private void showSettingsPane() {
         boolean arriving = !paneIsShowing(2);
         projectEditorOpen = false;
+        if (chatSearchOpen) collapseChatSearch(false);
         flushSettingsInputs();
         if (pane == 2 && settingsPage.length() == 0 && settingsScrollView != null) savedSettingsScrollY = settingsScrollView.getScrollY();
         pane = 2;
@@ -2235,6 +2262,7 @@ public class MainActivity extends Activity {
         if (chatList != null) chatList.setEnabled(true);
         if (reuse) {
             renderChatList();
+            updateSearchBadge();
             if (!already) slidePaneIn();
             else {
                 paneSlide = 0;
@@ -2251,52 +2279,37 @@ public class MainActivity extends Activity {
         title.setGravity(Gravity.CENTER_VERTICAL);
         title.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { if (projectView.length() > 0) { paneSlide = 1; projectView = ""; showChatsPane(); } } });
         top.addView(title, new LinearLayout.LayoutParams(-2, dp(38)));
+        View mag = chatSearchButton();
         if (projectView.length() > 0) {
             TextView sub = text("  " + projectView, 13, Color.rgb(150,150,150));
             sub.setGravity(Gravity.CENTER_VERTICAL);
+            sub.setSingleLine(true);
+            sub.setEllipsize(android.text.TextUtils.TruncateAt.END);
             sub.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { paneSlide = 1; projectView = ""; showChatsPane(); } });
             top.addView(sub, new LinearLayout.LayoutParams(0, dp(38), 1));
-        } else top.addView(space(1), new LinearLayout.LayoutParams(0, dp(38), 1));
+            top.addView(mag, new LinearLayout.LayoutParams(dp(42), dp(34)));
+        } else {
+            LinearLayout mid = row();
+            mid.setGravity(Gravity.CENTER);
+            mid.addView(mag, new LinearLayout.LayoutParams(dp(42), dp(34)));
+            top.addView(mid, new LinearLayout.LayoutParams(0, dp(38), 1));
+        }
         ImageButton fresh = iconButton(R.drawable.ic_chat_plus, new View.OnClickListener() { @Override public void onClick(View v) { paneSlide = -1; newChat(); pane = 1; renderPane(); } }, 6);
         top.addView(fresh, new LinearLayout.LayoutParams(dp(42), dp(34)));
         if (projectView.length() > 0) top.addView(iconButton(R.drawable.ic_pencil, new View.OnClickListener() { @Override public void onClick(View v) { editFolder(projectView); } }, 8), new LinearLayout.LayoutParams(dp(42), dp(34)));
         else top.addView(iconButton(R.drawable.ic_folder_plus, new View.OnClickListener() { @Override public void onClick(View v) { addFolder(); } }, 6), new LinearLayout.LayoutParams(dp(42), dp(34)));
         root.addView(top, new LinearLayout.LayoutParams(-1, dp(40)));
 
-        chatSearch = plainEdit("search");
-        chatSearch.setSingleLine(true);
-        chatSearch.setHintTextColor(Color.rgb(90, 90, 90));
-        setTextPx(chatSearch, 14);
-        chatSearch.setPadding(dp(10), 0, dp(10), 0);
-        GradientDrawable searchBg = new GradientDrawable();
-        searchBg.setColor(Color.BLACK);
-        searchBg.setStroke(1, Color.rgb(34, 34, 34));
-        searchBg.setCornerRadius(dp(3));
-        chatSearch.setBackground(searchBg);
-        chatSearch.setImeOptions(EditorInfo.IME_ACTION_DONE);
-        chatSearch.setOnEditorActionListener(new TextView.OnEditorActionListener() {
-            @Override public boolean onEditorAction(TextView v, int actionId, KeyEvent event) {
-                if (actionId == EditorInfo.IME_ACTION_DONE || actionId == EditorInfo.IME_ACTION_SEARCH) {
-                    hideKeyboardFrom(chatSearch);
-                    chatSearch.clearFocus();
-                    return true;
-                }
-                return false;
-            }
-        });
-        if (chatFilter.length() > 0) chatSearch.setText(chatFilter);
-        chatSearch.addTextChangedListener(new TextWatcher() {
-            @Override public void beforeTextChanged(CharSequence s, int st, int c, int a) { }
-            @Override public void onTextChanged(CharSequence s, int st, int b, int c) {
-                chatFilter = s == null ? "" : s.toString();
-                scheduleChatListRender(chatFilter.trim().length() == 0 ? 0 : 50);
-            }
-            @Override public void afterTextChanged(Editable e) { }
-        });
-        LinearLayout.LayoutParams searchLp = new LinearLayout.LayoutParams(-1, dp(36));
-        searchLp.topMargin = dp(4);
-        searchLp.bottomMargin = dp(6);
-        root.addView(chatSearch, searchLp);
+        chatSearchRow = buildChatSearchRow();
+        LinearLayout.LayoutParams searchLp = new LinearLayout.LayoutParams(-1, chatSearchOpen ? dp(36) : 0);
+        searchLp.topMargin = chatSearchOpen ? dp(4) : 0;
+        searchLp.bottomMargin = chatSearchOpen ? dp(6) : 0;
+        root.addView(chatSearchRow, searchLp);
+        chatSearchRow.setVisibility(chatSearchOpen ? View.VISIBLE : View.GONE);
+        updateSearchBadge();
+        if (chatSearchOpen && chatSearch != null) {
+            chatSearch.post(new Runnable() { @Override public void run() { showKeyboardFrom(chatSearch); } });
+        }
 
         ScrollView s = new ScrollView(this);
         s.setOverScrollMode(View.OVER_SCROLL_NEVER);
@@ -2370,10 +2383,16 @@ public class MainActivity extends Activity {
             String f = projectFolders.get(i);
             if (q.trim().length() == 0 || ToolText.textMatchesQuery(q, f, "") || folderHasMatchingChat(f)) visibleFolders.add(f);
         }
-        chatList.addView(sectionHeader("projects  " + visibleFolders.size()));
-        if (visibleFolders.size() == 0) chatList.addView(emptyLine(q.trim().length() > 0 ? "no matches" : "no projects"));
-        for (int i = 0; i < visibleFolders.size(); i++) chatList.addView(folderCard(visibleFolders.get(i), i));
-        chatList.addView(space(10));
+        boolean searching = q.trim().length() > 0;
+        boolean showProjects = projectFolders.size() > 0 && (!searching || visibleFolders.size() > 0);
+        if (showProjects) {
+            boolean collapsed = projectsCollapsed();
+            chatList.addView(projectsSectionHeader(searching ? visibleFolders.size() : projectFolders.size(), collapsed));
+            if (!collapsed) {
+                for (int i = 0; i < visibleFolders.size(); i++) chatList.addView(folderCard(visibleFolders.get(i), i));
+            }
+            chatList.addView(space(collapsed ? 6 : 10));
+        }
         ArrayList<Chat> inbox = chatsInFolder("Inbox");
         ArrayList<Chat> visibleInbox = new ArrayList<Chat>();
         for (int i = 0; i < inbox.size(); i++) if (chatMatchesFilter(inbox.get(i))) visibleInbox.add(inbox.get(i));
@@ -2395,6 +2414,236 @@ public class MainActivity extends Activity {
             renderChatList();
         } };
         ui.postDelayed(pendingChatFilter, delayMs);
+    }
+
+    private View chatSearchButton() {
+        FrameLayout wrap = new FrameLayout(this);
+        wrap.setBackgroundColor(Color.BLACK);
+        chatSearchBtn = iconButton(R.drawable.ic_search, new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                if (chatSearchOpen) collapseChatSearch(true);
+                else expandChatSearch(true);
+            }
+        }, 6);
+        wrap.addView(chatSearchBtn, new FrameLayout.LayoutParams(dp(42), dp(34)));
+        chatSearchClear = text("×", 10, Color.rgb(170, 170, 170));
+        chatSearchClear.setGravity(Gravity.CENTER);
+        chatSearchClear.setIncludeFontPadding(false);
+        chatSearchClear.setPadding(0, 0, dp(1), dp(1));
+        chatSearchClear.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { clearChatSearch(); }
+        });
+        FrameLayout.LayoutParams xLp = new FrameLayout.LayoutParams(dp(18), dp(16), Gravity.RIGHT | Gravity.BOTTOM);
+        wrap.addView(chatSearchClear, xLp);
+        return wrap;
+    }
+
+    private View buildChatSearchRow() {
+        FrameLayout row = new FrameLayout(this);
+        row.setBackgroundColor(Color.BLACK);
+        row.setClipChildren(true);
+        chatSearch = plainEdit("search");
+        chatSearch.setSingleLine(true);
+        chatSearch.setGravity(Gravity.CENTER_VERTICAL);
+        chatSearch.setHintTextColor(Color.rgb(90, 90, 90));
+        setTextPx(chatSearch, 14);
+        chatSearch.setPadding(dp(10), 0, dp(10), 0);
+        GradientDrawable searchBg = new GradientDrawable();
+        searchBg.setColor(Color.BLACK);
+        searchBg.setStroke(1, Color.rgb(34, 34, 34));
+        searchBg.setCornerRadius(dp(3));
+        chatSearch.setBackground(searchBg);
+        chatSearch.setImeOptions(EditorInfo.IME_ACTION_DONE);
+        chatSearch.setOnEditorActionListener(new TextView.OnEditorActionListener() {
+            @Override public boolean onEditorAction(TextView v, int actionId, KeyEvent event) {
+                if (actionId == EditorInfo.IME_ACTION_DONE || actionId == EditorInfo.IME_ACTION_SEARCH) {
+                    collapseChatSearch(true);
+                    return true;
+                }
+                return false;
+            }
+        });
+        if (chatFilter.length() > 0) chatSearch.setText(chatFilter);
+        if (chatSearch.getText() != null) chatSearch.setSelection(chatSearch.getText().length());
+        chatSearch.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int st, int c, int a) { }
+            @Override public void onTextChanged(CharSequence s, int st, int b, int c) {
+                chatFilter = s == null ? "" : s.toString();
+                updateSearchBadge();
+                scheduleChatListRender(chatFilter.trim().length() == 0 ? 0 : 50);
+            }
+            @Override public void afterTextChanged(Editable e) { }
+        });
+        row.addView(chatSearch, new FrameLayout.LayoutParams(-1, -1));
+        return row;
+    }
+
+    private void expandChatSearch(boolean animate) {
+        if (chatSearchRow == null || chatSearch == null) return;
+        chatSearchOpen = true;
+        updateSearchBadge();
+        if (chatSearchAnim != null) { chatSearchAnim.cancel(); chatSearchAnim = null; }
+        chatSearchRow.animate().cancel();
+        chatSearchRow.setVisibility(View.VISIBLE);
+        final int target = dp(36);
+        if (!animate) {
+            applySearchRowHeight(target, dp(4), dp(6), 1f);
+            chatSearchRow.setScaleX(1f);
+            chatSearchRow.setScaleY(1f);
+            chatSearchRow.setTranslationY(0);
+            showKeyboardFrom(chatSearch);
+            return;
+        }
+        applySearchRowHeight(0, 0, 0, 0f);
+        chatSearchRow.setScaleX(0.16f);
+        chatSearchRow.setScaleY(0.45f);
+        chatSearchRow.setTranslationY(-dp(8));
+        chatSearchRow.post(new Runnable() { @Override public void run() {
+            if (chatSearchRow == null || !chatSearchOpen) return;
+            setSearchRowPivotFromIcon();
+            animateSearchRow(0, target, 0f, 1f, 0, dp(4), 0, dp(6), 160, new DecelerateInterpolator(), new Runnable() {
+                @Override public void run() { showKeyboardFrom(chatSearch); }
+            });
+            chatSearchRow.animate().scaleX(1f).scaleY(1f).translationY(0).setDuration(160).setInterpolator(new DecelerateInterpolator()).start();
+        } });
+    }
+
+    private void collapseChatSearch(boolean animate) {
+        if (!chatSearchOpen && (chatSearchRow == null || chatSearchRow.getVisibility() != View.VISIBLE)) {
+            hideKeyboard();
+            return;
+        }
+        chatSearchOpen = false;
+        updateSearchBadge();
+        if (chatSearch != null) {
+            hideKeyboardFrom(chatSearch);
+            chatSearch.clearFocus();
+        } else hideKeyboard();
+        if (chatSearchRow == null) return;
+        if (chatSearchAnim != null) { chatSearchAnim.cancel(); chatSearchAnim = null; }
+        chatSearchRow.animate().cancel();
+        if (!animate) {
+            applySearchRowHeight(0, 0, 0, 1f);
+            chatSearchRow.setVisibility(View.GONE);
+            chatSearchRow.setScaleX(1f);
+            chatSearchRow.setScaleY(1f);
+            chatSearchRow.setTranslationY(0);
+            return;
+        }
+        setSearchRowPivotFromIcon();
+        final int from = chatSearchRow.getHeight() > 0 ? chatSearchRow.getHeight() : dp(36);
+        animateSearchRow(from, 0, 1f, 0f, dp(4), 0, dp(6), 0, 130, new AccelerateInterpolator(), new Runnable() {
+            @Override public void run() {
+                if (chatSearchRow == null) return;
+                chatSearchRow.setVisibility(View.GONE);
+                chatSearchRow.setScaleX(1f);
+                chatSearchRow.setScaleY(1f);
+                chatSearchRow.setTranslationY(0);
+                applySearchRowHeight(0, 0, 0, 1f);
+            }
+        });
+        chatSearchRow.animate().scaleX(0.16f).scaleY(0.45f).translationY(-dp(8)).setDuration(130).setInterpolator(new AccelerateInterpolator()).start();
+    }
+
+    private void clearChatSearch() {
+        chatFilter = "";
+        if (chatSearch != null) {
+            chatSearch.setText("");
+            if (chatSearchOpen) chatSearch.requestFocus();
+        }
+        updateSearchBadge();
+        renderChatList();
+    }
+
+    private void updateSearchBadge() {
+        if (chatSearchClear == null) return;
+        boolean show = chatFilter.trim().length() > 0;
+        chatSearchClear.setVisibility(show ? View.VISIBLE : View.GONE);
+    }
+
+    private void setSearchRowPivotFromIcon() {
+        if (chatSearchRow == null) return;
+        float pivot = chatSearchRow.getWidth() / 2f;
+        if (chatSearchBtn != null && chatSearchBtn.getWidth() > 0) {
+            int[] icon = new int[2], row = new int[2];
+            chatSearchBtn.getLocationOnScreen(icon);
+            chatSearchRow.getLocationOnScreen(row);
+            pivot = icon[0] + chatSearchBtn.getWidth() / 2f - row[0];
+        }
+        chatSearchRow.setPivotX(Math.max(0f, pivot));
+        chatSearchRow.setPivotY(0f);
+    }
+
+    private void applySearchRowHeight(int height, int top, int bottom, float alpha) {
+        if (chatSearchRow == null) return;
+        LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) chatSearchRow.getLayoutParams();
+        if (lp == null) lp = new LinearLayout.LayoutParams(-1, height);
+        lp.height = height;
+        lp.topMargin = top;
+        lp.bottomMargin = bottom;
+        chatSearchRow.setLayoutParams(lp);
+        chatSearchRow.setAlpha(alpha);
+    }
+
+    private void animateSearchRow(int fromH, final int toH, final float fromA, final float toA, int fromTop, final int toTop, int fromBot, final int toBot, int ms, android.view.animation.Interpolator interp, final Runnable end) {
+        if (chatSearchAnim != null) chatSearchAnim.cancel();
+        final int startH = fromH, startTop = fromTop, startBot = fromBot;
+        chatSearchAnim = ValueAnimator.ofFloat(0f, 1f);
+        chatSearchAnim.setDuration(ms);
+        chatSearchAnim.setInterpolator(interp);
+        chatSearchAnim.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
+            @Override public void onAnimationUpdate(ValueAnimator a) {
+                float t = (Float) a.getAnimatedValue();
+                applySearchRowHeight(
+                        startH + Math.round((toH - startH) * t),
+                        startTop + Math.round((toTop - startTop) * t),
+                        startBot + Math.round((toBot - startBot) * t),
+                        fromA + (toA - fromA) * t);
+            }
+        });
+        chatSearchAnim.addListener(new AnimatorListenerAdapter() {
+            @Override public void onAnimationEnd(Animator a) {
+                chatSearchAnim = null;
+                applySearchRowHeight(toH, toTop, toBot, toA);
+                if (end != null) end.run();
+            }
+        });
+        chatSearchAnim.start();
+    }
+
+    private void showKeyboardFrom(final View v) {
+        if (v == null) return;
+        v.requestFocus();
+        v.post(new Runnable() { @Override public void run() {
+            try {
+                InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+                if (imm != null) imm.showSoftInput(v, InputMethodManager.SHOW_IMPLICIT);
+            } catch (Exception ignored) { }
+        } });
+    }
+
+    private boolean projectsCollapsed() {
+        return prefs != null && prefs.getBoolean("projectsCollapsed", false);
+    }
+
+    private void setProjectsCollapsed(boolean collapsed) {
+        if (prefs != null) prefs.edit().putBoolean("projectsCollapsed", collapsed).apply();
+        renderChatList();
+    }
+
+    private View projectsSectionHeader(int count, final boolean collapsed) {
+        LinearLayout h = row();
+        h.setPadding(0, dp(4), dp(2), dp(5));
+        TextView name = text("projects  " + count, 11, Color.rgb(140,140,140));
+        name.setGravity(Gravity.CENTER_VERTICAL);
+        TextView carat = text(collapsed ? ">" : "˅", 11, Color.rgb(140,140,140));
+        carat.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
+        h.addView(name, new LinearLayout.LayoutParams(0, -2, 1));
+        h.addView(carat, new LinearLayout.LayoutParams(dp(18), -2));
+        h.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { setProjectsCollapsed(!collapsed); }
+        });
+        return h;
     }
 
     private View folderCard(final String folder, int index) {
@@ -2489,6 +2738,9 @@ public class MainActivity extends Activity {
     private String chatListTitle(Chat c) { String title = c.title.length() == 0 ? "untitled" : c.title; return chatIsLoading(c) ? title + "..." : title; }
 
     private void openChatFromList(final Chat c) {
+        forceAutoScrollBottom = true;
+        userAtChatBottom = true;
+        savedChatScrollKnown = false;
         if (c != null && c.id.equals(currentChatId) && chatPaneReusable()) {
             pane = 1;
             showChatPane();
@@ -2851,8 +3103,9 @@ public class MainActivity extends Activity {
         final ScrollView renderScroll = scroll;
         if (renderScroll != null) renderScroll.post(new Runnable() { @Override public void run() {
             if (renderScroll != scroll || pane != 1) return;
-            if (forceAutoScrollBottom && showBottom && userAtChatBottom) scrollChatToBottom(renderScroll);
-            else if (restoreScrollOnce) renderScroll.scrollTo(0, savedChatScrollY);
+            boolean restoreAwayFromBottom = restoreScrollOnce && !scrollIsNearBottom(savedChatScrollY);
+            if (restoreAwayFromBottom) renderScroll.scrollTo(0, savedChatScrollY);
+            else if (showBottom && (forceAutoScrollBottom || userAtChatBottom || !savedChatScrollKnown || restoreScrollOnce)) pinChatToLatest(renderScroll);
             forceAutoScrollBottom = false;
             restoreScrollOnce = false;
             renderingMessages = false;
@@ -4003,11 +4256,56 @@ public class MainActivity extends Activity {
     }
 
     private void scrollChatToBottom(ScrollView scroller) {
+        pinChatScrollBottom(scroller, 0, 1);
+    }
+
+    private void pinChatToLatest(ScrollView scroller) {
+        pinChatScrollBottom(scroller, 0, 4);
+    }
+
+    private boolean scrollIsNearBottom(int y) {
+        if (scroll == null || messageList == null) return true;
+        int view = scroll.getHeight();
+        int content = chatScrollContentHeight(scroll);
+        int max = Math.max(0, content - view);
+        return max <= dp(8) || y >= max - dp(72);
+    }
+
+    private int chatScrollContentHeight(ScrollView scroller) {
+        View child = scroller != null && scroller.getChildCount() > 0 ? scroller.getChildAt(0) : messageList;
+        if (child == null) return 0;
+        return Math.max(child.getHeight(), Math.max(child.getMeasuredHeight(), messageList == null ? 0 : messageList.getHeight()));
+    }
+
+    private void pinChatScrollBottom(final ScrollView scroller, final int pass, final int passes) {
         if (scroller == null || messageList == null) return;
-        int content = messageList.getHeight();
         int view = scroller.getHeight();
-        if (content > view) scroller.scrollTo(0, content - view);
-        else scroller.scrollTo(0, 0);
+        int content = chatScrollContentHeight(scroller);
+        if (view <= 0 && pass < passes) {
+            scroller.post(new Runnable() { @Override public void run() { pinChatScrollBottom(scroller, pass + 1, passes); } });
+            return;
+        }
+        int max = Math.max(0, content - view);
+        if (scroller.getScrollY() != max) scroller.scrollTo(0, max);
+        if (pass < passes) {
+            scroller.post(new Runnable() { @Override public void run() { pinChatScrollBottom(scroller, pass + 1, passes); } });
+        } else {
+            userAtChatBottom = true;
+        }
+    }
+
+    private void restoreChatScrollAfterShow() {
+        if (scroll == null || messages.size() == 0) return;
+        final ScrollView scroller = scroll;
+        scroller.post(new Runnable() { @Override public void run() {
+            if (scroll != scroller || pane != 1) return;
+            if (forceAutoScrollBottom || userAtChatBottom || !savedChatScrollKnown || scrollIsNearBottom(savedChatScrollY) || scrollIsNearBottom(scroller.getScrollY())) {
+                userAtChatBottom = true;
+                pinChatToLatest(scroller);
+            } else {
+                scroller.scrollTo(0, savedChatScrollY);
+            }
+        } });
     }
 
     private boolean patchStreamingIfPossible(Msg assistant) {
@@ -7956,7 +8254,7 @@ public class MainActivity extends Activity {
     }
 
     private void newChat() { saveCurrentChat(); currentChatId = ""; messages.clear(); selectedFolder = projectView.length() > 0 ? projectView : "Inbox"; webSearchChat = false; savedChatScrollKnown = false; forceAutoScrollBottom = false; resetMessageWindowToLatest(); chatBoundId = "\u0001"; if (messageList != null) renderMessages(); }
-    private void loadChat(Chat c) { currentChatId = c.id; selectedFolder = c.folder; if (!"Inbox".equals(c.folder)) projectView = c.folder; messages.clear(); messages.addAll(c.messages); webSearchChat = c.webSearch; if (c.model.length() > 0) prefs.edit().putString("model", c.model).putBoolean("modelSelected", true).apply(); savedChatScrollKnown = false; forceAutoScrollBottom = true; resetMessageWindowToLatest(); }
+    private void loadChat(Chat c) { currentChatId = c.id; selectedFolder = c.folder; if (!"Inbox".equals(c.folder)) projectView = c.folder; messages.clear(); messages.addAll(c.messages); webSearchChat = c.webSearch; if (c.model.length() > 0) prefs.edit().putString("model", c.model).putBoolean("modelSelected", true).apply(); savedChatScrollKnown = false; forceAutoScrollBottom = true; userAtChatBottom = true; resetMessageWindowToLatest(); }
     private void saveCurrentChat() {
         if (!syncCurrentChatInMemory()) return;
         persistChatStore(true);
