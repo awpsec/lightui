@@ -23,6 +23,7 @@ import android.graphics.LinearGradient;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.Rect;
+import android.graphics.RectF;
 import android.graphics.Shader;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
@@ -108,7 +109,7 @@ public class MainActivity extends Activity {
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
     private static final String SEARCHING = "__searching__";
-    private static final String APP_VERSION = "1.0.31";
+    private static final String APP_VERSION = "1.0.32";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 120;
@@ -2995,28 +2996,41 @@ public class MainActivity extends Activity {
     }
 
     private View sourceThumbStrip(ArrayList<String> urls) {
+        int size = dp(18);
+        int step = dp(10);
+        FrameLayout stack = new FrameLayout(this);
+        stack.setClipChildren(false);
+        stack.setClipToPadding(false);
+        stack.setBackgroundColor(Color.TRANSPARENT);
+        int n = 0;
+        if (urls != null) {
+            int limit = Math.min(8, urls.size());
+            ArrayList<String> shown = new ArrayList<String>();
+            for (int i = 0; i < limit; i++) {
+                String url = urls.get(i);
+                if (url == null || url.length() == 0) continue;
+                shown.add(url);
+            }
+            n = shown.size();
+            // Add right-to-left so the first source sits on top and later ones peek out.
+            for (int i = n - 1; i >= 0; i--) {
+                final String url = shown.get(i);
+                View dot = sourceThumb(url);
+                FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(size, size);
+                lp.leftMargin = i * step;
+                lp.gravity = Gravity.CENTER_VERTICAL | Gravity.LEFT;
+                stack.addView(dot, lp);
+            }
+        }
+        int width = n <= 0 ? 0 : size + step * (n - 1);
         HorizontalScrollView scroller = new HorizontalScrollView(this);
         scroller.setHorizontalScrollBarEnabled(false);
         scroller.setFillViewport(false);
-        scroller.setBackgroundColor(Color.BLACK);
-        LinearLayout row = row();
-        row.setPadding(0, 0, 0, 0);
-        if (urls != null) {
-            int n = Math.min(8, urls.size());
-            for (int i = 0; i < n; i++) {
-                String url = urls.get(i);
-                if (url == null || url.length() == 0) continue;
-                row.addView(sourceThumb(url), sourceThumbParams(i == 0));
-            }
-        }
-        scroller.addView(row, new FrameLayout.LayoutParams(-2, -2));
+        scroller.setClipChildren(false);
+        scroller.setClipToPadding(false);
+        scroller.setBackgroundColor(Color.TRANSPARENT);
+        scroller.addView(stack, new FrameLayout.LayoutParams(width, size));
         return scroller;
-    }
-
-    private LinearLayout.LayoutParams sourceThumbParams(boolean first) {
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(18), dp(18));
-        lp.leftMargin = first ? 0 : dp(4);
-        return lp;
     }
 
     private View sourceThumb(final String url) {
@@ -3025,26 +3039,11 @@ public class MainActivity extends Activity {
         synchronized (faviconCache) {
             icon = host.length() == 0 ? null : faviconCache.get(host);
         }
-        if (icon != null && !icon.isRecycled()) {
-            ImageView img = new ImageView(this);
-            img.setImageBitmap(icon);
-            img.setScaleType(ImageView.ScaleType.FIT_CENTER);
-            img.setBackgroundColor(Color.BLACK);
-            img.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { openHttpUrl(url); } });
-            return img;
-        }
-        TextView letter = new TextView(this);
-        letter.setText(ToolText.sourceLetter(host));
-        letter.setTextColor(Color.rgb(135, 135, 135));
-        letter.setGravity(Gravity.CENTER);
-        letter.setIncludeFontPadding(false);
-        setTextPx(letter, 9);
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(Color.rgb(28, 28, 28));
-        bg.setCornerRadius(dp(3));
-        letter.setBackground(bg);
-        letter.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { openHttpUrl(url); } });
-        return letter;
+        SourceDot dot = new SourceDot(this);
+        if (icon != null && !icon.isRecycled()) dot.icon = icon;
+        else dot.letter = ToolText.sourceLetter(host);
+        dot.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { openHttpUrl(url); } });
+        return dot;
     }
 
     private void prefetchFavicons(ArrayList<String> urls) {
@@ -8444,6 +8443,53 @@ public class MainActivity extends Activity {
                 c.drawText(ch, x, y - lift, wavePaint);
                 x += tp.measureText(ch);
             }
+        }
+    }
+    public class SourceDot extends View {
+        final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
+        final Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
+        final Paint glyph = new Paint(Paint.ANTI_ALIAS_FLAG);
+        final Paint bitmapPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+        final Path clip = new Path();
+        final RectF dest = new RectF();
+        Bitmap icon;
+        String letter = "";
+        public SourceDot(Context c) {
+            super(c);
+            setBackgroundColor(Color.TRANSPARENT);
+            fill.setStyle(Paint.Style.FILL);
+            ring.setStyle(Paint.Style.STROKE);
+            ring.setStrokeWidth(1f);
+            ring.setColor(Color.rgb(52, 52, 52));
+            glyph.setColor(Color.rgb(135, 135, 135));
+            glyph.setTextAlign(Paint.Align.CENTER);
+        }
+        @Override protected void onDraw(Canvas c) {
+            int w = getWidth(), h = getHeight();
+            if (w <= 0 || h <= 0) return;
+            float cx = w / 2f, cy = h / 2f;
+            float r = Math.min(w, h) / 2f - 0.5f;
+            fill.setColor(Color.BLACK);
+            c.drawCircle(cx, cy, r, fill);
+            if (icon != null && !icon.isRecycled()) {
+                float inset = 1f;
+                dest.set(cx - r + inset, cy - r + inset, cx + r - inset, cy + r - inset);
+                clip.reset();
+                clip.addCircle(cx, cy, Math.max(1f, r - inset), Path.Direction.CW);
+                c.save();
+                c.clipPath(clip);
+                c.drawBitmap(icon, null, dest, bitmapPaint);
+                c.restore();
+            } else {
+                fill.setColor(Color.rgb(22, 22, 22));
+                c.drawCircle(cx, cy, Math.max(1f, r - 1f), fill);
+                if (letter != null && letter.length() > 0) {
+                    glyph.setTextSize(Math.max(8f, h * 0.48f));
+                    Paint.FontMetrics fm = glyph.getFontMetrics();
+                    c.drawText(letter, cx, cy - (fm.ascent + fm.descent) / 2f, glyph);
+                }
+            }
+            c.drawCircle(cx, cy, r - 0.5f, ring);
         }
     }
     public static class ContextMeter extends View {
