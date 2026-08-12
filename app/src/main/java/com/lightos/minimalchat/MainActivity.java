@@ -23,6 +23,7 @@ import android.graphics.LinearGradient;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.Rect;
+import android.graphics.RectF;
 import android.graphics.Shader;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
@@ -64,10 +65,12 @@ import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
 import android.view.Window;
 import android.view.WindowManager;
+import android.view.animation.DecelerateInterpolator;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -95,6 +98,8 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Calendar;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Locale;
@@ -107,10 +112,10 @@ public class MainActivity extends Activity {
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
     private static final String SEARCHING = "__searching__";
-    private static final String APP_VERSION = "1.0.18";
+    private static final String APP_VERSION = "1.0.36";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
-    private static final long STREAM_RENDER_MIN_MS = 64;
+    private static final long STREAM_RENDER_MIN_MS = 120;
     private static final long MODEL_AUTO_REFRESH_MS = 60L * 60L * 1000L;
     private static final long VERSION_CHECK_MS = 3L * 60L * 60L * 1000L;
     private static final int CONTACTS_PERM = 12;
@@ -137,10 +142,11 @@ public class MainActivity extends Activity {
     private LinearLayout root, messageList, folderList, chatList;
     private ScrollView scroll, settingsScrollView;
     private ScrollIndicator scrollIndicator;
-    private EditText input, apiKey, endpointInput, endpointKeyInput, jinaKeyInput, voiceEndpointInput;
+    private EditText input, apiKey, endpointInput, endpointKeyInput, jinaKeyInput, braveKeyInput, voiceEndpointInput, chatSearch;
     private ImageButton composerAction;
     private View photoPreviewOverlay;
-    private TextView modelText, contextText, attachText, replyChip, notice, voiceStatus, voiceText, voiceReply, bulkButton, emptyPrompt, bottomButton;
+    private TextView modelText, contextText, attachText, replyChip, notice, voiceStatus, voiceText, voiceReply, bulkButton, emptyPrompt, bottomButton, chatsSelectCount;
+    private LinearLayout slashSuggestRow, chatsSelectBar;
     private GlobeButton webSearchIcon;
     private View chatFade;
     private ContextMeter meter;
@@ -163,6 +169,7 @@ public class MainActivity extends Activity {
     private BorderWaveView voiceBorder;
     private final ArrayList<String> models = new ArrayList<String>();
     private final ArrayList<String> myModels = new ArrayList<String>();
+    private final ArrayList<String> pinnedModels = new ArrayList<String>();
     private final ArrayList<String> customEndpoints = new ArrayList<String>();
     private final HashMap<String, String> endpointKeys = new HashMap<String, String>();
     private final HashMap<String, Integer> modelContexts = new HashMap<String, Integer>();
@@ -185,13 +192,28 @@ public class MainActivity extends Activity {
     private String lastSearchQuery = "";
     private final HashSet<String> selectedChats = new HashSet<String>();
     private final Handler ui = new Handler(Looper.getMainLooper());
-    private String currentChatId = "", selectedFolder = "Inbox", projectView = "", expandedFolder = "", pendingVoiceText = "", replyQuote = "", voiceThinkingWord = "thinking", settingsPage = "";
+    private String currentChatId = "", selectedFolder = "Inbox", projectView = "", expandedFolder = "", pendingVoiceText = "", replyQuote = "", voiceThinkingWord = "thinking...", settingsPage = "", chatFilter = "";
     private final ArrayList<AttachedImage> pendingImages = new ArrayList<AttachedImage>();
     private static final int MAX_PENDING_IMAGES = 6;
-    private int pane = 1, messageStart = 0, messageEnd = 0, savedChatScrollY = 0, savedSettingsScrollY = 0, emptyPromptRun = 0, voiceThinkingRun = 0, voiceListenRun = 0, recorderSpeechFrames = 0, voiceSession = 0;
+    private int pane = 1, messageStart = 0, messageEnd = 0, savedChatScrollY = 0, savedSettingsScrollY = 0, emptyPromptRun = 0, voiceThinkingRun = 0, voiceListenRun = 0, recorderSpeechFrames = 0, voiceSession = 0, paneSlide = 0;
     private long recordingStartedAt = 0, quietSince = 0;
     private float downX, downY;
     private boolean messageWindowReady = false, renderingMessages = false, savedChatScrollKnown = false, restoreScrollOnce = false, forceAutoScrollBottom = false, userAtChatBottom = true, voiceMode = false, voiceFullMode = false, voiceThinking = false, voiceAwaitingSpeechResult = false, ttsReady = false, hookVoiceMode = false, projectEditorOpen = false, recordingFallback = false, wavRecording = false, wavSubmitAfterStop = false, webSearchChat = false;
+    private boolean forceSearchThisTurn = false, researchThisTurn = false;
+    private volatile boolean turnForceSearch = false, turnResearch = false;
+    private final HashSet<String> endpointsWithoutNativeTools = new HashSet<String>();
+    private final HashMap<String, Bitmap> faviconCache = new HashMap<String, Bitmap>();
+    private final HashSet<String> faviconLoading = new HashSet<String>();
+    private final HashSet<String> faviconFailed = new HashSet<String>();
+    private volatile boolean streamUiQueued = false;
+    private volatile Msg streamUiAssistant = null;
+    private volatile String streamUiPartial = "";
+    private volatile String streamUiReasoning = "";
+    private TextView liveStreamBody;
+    private Msg liveStreamMsg;
+    private String liveStreamKey = "";
+    private Runnable faviconUi;
+    private String lastSlashPaletteKey = "";
 
     @Override public void onCreate(Bundle b) {
         super.onCreate(b);
@@ -247,6 +269,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onPause() {
         super.onPause();
+        flushSettingsInputs();
         flushPendingPersist();
         if (voiceMode && voiceFullMode) stopVoiceMode();
     }
@@ -276,10 +299,10 @@ public class MainActivity extends Activity {
             }
             if (dy > dp(90) && Math.abs(dy) > Math.abs(dx) * 1.4f && clearFocusedTextField()) return true;
             if (Math.abs(dx) > dp(72) && Math.abs(dx) > Math.abs(dy) * 1.2f && Math.abs(dy) < dp(220)) {
-                if (dx > 0 && pane == 0 && projectView.length() > 0) { projectView = ""; showChatsPane(); return true; }
-                if (dx > 0 && pane == 2 && settingsPage.length() > 0) { settingsPage = ""; showSettingsPane(); return true; }
-                if (dx < 0 && pane < 2) { pane++; if (pane == 2) settingsPage = ""; renderPane(); return true; }
-                if (dx > 0 && pane > 0) { pane--; renderPane(); return true; }
+                if (dx > 0 && pane == 0 && projectView.length() > 0) { paneSlide = 1; projectView = ""; showChatsPane(); return true; }
+                if (dx > 0 && pane == 2 && settingsPage.length() > 0) { paneSlide = 1; settingsPage = ""; showSettingsPane(); return true; }
+                if (dx < 0 && pane < 2) { paneSlide = -1; pane++; if (pane == 2) settingsPage = ""; renderPane(); return true; }
+                if (dx > 0 && pane > 0) { paneSlide = 1; pane--; renderPane(); return true; }
             }
         }
         return super.dispatchTouchEvent(e);
@@ -298,8 +321,8 @@ public class MainActivity extends Activity {
                 if (photoPreviewOverlay != null) { dismissImagePreview(); return true; }
                 if (voiceMode && voiceFullMode) stopVoiceMode();
                 else if (projectEditorOpen) showChatsPane();
-                else if (pane == 0 && projectView.length() > 0) { projectView = ""; showChatsPane(); }
-                else if (pane == 2 && settingsPage.length() > 0) { settingsPage = ""; showSettingsPane(); }
+                else if (pane == 0 && projectView.length() > 0) { paneSlide = 1; projectView = ""; showChatsPane(); }
+                else if (pane == 2 && settingsPage.length() > 0) { paneSlide = 1; settingsPage = ""; showSettingsPane(); }
                 else goHome();
                 return true;
             }
@@ -336,11 +359,17 @@ public class MainActivity extends Activity {
 
     private void renderPane() {
         hideKeyboard();
+        flushSettingsInputs();
         removeScreenChild(bulkButton); bulkButton = null;
         if (pane == 0) showChatsPane(); else if (pane == 2) showSettingsPane(); else showChatPane();
     }
 
     private void clearPaneViews() {
+        if (root != null) {
+            root.animate().cancel();
+            root.setAlpha(1f);
+            root.setTranslationX(0);
+        }
         root.removeAllViews();
         input = null;
         composerAction = null;
@@ -348,10 +377,15 @@ public class MainActivity extends Activity {
         endpointInput = null;
         endpointKeyInput = null;
         jinaKeyInput = null;
+        braveKeyInput = null;
         voiceEndpointInput = null;
+        chatSearch = null;
+        chatsSelectBar = null;
+        chatsSelectCount = null;
         contextText = null;
         attachText = null;
         replyChip = null;
+        slashSuggestRow = null;
         removeScreenChild(notice); notice = null;
         dismissImagePreview();
         modelText = null;
@@ -459,6 +493,12 @@ public class MainActivity extends Activity {
         updateReplyChip();
         root.addView(separator());
 
+        slashSuggestRow = new LinearLayout(this);
+        slashSuggestRow.setOrientation(LinearLayout.VERTICAL);
+        slashSuggestRow.setVisibility(View.GONE);
+        slashSuggestRow.setPadding(0, 0, 0, dp(4));
+        root.addView(slashSuggestRow, new LinearLayout.LayoutParams(-1, -2));
+
         LinearLayout composer = row();
         composer.setGravity(Gravity.BOTTOM);
         input = new EditText(this);
@@ -484,7 +524,10 @@ public class MainActivity extends Activity {
         });
         input.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) { }
-            @Override public void onTextChanged(CharSequence s, int start, int before, int count) { updateComposerAction(); }
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {
+                updateComposerAction();
+                updateSlashSuggestions(s == null ? "" : s.toString());
+            }
             @Override public void afterTextChanged(Editable e) { }
         });
         composer.addView(input, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
@@ -504,33 +547,39 @@ public class MainActivity extends Activity {
         root.addView(composer);
         updateComposerAction();
         updateAttachChip();
+        updateSlashSuggestions(input.getText() == null ? "" : input.getText().toString());
         renderMessages();
+        slidePaneIn();
     }
 
     private void showSettingsPane() {
         projectEditorOpen = false;
+        flushSettingsInputs();
         if (pane == 2 && settingsPage.length() == 0 && settingsScrollView != null) savedSettingsScrollY = settingsScrollView.getScrollY();
         pane = 2;
         captureChatScroll();
         clearPaneViews();
         root.setOnClickListener(null);
-        root.setPadding(dp(26), dp(14), dp(26), dp(10));
+        root.setPadding(dp(16), dp(8), dp(16), dp(8));
         apiKey = null;
         endpointInput = null;
         endpointKeyInput = null;
         jinaKeyInput = null;
+        braveKeyInput = null;
         voiceEndpointInput = null;
         root.addView(settingsTitle());
         ScrollView settingsScroll = new ScrollView(this);
         settingsScrollView = settingsScroll;
         LinearLayout settings = new LinearLayout(this);
         settings.setOrientation(LinearLayout.VERTICAL);
+        settings.setGravity(Gravity.TOP | Gravity.START);
         settings.setBackgroundColor(Color.BLACK);
-        settingsScroll.addView(settings);
+        settingsScroll.setFillViewport(true);
+        settingsScroll.addView(settings, new ScrollView.LayoutParams(-1, -2));
         settingsScroll.setVerticalScrollBarEnabled(false);
 
         if (settingsPage.length() == 0) addSettingsIndex(settings);
-        else if ("model source".equals(settingsPage)) addModelSourceSettings(settings);
+        else if ("providers".equals(settingsPage) || "model source".equals(settingsPage)) addModelSourceSettings(settings);
         else if ("search".equals(settingsPage)) addJinaSettings(settings);
         else if ("voice".equals(settingsPage)) addVoiceSettings(settings);
         else if ("display".equals(settingsPage)) addDisplaySettings(settings);
@@ -538,6 +587,7 @@ public class MainActivity extends Activity {
         else if ("models".equals(settingsPage)) addModelsSettings(settings);
         root.addView(settingsScroll, new LinearLayout.LayoutParams(-1, 0, 1));
         settingsScroll.post(new Runnable() { @Override public void run() { settingsScroll.scrollTo(0, settingsPage.length() == 0 ? savedSettingsScrollY : 0); } });
+        slidePaneIn();
     }
 
     private View collapsibleHeader(final String title, final String pref) {
@@ -559,37 +609,105 @@ public class MainActivity extends Activity {
         h.setPadding(0, dp(8), 0, dp(18));
         TextView title = text("settings", 23, Color.WHITE);
         title.setGravity(Gravity.CENTER_VERTICAL);
-        title.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { if (settingsPage.length() > 0) { settingsPage = ""; showSettingsPane(); } } });
+        title.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { if (settingsPage.length() > 0) { paneSlide = 1; settingsPage = ""; showSettingsPane(); } } });
         h.addView(title, new LinearLayout.LayoutParams(-2, dp(34)));
         if (settingsPage.length() > 0) {
             TextView sub = text("  " + settingsPageTitle(settingsPage), 13, Color.rgb(150,150,150));
             sub.setGravity(Gravity.CENTER_VERTICAL);
-            sub.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { settingsPage = ""; showSettingsPane(); } });
+            sub.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { paneSlide = 1; settingsPage = ""; showSettingsPane(); } });
             h.addView(sub, new LinearLayout.LayoutParams(0, dp(34), 1));
         }
         return h;
     }
 
     private String settingsPageTitle(String page) {
-        if ("model source".equals(page)) return "model source";
+        if ("model source".equals(page) || "providers".equals(page)) return "providers";
         if ("search".equals(page)) return "web search";
         if ("memory".equals(page)) return "memory";
         return page;
     }
 
     private void addSettingsIndex(LinearLayout settings) {
-        settings.addView(settingsLink("model source", "model source"));
-        settings.addView(separator());
-        settings.addView(settingsLink("web search", "search"));
-        settings.addView(separator());
-        settings.addView(settingsLink("voice", "voice"));
-        settings.addView(separator());
-        settings.addView(settingsLink("display", "display"));
-        settings.addView(separator());
-        settings.addView(settingsLink("memory", "memory"));
-        settings.addView(separator());
-        settings.addView(settingsLink("models", "models"));
+        settings.addView(settingsNav("models", "models", modelsNavDetail(), 0));
+        settings.addView(settingsNav("providers", "providers", providersNavDetail(), 1));
+        settings.addView(settingsNav("web search", "search", searchNavDetail(), 2));
+        settings.addView(settingsNav("voice", "voice", voiceNavDetail(), 3));
+        settings.addView(settingsNav("display", "display", displayNavDetail(), 4));
+        settings.addView(settingsNav("memory", "memory", memoryNavDetail(), 5));
         addVersionFooter(settings);
+    }
+
+    private View settingsNav(final String title, final String page, String detail, int index) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setGravity(Gravity.TOP | Gravity.START);
+        card.setPadding(dp(10), dp(9), dp(10), dp(9));
+        card.setBackground(listCardBg(false, false, index));
+        LinearLayout top = row();
+        top.setBackgroundColor(Color.TRANSPARENT);
+        TextView name = text(title, 15, Color.WHITE);
+        name.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+        name.setBackgroundColor(Color.TRANSPARENT);
+        TextView arrow = text(">", 14, Color.rgb(135, 135, 135));
+        arrow.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
+        arrow.setBackgroundColor(Color.TRANSPARENT);
+        top.addView(name, new LinearLayout.LayoutParams(0, -2, 1));
+        top.addView(arrow, new LinearLayout.LayoutParams(dp(28), -2));
+        card.addView(top, new LinearLayout.LayoutParams(-1, -2));
+        if (detail != null && detail.length() > 0) {
+            TextView sub = text(detail, 11, Color.rgb(135, 135, 135));
+            sub.setGravity(Gravity.START);
+            sub.setSingleLine(true);
+            sub.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            sub.setBackgroundColor(Color.TRANSPARENT);
+            sub.setPadding(0, dp(2), 0, 0);
+            card.addView(sub, new LinearLayout.LayoutParams(-1, -2));
+        }
+        bindPress(card);
+        card.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
+            if (settingsScrollView != null) savedSettingsScrollY = settingsScrollView.getScrollY();
+            paneSlide = -1;
+            settingsPage = page;
+            showSettingsPane();
+        } });
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        if (index > 0) lp.topMargin = dp(6);
+        card.setLayoutParams(lp);
+        return card;
+    }
+
+    private String modelsNavDetail() {
+        if (myModels.size() == 0) return "none added";
+        String m = selectedModel();
+        if (m.length() == 0) return myModels.size() + " saved";
+        return shortModel(m) + (myModels.size() > 1 ? " · " + myModels.size() : "");
+    }
+
+    private String providersNavDetail() {
+        boolean or = savedApiKey().length() > 0;
+        int n = customEndpoints.size();
+        if (or && n > 0) return "openrouter · " + n + " endpoint" + (n == 1 ? "" : "s");
+        if (or) return "openrouter";
+        if (n > 0) return n + " endpoint" + (n == 1 ? "" : "s");
+        return "add a key or endpoint";
+    }
+
+    private String searchNavDetail() {
+        return searchProvider() + (prefs.getBoolean("autoSearch", false) ? " · auto on" : " · auto off");
+    }
+
+    private String voiceNavDetail() {
+        return (prefs.getBoolean("voiceSpeak", true) ? "speak on" : "speak off") + " · " + voiceOutputProvider();
+    }
+
+    private String displayNavDetail() {
+        int n = fontOffset();
+        return n == 0 ? "font default" : "font " + (n > 0 ? "+" : "") + n;
+    }
+
+    private String memoryNavDetail() {
+        if (!memoryEnabled()) return "off";
+        return "on · " + memoryEntryCount(normalizeMemoryMd(memoryMd())) + " entries";
     }
 
     private void maybeShowWelcome() {
@@ -651,7 +769,7 @@ public class MainActivity extends Activity {
         boolean outdated = hasPendingUpdate();
         TextView v = text(versionFooterText(), 11, outdated ? Color.rgb(190, 190, 190) : Color.rgb(130, 130, 130));
         v.setGravity(Gravity.CENTER_VERTICAL);
-        v.setPadding(0, dp(10), 0, dp(10));
+        v.setPadding(0, dp(18), 0, dp(10));
         v.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View view) { onVersionFooterClick(); } });
         settings.addView(v, new LinearLayout.LayoutParams(-1, -2));
     }
@@ -699,8 +817,10 @@ public class MainActivity extends Activity {
                 HttpURLConnection c = (HttpURLConnection) new URL(GITHUB_RELEASES_LATEST).openConnection();
                 c.setConnectTimeout(10000);
                 c.setReadTimeout(15000);
+                c.setUseCaches(false);
                 c.setRequestProperty("Accept", "application/vnd.github+json");
                 c.setRequestProperty("User-Agent", "lightui-android");
+                c.setRequestProperty("Connection", "close");
                 int code = c.getResponseCode();
                 if (code >= 400) {
                     if (fromUser) runOnUiThread(new Runnable() { @Override public void run() { toast("couldn't check for updates"); } });
@@ -779,16 +899,21 @@ public class MainActivity extends Activity {
         });
         LinearLayout box = panelBox();
         box.addView(panelTitle("version " + version + " is available!"));
-        TextView msg = text("a newer lightui build is on github. update now, dismiss for later, or silence this version.", 13, Color.LTGRAY);
+        TextView msg = text("a newer lightui build is on github. update in-app, open the apk in your browser, dismiss for later, or silence this version.", 13, Color.LTGRAY);
         msg.setPadding(0, 0, 0, dp(16));
         box.addView(msg);
         TextView update = panelAction("update");
+        TextView browser = panelAction("browser");
         TextView dismiss = panelAction("dismiss");
         TextView silence = panelAction("silence");
         update.setTextColor(Color.WHITE);
         update.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
             d.dismiss();
             beginUpdateInstall(version, apkUrl);
+        } });
+        browser.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
+            d.dismiss();
+            openUpdateInBrowser(apkUrl);
         } });
         dismiss.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); } });
         silence.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
@@ -797,6 +922,7 @@ public class MainActivity extends Activity {
             toast("silenced " + version);
         } });
         box.addView(update, new LinearLayout.LayoutParams(-1, dp(48)));
+        box.addView(browser, new LinearLayout.LayoutParams(-1, dp(48)));
         box.addView(dismiss, new LinearLayout.LayoutParams(-1, dp(48)));
         box.addView(silence, new LinearLayout.LayoutParams(-1, dp(48)));
         showPanel(d, box);
@@ -830,41 +956,101 @@ public class MainActivity extends Activity {
         updateDownloading = true;
         toast("downloading " + version + "...");
         new Thread(new Runnable() { @Override public void run() {
-            File out = null;
+            File out = new File(getCacheDir(), "lightui-update.apk");
+            Exception last = null;
+            String[] urls = ToolText.updateDownloadUrls(apkUrl, version);
             try {
-                HttpURLConnection c = (HttpURLConnection) new URL(apkUrl).openConnection();
-                c.setConnectTimeout(20000);
-                c.setReadTimeout(120000);
-                c.setInstanceFollowRedirects(true);
-                c.setRequestProperty("User-Agent", "lightui-android");
-                c.setRequestProperty("Accept", "application/octet-stream,*/*");
-                int code = c.getResponseCode();
-                if (code >= 400) throw new RuntimeException("download failed (" + code + ")");
-                out = new File(getCacheDir(), "lightui-update.apk");
-                InputStream in = c.getInputStream();
-                FileOutputStream fos = new FileOutputStream(out);
-                byte[] buf = new byte[8192];
-                int n;
-                while ((n = in.read(buf)) >= 0) fos.write(buf, 0, n);
-                fos.getFD().sync();
-                fos.close();
-                in.close();
-                if (out.length() < 1024) throw new RuntimeException("download too small");
-                final File apk = out;
+                for (int attempt = 1; attempt <= 3; attempt++) {
+                    String ua = attempt <= 1
+                            ? "lightui-android"
+                            : "Mozilla/5.0 (Linux; Android 14; Mobile) lightui/" + APP_VERSION;
+                    for (int i = 0; i < urls.length; i++) {
+                        try {
+                            if (out.exists()) out.delete();
+                            UpdateDownload.downloadApk(urls[i], out, ua);
+                            final File apk = out;
+                            runOnUiThread(new Runnable() { @Override public void run() {
+                                updateDownloading = false;
+                                toast("installing " + version);
+                                installUpdateApk(apk);
+                            } });
+                            return;
+                        } catch (Exception e) {
+                            last = e;
+                            if (out.exists()) try { out.delete(); } catch (Exception ignored) { }
+                        }
+                    }
+                    if (attempt < 3) {
+                        try { Thread.sleep(400L * attempt); }
+                        catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
+                    }
+                }
+                if (out.exists()) try { out.delete(); } catch (Exception ignored) { }
+                final Exception fail = last;
                 runOnUiThread(new Runnable() { @Override public void run() {
                     updateDownloading = false;
-                    toast("installing " + version);
-                    installUpdateApk(apk);
+                    toast(ToolText.friendlyDownloadError(fail));
+                    showUpdateDownloadFailed(version, apkUrl);
                 } });
             } catch (Exception e) {
-                if (out != null) try { out.delete(); } catch (Exception ignored) { }
-                final String msg = friendlyError(e);
+                if (out.exists()) try { out.delete(); } catch (Exception ignored) { }
+                final String msg = ToolText.friendlyDownloadError(e);
                 runOnUiThread(new Runnable() { @Override public void run() {
                     updateDownloading = false;
-                    toast("update failed: " + msg);
+                    toast(msg);
+                    showUpdateDownloadFailed(version, apkUrl);
                 } });
             }
-        } }).start();
+        } }, "lightui-update").start();
+    }
+
+    private void showUpdateDownloadFailed(final String version, final String apkUrl) {
+        if (updateDialogShowing) return;
+        updateDialogShowing = true;
+        final Dialog d = panel("update");
+        updateDialog = d;
+        d.setCancelable(true);
+        d.setOnDismissListener(new android.content.DialogInterface.OnDismissListener() {
+            @Override public void onDismiss(android.content.DialogInterface dialog) {
+                updateDialogShowing = false;
+                if (updateDialog == d) updateDialog = null;
+            }
+        });
+        LinearLayout box = panelBox();
+        box.addView(panelTitle("download cut off"));
+        TextView msg = text("github closed the connection before the apk finished. retry here, or open the file in your browser and install from downloads.", 13, Color.LTGRAY);
+        msg.setPadding(0, 0, 0, dp(16));
+        box.addView(msg);
+        TextView retry = panelAction("retry");
+        TextView browser = panelAction("browser");
+        TextView dismiss = panelAction("dismiss");
+        retry.setTextColor(Color.WHITE);
+        retry.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
+            d.dismiss();
+            beginUpdateInstall(version, apkUrl);
+        } });
+        browser.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
+            d.dismiss();
+            openUpdateInBrowser(apkUrl);
+        } });
+        dismiss.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); } });
+        box.addView(retry, new LinearLayout.LayoutParams(-1, dp(48)));
+        box.addView(browser, new LinearLayout.LayoutParams(-1, dp(48)));
+        box.addView(dismiss, new LinearLayout.LayoutParams(-1, dp(48)));
+        showPanel(d, box);
+    }
+
+    private void openUpdateInBrowser(String apkUrl) {
+        String url = apkUrl == null || apkUrl.length() == 0
+                ? "https://github.com/awpsec/lightui/releases/latest"
+                : apkUrl;
+        try {
+            Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+        } catch (Exception e) {
+            toast("couldn't open browser");
+        }
     }
 
     private void installUpdateApk(File apk) {
@@ -948,18 +1134,6 @@ public class MainActivity extends Activity {
         showPanel(d, box);
     }
 
-    private View settingsLink(final String title, final String page) {
-        LinearLayout h = row();
-        h.setPadding(0, dp(6), 0, dp(6));
-        TextView name = text(title, 16, Color.WHITE);
-        TextView arrow = text(">", 14, Color.LTGRAY);
-        arrow.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
-        h.addView(name, new LinearLayout.LayoutParams(0, dp(33), 1));
-        h.addView(arrow, new LinearLayout.LayoutParams(dp(34), dp(33)));
-        h.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { if (settingsScrollView != null) savedSettingsScrollY = settingsScrollView.getScrollY(); settingsPage = page; showSettingsPane(); } });
-        return h;
-    }
-
     private void addModelsSettings(LinearLayout settings) {
         LinearLayout modelsHeader = row();
         modelsHeader.addView(space(1), new LinearLayout.LayoutParams(0, dp(34), 1));
@@ -971,27 +1145,29 @@ public class MainActivity extends Activity {
         LinearLayout list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
         if (myModels.size() == 0) list.addView(text("none added", 13, Color.rgb(120,120,120)));
-        for (int i = 0; i < myModels.size(); i++) {
-            final String m = myModels.get(i).trim();
+        ArrayList<String> ordered = ToolText.orderedModels(myModels, pinnedModels);
+        for (int i = 0; i < ordered.size(); i++) {
+            final String m = ordered.get(i).trim();
             if (m.length() == 0) continue;
-            LinearLayout line = row();
-            line.setPadding(0, dp(7), 0, dp(7));
-            TextView name = text(shortModel(m), 15, Color.WHITE);
+            LinearLayout wrap = new LinearLayout(this);
+            wrap.setOrientation(LinearLayout.HORIZONTAL);
+            wrap.setGravity(Gravity.CENTER_VERTICAL);
+            View row = modelListRow(m, m.equals(selectedModel()), pinnedModels.contains(m), i, true);
+            row.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { setModel(m); } });
+            row.setOnLongClickListener(new View.OnLongClickListener() { @Override public boolean onLongClick(View v) {
+                togglePinnedModel(m);
+                showSettingsPane();
+                return true;
+            } });
+            wrap.addView(row, new LinearLayout.LayoutParams(0, -2, 1));
             TextView remove = text("remove", 12, Color.LTGRAY);
             remove.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
+            remove.setPadding(dp(10), 0, 0, 0);
             remove.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { removeMyModel(m); } });
-            if ("custom".equals(modelSources.get(m))) {
-                ImageView link = new ImageView(this);
-                link.setImageResource(R.drawable.ic_link);
-                link.setColorFilter(Color.WHITE);
-                link.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-                link.setPadding(0, dp(5), dp(2), dp(11));
-                link.setTranslationY(-dp(2));
-                line.addView(link, new LinearLayout.LayoutParams(dp(15), dp(32)));
-            }
-            line.addView(name, new LinearLayout.LayoutParams(0, dp(32), 1));
-            line.addView(remove, new LinearLayout.LayoutParams(dp(82), dp(32)));
-            list.addView(line);
+            wrap.addView(remove, new LinearLayout.LayoutParams(-2, -2));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+            if (i > 0) lp.topMargin = dp(6);
+            list.addView(wrap, lp);
         }
         settings.addView(list);
     }
@@ -1146,14 +1322,14 @@ public class MainActivity extends Activity {
         auto.addView(toggle, new LinearLayout.LayoutParams(dp(48), dp(28)));
         settings.addView(auto);
         settings.addView(settingChoice("provider", searchProvider(), new View.OnClickListener() { @Override public void onClick(View v) { chooseVoiceProvider("searchProvider", new String[]{"jina", "brave"}); } }));
-        final EditText[] braveKeyInput = new EditText[1];
+        braveKeyInput = null;
         if ("brave".equals(searchProvider())) {
             settings.addView(text("brave api key", 11, Color.LTGRAY));
-            braveKeyInput[0] = plainEdit("required");
-            braveKeyInput[0].setSingleLine(true);
-            braveKeyInput[0].setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-            braveKeyInput[0].setText(prefs.getString("braveApiKey", ""));
-            settings.addView(braveKeyInput[0], new LinearLayout.LayoutParams(-1, dp(42)));
+            braveKeyInput = plainEdit("required");
+            braveKeyInput.setSingleLine(true);
+            braveKeyInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+            braveKeyInput.setText(prefs.getString("braveApiKey", ""));
+            settings.addView(braveKeyInput, new LinearLayout.LayoutParams(-1, dp(42)));
         } else {
             settings.addView(text("jina api key", 11, Color.LTGRAY));
             jinaKeyInput = plainEdit("optional");
@@ -1164,10 +1340,10 @@ public class MainActivity extends Activity {
         }
         LinearLayout actions = row();
         TextView save = smallPill("save");
-        save.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { if (jinaKeyInput != null) saveJinaSettings(); if (braveKeyInput[0] != null) prefs.edit().putString("braveApiKey", braveKeyInput[0].getText().toString().trim()).apply(); toast("saved"); } });
+        save.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { flushSettingsInputs(); toast("saved"); } });
         actions.addView(save);
         settings.addView(actions, new LinearLayout.LayoutParams(-1, dp(34)));
-        settings.addView(text("/search works anytime", 11, Color.rgb(120,120,120)), new LinearLayout.LayoutParams(-1, dp(24)));
+        settings.addView(text("/search <query>   /research <query>", 11, Color.rgb(120,120,120)), new LinearLayout.LayoutParams(-1, dp(24)));
         settings.addView(space(8));
     }
 
@@ -1211,23 +1387,31 @@ public class MainActivity extends Activity {
             settings.addView(text(voicePipelineLabel(), 10, Color.rgb(120,120,120)), new LinearLayout.LayoutParams(-1, dp(28)));
         }
 
-        settings.addView(sectionHeader("input"));
-        settings.addView(settingChoice("provider", voiceInputProvider(), new View.OnClickListener() { @Override public void onClick(View v) { chooseVoiceProvider("voiceInputProvider", new String[]{"auto", "system", "openrouter", "endpoint"}); } }));
-        if ("openrouter".equals(voiceInputProvider())) settings.addView(settingChoice("model", prefs.getString("voiceTranscribeModel", "whisper-1"), new View.OnClickListener() { @Override public void onClick(View v) { chooseTranscriptionModel(); } }));
-        else if ("endpoint".equals(voiceInputProvider())) settings.addView(settingChoice("model", "endpoint default", null));
-        if ("endpoint".equals(voiceInputProvider()) || "auto".equals(voiceInputProvider())) settings.addView(settingChoice("endpoint", endpointLabel(prefs.getString("voiceTranscribeEndpoint", "")), new View.OnClickListener() { @Override public void onClick(View v) { chooseSavedEndpoint("voiceTranscribeEndpoint"); } }));
+        settings.addView(collapsibleHeader("input", "voiceInputOpen"));
+        if (isExpanded("voiceInputOpen")) {
+            settings.addView(settingChoice("provider", voiceInputProvider(), new View.OnClickListener() { @Override public void onClick(View v) { chooseVoiceProvider("voiceInputProvider", new String[]{"auto", "system", "openrouter", "endpoint"}); } }));
+            if ("openrouter".equals(voiceInputProvider())) settings.addView(settingChoice("model", prefs.getString("voiceTranscribeModel", "whisper-1"), new View.OnClickListener() { @Override public void onClick(View v) { chooseTranscriptionModel(); } }));
+            else if ("endpoint".equals(voiceInputProvider())) settings.addView(settingChoice("model", "endpoint default", null));
+            if ("endpoint".equals(voiceInputProvider()) || "auto".equals(voiceInputProvider())) settings.addView(settingChoice("endpoint", endpointLabel(prefs.getString("voiceTranscribeEndpoint", "")), new View.OnClickListener() { @Override public void onClick(View v) { chooseSavedEndpoint("voiceTranscribeEndpoint"); } }));
+        } else {
+            settings.addView(text(voiceInputSummary(), 11, Color.rgb(135, 135, 135)), new LinearLayout.LayoutParams(-1, dp(24)));
+        }
 
-        settings.addView(sectionHeader("output"));
-        settings.addView(settingChoice("provider", voiceOutputProvider(), new View.OnClickListener() { @Override public void onClick(View v) { chooseVoiceProvider("voiceOutputProvider", new String[]{"system", "openrouter", "endpoint"}); } }));
-        if ("openrouter".equals(voiceOutputProvider())) {
-            settings.addView(settingChoice("model", prefs.getString("voiceTtsModel", "choose"), new View.OnClickListener() { @Override public void onClick(View v) { chooseTtsModel(); } }));
-            settings.addView(settingChoice("voice", ttsVoiceForModel(prefs.getString("voiceTtsModel", "")), new View.OnClickListener() { @Override public void onClick(View v) { chooseVoiceName(); } }));
-            addVoiceSpeedSetting(settings);
-        } else if ("endpoint".equals(voiceOutputProvider())) {
-            settings.addView(settingChoice("model", voiceEndpointModelLabel(), new View.OnClickListener() { @Override public void onClick(View v) { promptVoiceCustom("voiceEndpointTtsModel", "tts-1"); } }));
-            settings.addView(settingChoice("voice", ttsVoiceForModel(prefs.getString("voiceEndpointTtsModel", "")), new View.OnClickListener() { @Override public void onClick(View v) { chooseVoiceName(); } }));
-            addVoiceSpeedSetting(settings);
-            settings.addView(settingChoice("endpoint", endpointLabel(prefs.getString("voiceTtsEndpoint", "")), new View.OnClickListener() { @Override public void onClick(View v) { chooseSavedEndpoint("voiceTtsEndpoint"); } }));
+        settings.addView(collapsibleHeader("output", "voiceOutputOpen"));
+        if (isExpanded("voiceOutputOpen")) {
+            settings.addView(settingChoice("provider", voiceOutputProvider(), new View.OnClickListener() { @Override public void onClick(View v) { chooseVoiceProvider("voiceOutputProvider", new String[]{"system", "openrouter", "endpoint"}); } }));
+            if ("openrouter".equals(voiceOutputProvider())) {
+                settings.addView(settingChoice("model", prefs.getString("voiceTtsModel", "choose"), new View.OnClickListener() { @Override public void onClick(View v) { chooseTtsModel(); } }));
+                settings.addView(settingChoice("voice", ttsVoiceForModel(prefs.getString("voiceTtsModel", "")), new View.OnClickListener() { @Override public void onClick(View v) { chooseVoiceName(); } }));
+                addVoiceSpeedSetting(settings);
+            } else if ("endpoint".equals(voiceOutputProvider())) {
+                settings.addView(settingChoice("model", voiceEndpointModelLabel(), new View.OnClickListener() { @Override public void onClick(View v) { promptVoiceCustom("voiceEndpointTtsModel", "tts-1"); } }));
+                settings.addView(settingChoice("voice", ttsVoiceForModel(prefs.getString("voiceEndpointTtsModel", "")), new View.OnClickListener() { @Override public void onClick(View v) { chooseVoiceName(); } }));
+                addVoiceSpeedSetting(settings);
+                settings.addView(settingChoice("endpoint", endpointLabel(prefs.getString("voiceTtsEndpoint", "")), new View.OnClickListener() { @Override public void onClick(View v) { chooseSavedEndpoint("voiceTtsEndpoint"); } }));
+            }
+        } else {
+            settings.addView(text(voiceOutputSummary(), 11, Color.rgb(135, 135, 135)), new LinearLayout.LayoutParams(-1, dp(24)));
         }
 
         settings.addView(space(8));
@@ -1246,6 +1430,18 @@ public class MainActivity extends Activity {
 
     private String voiceInputProvider() { return prefs.getString("voiceInputProvider", "auto"); }
     private String voiceOutputProvider() { return prefs.getString("voiceOutputProvider", prefs.getBoolean("voiceEndpointTts", false) ? "endpoint" : "system"); }
+    private String voiceInputSummary() {
+        String p = voiceInputProvider();
+        if ("openrouter".equals(p)) return p + " · " + shortModel(prefs.getString("voiceTranscribeModel", "whisper-1"));
+        if ("endpoint".equals(p)) return "endpoint · " + endpointLabel(prefs.getString("voiceTranscribeEndpoint", ""));
+        return p;
+    }
+    private String voiceOutputSummary() {
+        String p = voiceOutputProvider();
+        if ("openrouter".equals(p)) return p + " · " + shortModel(prefs.getString("voiceTtsModel", ""));
+        if ("endpoint".equals(p)) return "endpoint · " + endpointLabel(prefs.getString("voiceTtsEndpoint", ""));
+        return p;
+    }
     private String voiceWebSearchMode() { return prefs.getString("voiceWebSearchMode", "auto"); }
     private String searchProvider() { return prefs.getString("searchProvider", "jina"); }
     private String voiceAnswerModel() { return prefs.getString("voiceAnswerModel", "").trim(); }
@@ -1834,19 +2030,55 @@ public class MainActivity extends Activity {
         top.setGravity(Gravity.CENTER_VERTICAL);
         TextView title = text("chats", 21, Color.WHITE);
         title.setGravity(Gravity.CENTER_VERTICAL);
-        title.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { if (projectView.length() > 0) { projectView = ""; showChatsPane(); } } });
+        title.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { if (projectView.length() > 0) { paneSlide = 1; projectView = ""; showChatsPane(); } } });
         top.addView(title, new LinearLayout.LayoutParams(-2, dp(38)));
         if (projectView.length() > 0) {
             TextView sub = text("  " + projectView, 13, Color.rgb(150,150,150));
             sub.setGravity(Gravity.CENTER_VERTICAL);
-            sub.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { projectView = ""; showChatsPane(); } });
+            sub.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { paneSlide = 1; projectView = ""; showChatsPane(); } });
             top.addView(sub, new LinearLayout.LayoutParams(0, dp(38), 1));
         } else top.addView(space(1), new LinearLayout.LayoutParams(0, dp(38), 1));
-        ImageButton fresh = iconButton(R.drawable.ic_chat_plus, new View.OnClickListener() { @Override public void onClick(View v) { newChat(); pane = 1; renderPane(); } }, 6);
+        ImageButton fresh = iconButton(R.drawable.ic_chat_plus, new View.OnClickListener() { @Override public void onClick(View v) { paneSlide = -1; newChat(); pane = 1; renderPane(); } }, 6);
         top.addView(fresh, new LinearLayout.LayoutParams(dp(42), dp(34)));
         if (projectView.length() > 0) top.addView(iconButton(R.drawable.ic_pencil, new View.OnClickListener() { @Override public void onClick(View v) { editFolder(projectView); } }, 8), new LinearLayout.LayoutParams(dp(42), dp(34)));
         else top.addView(iconButton(R.drawable.ic_folder_plus, new View.OnClickListener() { @Override public void onClick(View v) { addFolder(); } }, 6), new LinearLayout.LayoutParams(dp(42), dp(34)));
         root.addView(top, new LinearLayout.LayoutParams(-1, dp(40)));
+
+        chatSearch = plainEdit("search");
+        chatSearch.setSingleLine(true);
+        chatSearch.setHintTextColor(Color.rgb(90, 90, 90));
+        setTextPx(chatSearch, 14);
+        chatSearch.setPadding(dp(10), 0, dp(10), 0);
+        GradientDrawable searchBg = new GradientDrawable();
+        searchBg.setColor(Color.BLACK);
+        searchBg.setStroke(1, Color.rgb(34, 34, 34));
+        searchBg.setCornerRadius(dp(3));
+        chatSearch.setBackground(searchBg);
+        chatSearch.setImeOptions(EditorInfo.IME_ACTION_DONE);
+        chatSearch.setOnEditorActionListener(new TextView.OnEditorActionListener() {
+            @Override public boolean onEditorAction(TextView v, int actionId, KeyEvent event) {
+                if (actionId == EditorInfo.IME_ACTION_DONE || actionId == EditorInfo.IME_ACTION_SEARCH) {
+                    hideKeyboardFrom(chatSearch);
+                    chatSearch.clearFocus();
+                    return true;
+                }
+                return false;
+            }
+        });
+        if (chatFilter.length() > 0) chatSearch.setText(chatFilter);
+        chatSearch.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int st, int c, int a) { }
+            @Override public void onTextChanged(CharSequence s, int st, int b, int c) {
+                chatFilter = s == null ? "" : s.toString();
+                renderChatList();
+            }
+            @Override public void afterTextChanged(Editable e) { }
+        });
+        LinearLayout.LayoutParams searchLp = new LinearLayout.LayoutParams(-1, dp(36));
+        searchLp.topMargin = dp(4);
+        searchLp.bottomMargin = dp(6);
+        root.addView(chatSearch, searchLp);
+
         ScrollView s = new ScrollView(this);
         s.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
         chatList = new LinearLayout(this); chatList.setOrientation(LinearLayout.VERTICAL);
@@ -1854,39 +2086,77 @@ public class MainActivity extends Activity {
         s.addView(chatList);
         s.setVerticalScrollBarEnabled(false);
         root.addView(s, new LinearLayout.LayoutParams(-1, 0, 1));
+
+        chatsSelectBar = row();
+        chatsSelectBar.setPadding(dp(4), 0, dp(4), 0);
+        chatsSelectCount = text("", 13, Color.WHITE);
+        chatsSelectCount.setGravity(Gravity.CENTER_VERTICAL);
+        TextView actions = text("actions", 13, Color.LTGRAY);
+        actions.setGravity(Gravity.CENTER);
+        TextView done = text("done", 13, Color.LTGRAY);
+        done.setGravity(Gravity.CENTER);
+        actions.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { showBulkActions(); } });
+        done.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { selectedChats.clear(); renderChatList(); } });
+        chatsSelectBar.addView(chatsSelectCount, new LinearLayout.LayoutParams(0, dp(36), 1));
+        chatsSelectBar.addView(actions, new LinearLayout.LayoutParams(dp(72), dp(36)));
+        chatsSelectBar.addView(done, new LinearLayout.LayoutParams(dp(52), dp(36)));
+        GradientDrawable barBg = new GradientDrawable();
+        barBg.setColor(Color.BLACK);
+        barBg.setStroke(1, Color.rgb(52, 52, 52));
+        barBg.setCornerRadius(dp(3));
+        chatsSelectBar.setBackground(barBg);
+        chatsSelectBar.setVisibility(View.GONE);
+        LinearLayout.LayoutParams barLp = new LinearLayout.LayoutParams(-1, dp(40));
+        barLp.topMargin = dp(6);
+        root.addView(chatsSelectBar, barLp);
+
         renderChatList();
+        slidePaneIn();
     }
 
     private void renderChatList() {
+        if (chatList == null) return;
         chatList.removeAllViews();
         chatList.setPadding(0, dp(3), 0, dp(14));
+        String q = chatFilter;
+        int shown = 0;
         if (projectView.length() > 0) {
-            boolean hasProjectChats = false;
-            for (final Chat c : chats) if (projectView.equals(c.folder)) { hasProjectChats = true; chatList.addView(chatCard(c, false)); }
-            if (!hasProjectChats) chatList.addView(emptyLine("no chats yet"));
+            ArrayList<Chat> list = chatsInFolder(projectView);
+            for (int i = 0; i < list.size(); i++) {
+                Chat c = list.get(i);
+                if (!chatMatchesFilter(c)) continue;
+                chatList.addView(chatCard(c, false, shown));
+                shown++;
+            }
+            if (shown == 0) chatList.addView(emptyLine(q.trim().length() > 0 ? "no matches" : "no chats yet"));
             updateBulkButton();
             return;
         }
-        chatList.addView(sectionHeader("projects  " + realFolderCount()));
-        boolean hasFolders = false;
-        for (final String f : folders) if (!"Inbox".equals(f)) {
-            hasFolders = true;
-            chatList.addView(folderCard(f));
+        ArrayList<String> projectFolders = sortedProjectFolders();
+        ArrayList<String> visibleFolders = new ArrayList<String>();
+        for (int i = 0; i < projectFolders.size(); i++) {
+            String f = projectFolders.get(i);
+            if (q.trim().length() == 0 || ToolText.textMatchesQuery(q, f, "") || folderHasMatchingChat(f)) visibleFolders.add(f);
         }
-        if (!hasFolders) chatList.addView(emptyLine("no projects"));
+        chatList.addView(sectionHeader("projects  " + visibleFolders.size()));
+        if (visibleFolders.size() == 0) chatList.addView(emptyLine(q.trim().length() > 0 ? "no matches" : "no projects"));
+        for (int i = 0; i < visibleFolders.size(); i++) chatList.addView(folderCard(visibleFolders.get(i), i));
         chatList.addView(space(10));
-        chatList.addView(sectionHeader("general  " + folderCount("Inbox")));
-        boolean hasInbox = false;
-        for (final Chat c : chats) if ("Inbox".equals(c.folder)) { hasInbox = true; chatList.addView(chatCard(c, false)); }
-        if (!hasInbox) chatList.addView(emptyLine("no chats yet"));
+        ArrayList<Chat> inbox = chatsInFolder("Inbox");
+        ArrayList<Chat> visibleInbox = new ArrayList<Chat>();
+        for (int i = 0; i < inbox.size(); i++) if (chatMatchesFilter(inbox.get(i))) visibleInbox.add(inbox.get(i));
+        chatList.addView(sectionHeader("general  " + visibleInbox.size()));
+        if (visibleInbox.size() == 0) chatList.addView(emptyLine(q.trim().length() > 0 ? "no matches" : "no chats yet"));
+        for (int i = 0; i < visibleInbox.size(); i++) chatList.addView(chatCard(visibleInbox.get(i), false, i));
         updateBulkButton();
     }
 
-    private View folderCard(final String folder) {
+    private View folderCard(final String folder, int index) {
         LinearLayout card = row();
         card.setPadding(dp(10), 0, dp(6), 0);
-        card.setBackground(cardBorder());
-        card.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { projectView = folder; showChatsPane(); } });
+        card.setBackground(listCardBg(false, false, index));
+        card.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { paneSlide = -1; projectView = folder; showChatsPane(); } });
+        bindPress(card);
         TextView name = cardText(folder, 14, Color.WHITE);
         name.setGravity(Gravity.CENTER_VERTICAL);
         TextView count = cardText(folderCount(folder) + " chats", 11, Color.LTGRAY);
@@ -1898,41 +2168,60 @@ public class MainActivity extends Activity {
         card.addView(count, new LinearLayout.LayoutParams(dp(68), dp(40)));
         card.addView(dots, new LinearLayout.LayoutParams(dp(30), dp(40)));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, dp(40));
-        lp.setMargins(0, 0, 0, dp(4));
+        lp.setMargins(0, 0, 0, dp(6));
         card.setLayoutParams(lp);
         return card;
     }
 
-    private View chatCard(final Chat c, boolean nested) {
+    private View chatCard(final Chat c, boolean nested, int index) {
+        boolean selected = selectedChats.contains(c.id);
+        boolean current = c.id.equals(currentChatId);
         LinearLayout wrap = new LinearLayout(this);
         wrap.setOrientation(LinearLayout.HORIZONTAL);
         wrap.setBackgroundColor(Color.BLACK);
         if (nested) wrap.setPadding(dp(10), 0, 0, 0);
         LinearLayout card = row();
         card.setPadding(dp(10), dp(4), dp(2), dp(4));
-        card.setBackground(selectedChats.contains(c.id) ? selectedBorder() : cardBorder());
+        card.setBackground(listCardBg(selected, current, index));
         card.setOnLongClickListener(new View.OnLongClickListener() { @Override public boolean onLongClick(View v) { toggleChatSelection(c); return true; } });
-        card.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { if (selectedChats.size() > 0) toggleChatSelection(c); else openChatFromList(c); } });
+        card.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
+            if (selectedChats.size() > 0) toggleChatSelection(c);
+            else { paneSlide = -1; openChatFromList(c); }
+        } });
+        bindPress(card);
         LinearLayout textCol = new LinearLayout(this);
         textCol.setOrientation(LinearLayout.VERTICAL);
         textCol.setGravity(Gravity.CENTER_VERTICAL);
         textCol.setBackgroundColor(Color.TRANSPARENT);
-        TextView name = cardText((selectedChats.contains(c.id) ? "✓ " : "") + chatListTitle(c), 13, Color.WHITE);
+        TextView name = cardText((selected ? "✓ " : "") + chatListTitle(c), 13, Color.WHITE);
         name.setSingleLine(true);
         name.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        TextView preview = cardText(chatPreview(c), 10, Color.rgb(145,145,145));
+        String when = ToolText.relativeTime(System.currentTimeMillis(), chatRecency(c));
+        String previewLine = chatPreview(c);
+        if (when.length() > 0) previewLine = when + "  ·  " + previewLine;
+        TextView preview = cardText(previewLine, 10, Color.rgb(145,145,145));
         preview.setSingleLine(true);
         preview.setEllipsize(android.text.TextUtils.TruncateAt.END);
         textCol.addView(name, new LinearLayout.LayoutParams(-1, dp(22)));
         textCol.addView(preview, new LinearLayout.LayoutParams(-1, dp(17)));
+        LinearLayout end = new LinearLayout(this);
+        end.setOrientation(LinearLayout.HORIZONTAL);
+        end.setGravity(Gravity.CENTER_VERTICAL);
+        end.setBackgroundColor(Color.TRANSPARENT);
+        if (current && !selected) {
+            TextView on = cardText("on", 11, Color.rgb(180, 180, 180));
+            on.setGravity(Gravity.CENTER);
+            end.addView(on, new LinearLayout.LayoutParams(-2, dp(47)));
+        }
         TextView dots = cardText("...", 13, Color.LTGRAY);
         dots.setGravity(Gravity.CENTER);
         dots.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { chatActions(c); } });
+        end.addView(dots, new LinearLayout.LayoutParams(dp(30), dp(47)));
         card.addView(textCol, new LinearLayout.LayoutParams(0, dp(47), 1));
-        card.addView(dots, new LinearLayout.LayoutParams(dp(30), dp(47)));
+        card.addView(end, new LinearLayout.LayoutParams(-2, dp(47)));
         wrap.addView(card, new LinearLayout.LayoutParams(-1, dp(53)));
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, dp(57));
-        lp.setMargins(0, 0, 0, dp(4));
+        lp.setMargins(0, 0, 0, dp(6));
         wrap.setLayoutParams(lp);
         return wrap;
     }
@@ -1997,6 +2286,72 @@ public class MainActivity extends Activity {
     private static boolean isBusyStats(String stats) { return LOADING.equals(stats) || SEARCHING.equals(stats); }
     private boolean chatIsLoading(Chat c) { for (Msg m : c.messages) if (isBusyStats(m.stats)) return true; if (c.id.equals(currentChatId)) for (Msg m : messages) if (isBusyStats(m.stats)) return true; return false; }
 
+    private boolean chatMatchesFilter(Chat c) {
+        return ToolText.textMatchesQuery(chatFilter, chatListTitle(c), chatPreview(c));
+    }
+
+    private boolean folderHasMatchingChat(String folder) {
+        for (Chat c : chats) if (folder.equals(c.folder) && chatMatchesFilter(c)) return true;
+        return false;
+    }
+
+    private long chatRecency(Chat c) {
+        if (c == null) return 0;
+        long last = 0;
+        for (int i = 0; i < c.messages.size(); i++) {
+            Msg m = c.messages.get(i);
+            if (m != null && m.startedAt > last) last = m.startedAt;
+        }
+        return ToolText.recencyMillis(c.updatedAt, c.id, last);
+    }
+
+    private void touchChat(Chat c) {
+        if (c == null) return;
+        c.updatedAt = System.currentTimeMillis();
+        chats.remove(c);
+        chats.add(0, c);
+    }
+
+    private ArrayList<Chat> chatsInFolder(String folder) {
+        ArrayList<Chat> out = new ArrayList<Chat>();
+        for (int i = 0; i < chats.size(); i++) {
+            Chat c = chats.get(i);
+            if (c != null && folder.equals(c.folder)) out.add(c);
+        }
+        Collections.sort(out, new Comparator<Chat>() {
+            @Override public int compare(Chat a, Chat b) { return Long.compare(chatRecency(b), chatRecency(a)); }
+        });
+        return out;
+    }
+
+    private ArrayList<String> sortedProjectFolders() {
+        ArrayList<String> out = new ArrayList<String>();
+        for (int i = 0; i < folders.size(); i++) {
+            String f = folders.get(i);
+            if (f != null && !"Inbox".equals(f)) out.add(f);
+        }
+        Collections.sort(out, new Comparator<String>() {
+            @Override public int compare(String a, String b) {
+                long da = folderRecency(a), db = folderRecency(b);
+                if (db != da) return Long.compare(db, da);
+                return a.compareToIgnoreCase(b);
+            }
+        });
+        return out;
+    }
+
+    private long folderRecency(String folder) {
+        long best = 0;
+        for (int i = 0; i < chats.size(); i++) {
+            Chat c = chats.get(i);
+            if (c != null && folder.equals(c.folder)) {
+                long t = chatRecency(c);
+                if (t > best) best = t;
+            }
+        }
+        return best;
+    }
+
     private void toggleChatSelection(Chat c) {
         if (selectedChats.contains(c.id)) selectedChats.remove(c.id); else selectedChats.add(c.id);
         renderChatList();
@@ -2005,14 +2360,21 @@ public class MainActivity extends Activity {
 
     private void updateBulkButton() {
         removeScreenChild(bulkButton); bulkButton = null;
-        if (selectedChats.size() == 0 || pane != 0) return;
-        bulkButton = text("...", 15, Color.WHITE);
-        bulkButton.setGravity(Gravity.CENTER);
-        bulkButton.setBackground(grayBorder());
-        bulkButton.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { showBulkActions(); } });
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(dp(34), dp(28), Gravity.RIGHT | Gravity.TOP);
-        lp.setMargins(0, dp(98), dp(18), 0);
-        screen.addView(bulkButton, lp);
+        if (chatsSelectBar == null || chatsSelectCount == null) return;
+        int n = selectedChats.size();
+        boolean show = n > 0 && pane == 0;
+        chatsSelectCount.setText(n == 0 ? "" : n + " selected");
+        if (show && chatsSelectBar.getVisibility() != View.VISIBLE) {
+            chatsSelectBar.setVisibility(View.VISIBLE);
+            chatsSelectBar.setAlpha(0f);
+            chatsSelectBar.setTranslationY(dp(10));
+            chatsSelectBar.animate().alpha(1f).translationY(0).setDuration(140).setInterpolator(new DecelerateInterpolator()).start();
+        } else if (!show) {
+            chatsSelectBar.animate().cancel();
+            chatsSelectBar.setVisibility(View.GONE);
+            chatsSelectBar.setAlpha(1f);
+            chatsSelectBar.setTranslationY(0);
+        }
     }
 
     private void captureChatScroll() {
@@ -2046,6 +2408,9 @@ public class MainActivity extends Activity {
         clampMessageWindow();
         final boolean showBottom = messageEnd >= messages.size();
         renderingMessages = true;
+        liveStreamBody = null;
+        liveStreamMsg = null;
+        liveStreamKey = "";
         messageList.removeAllViews();
         if (messages.isEmpty()) {
             showEmptyPrompt();
@@ -2053,16 +2418,30 @@ public class MainActivity extends Activity {
         if (messageStart > 0) messageList.addView(windowMarker("older messages above"));
         for (int i = messageStart; i < messageEnd; i++) {
             Msg m = messages.get(i);
+            ArrayList<ToolStep> toolSteps = copyToolSteps(m);
+            boolean hasRunningTool = false;
+            for (int ti = 0; ti < toolSteps.size(); ti++) {
+                ToolStep ts = toolSteps.get(ti);
+                if (ts != null && "running".equals(ts.status)) hasRunningTool = true;
+            }
             final boolean isSearching = SEARCHING.equals(m.stats);
-            final boolean hasThinkingRow = m.role.equals("assistant") && ((m.reasoning.length() > 0 && !m.reasoning.trim().equals("null")) || (LOADING.equals(m.stats) && m.reasoningCapable));
-            // Only show gathered sources after the turn finishes — mid-stream URL lists feel like a premature "search done".
-            final boolean hasSearchRow = m.role.equals("assistant") && m.searchSources.size() > 0 && m.streamDone && !isSearching;
+            boolean thinkingLive = m.role.equals("assistant") && !m.streamDone && LOADING.equals(m.stats)
+                    && (m.text == null || m.text.length() == 0) && !hasRunningTool && !isSearching;
+            final boolean hasThinkingRow = m.role.equals("assistant") && (
+                    thinkingLive
+                    || (m.reasoning.length() > 0 && !m.reasoning.trim().equals("null"))
+                    || m.thoughtMs > 0);
+            final boolean hasSearchRow = m.role.equals("assistant") && m.searchSources.size() > 0;
             final boolean hasMemoryRow = m.role.equals("assistant") && m.streamDone && m.memorySaved;
             TextView body = text("", 16, Color.WHITE);
             String bodyText = "assistant".equals(m.role) ? sanitizeAssistantText(m.text) : (m.text == null ? "" : m.text);
             boolean hasImage = messageImageCount(m) > 0;
             boolean hasText = bodyText.trim().length() > 0;
-            body.setText(hasText ? markdownText(bodyText) : "");
+            boolean streamPatch = "assistant".equals(m.role) && !m.streamDone;
+            if (hasText) {
+                if (streamPatch) body.setText(bodyText);
+                else body.setText(cachedMarkdown(m, bodyText));
+            }
             body.setLineSpacing(dp(2), 1.0f);
             final Msg selectedMessage = m;
             body.setOnLongClickListener(new View.OnLongClickListener() { @Override public boolean onLongClick(View v) { showMessageActions(selectedMessage); return true; } });
@@ -2082,23 +2461,16 @@ public class MainActivity extends Activity {
             }
             if (hasThinkingRow) {
                 final Msg thinkingMessage = m;
-                LinearLayout thinkRow = row();
-                thinkRow.setPadding(0, dp(4), 0, dp(4));
+                LinearLayout thinkRow = compactStatusRow();
                 TextView thinking;
-                if (!m.streamDone && m.text.length() == 0 && !isSearching) {
-                    JumpTextView jump = new JumpTextView(this);
-                    jump.word = "thinking";
-                    jump.bind(m);
-                    thinking = jump;
+                if (thinkingLive) {
+                    thinking = liveStatus(ToolText.ensureEllipsis("thinking"), m);
                 } else {
                     long doneMs = m.thoughtMs > 0 ? m.thoughtMs : Math.max(1, System.currentTimeMillis() - m.startedAt);
-                    thinking = text("thought for " + thoughtDuration(doneMs), 11, Color.rgb(135,135,135));
+                    thinking = statusText("thought for " + thoughtDuration(doneMs));
                 }
-                thinking.setTextColor(Color.rgb(135,135,135)); thinking.setGravity(Gravity.CENTER_VERTICAL); setTextPx(thinking, 11); thinking.setPadding(0, 0, 0, 0);
                 thinking.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { toggleThinking(thinkingMessage); } });
-                thinking.setMinHeight(dp(34));
-                thinkRow.setMinimumHeight(dp(42));
-                thinkRow.addView(thinking, new LinearLayout.LayoutParams(-1, dp(34)));
+                thinkRow.addView(thinking, new LinearLayout.LayoutParams(-1, -2));
                 thinkRow.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { toggleThinking(thinkingMessage); } });
                 messageList.addView(thinkRow, new LinearLayout.LayoutParams(-1, -2));
                 if (m.thinkingExpanded && m.reasoning.length() > 0) {
@@ -2109,25 +2481,36 @@ public class MainActivity extends Activity {
                     messageList.addView(reason, new LinearLayout.LayoutParams(-1, -2));
                 }
             }
-            if (isSearching) {
-                LinearLayout searchRow = row();
-                searchRow.setPadding(0, dp(4), 0, dp(4));
-                JumpTextView searching = new JumpTextView(this);
-                searching.word = "searching";
-                searching.bind(m);
-                searching.setTextColor(Color.rgb(135,135,135));
-                searching.setGravity(Gravity.CENTER_VERTICAL);
-                setTextPx(searching, 11);
-                searching.setMinHeight(dp(34));
-                searchRow.setMinimumHeight(dp(42));
-                searchRow.addView(searching, new LinearLayout.LayoutParams(-1, dp(34)));
+            for (int ti = 0; ti < toolSteps.size(); ti++) {
+                ToolStep ts = toolSteps.get(ti);
+                if (ts == null) continue;
+                LinearLayout stepRow = compactStatusRow();
+                boolean running = "running".equals(ts.status) && !m.streamDone;
+                if (running) {
+                    stepRow.addView(liveStatus(ToolText.toolLiveLabel(ts.name), m), new LinearLayout.LayoutParams(-1, -2));
+                } else {
+                    stepRow.addView(toolDoneView(ts), new LinearLayout.LayoutParams(-1, -2));
+                }
+                messageList.addView(stepRow, new LinearLayout.LayoutParams(-1, -2));
+            }
+            if (isSearching && !hasRunningTool && !m.streamDone && m.searchSources.size() == 0) {
+                LinearLayout searchRow = compactStatusRow();
+                searchRow.addView(liveStatus(ToolText.ensureEllipsis("searching the web"), m), new LinearLayout.LayoutParams(-1, -2));
                 messageList.addView(searchRow, new LinearLayout.LayoutParams(-1, -2));
-            } else if (hasSearchRow) {
+            }
+            if (hasSearchRow) {
+                prefetchFavicons(m.searchSources);
                 final Msg searchMessage = m;
-                TextView gathered = text("gathered " + m.searchSources.size() + " sources" + (m.searchExpanded ? " ˅" : " ›"), 11, Color.rgb(135,135,135));
-                gathered.setGravity(Gravity.CENTER_VERTICAL);
+                LinearLayout srcRow = compactStatusRow();
+                TextView gathered = statusText("searched " + m.searchSources.size() + " sources" + (m.searchExpanded ? " ˅" : " ›"));
                 gathered.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { searchMessage.searchExpanded = !searchMessage.searchExpanded; renderMessages(); } });
-                messageList.addView(gathered, new LinearLayout.LayoutParams(-1, dp(24)));
+                srcRow.addView(gathered, new LinearLayout.LayoutParams(-2, -2));
+                View thumbs = sourceThumbStrip(m.searchSources);
+                LinearLayout.LayoutParams thumbLp = new LinearLayout.LayoutParams(0, -2, 1f);
+                thumbLp.leftMargin = dp(8);
+                srcRow.addView(thumbs, thumbLp);
+                srcRow.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { searchMessage.searchExpanded = !searchMessage.searchExpanded; renderMessages(); } });
+                messageList.addView(srcRow, new LinearLayout.LayoutParams(-1, -2));
                 if (m.searchExpanded) {
                     TextView src = text(join(m.searchSources), 12, Color.rgb(160,160,160));
                     src.setLineSpacing(dp(1), 1.0f);
@@ -2135,8 +2518,13 @@ public class MainActivity extends Activity {
                     messageList.addView(src, new LinearLayout.LayoutParams(-1, -2));
                 }
             }
-            if (!m.role.equals("user") && !isSearching && hasText) {
+            if (!m.role.equals("user") && !isSearching && hasText && !LOADING.equals(m.stats)) {
                 messageList.addView(body, new LinearLayout.LayoutParams(-1, -2));
+                if (!m.streamDone) {
+                    liveStreamBody = body;
+                    liveStreamMsg = m;
+                    liveStreamKey = streamUiKey(m);
+                }
             }
             if (hasMemoryRow) {
                 final Msg memoryMessage = m;
@@ -2154,6 +2542,10 @@ public class MainActivity extends Activity {
                     messageList.addView(memoryText, new LinearLayout.LayoutParams(-1, -2));
                 }
             }
+            if (m.role.equals("assistant") && !m.streamDone) {
+                liveStreamMsg = m;
+                liveStreamKey = streamUiKey(m);
+            }
             if (m.role.equals("assistant") && m.stats.length() > 0 && !isBusyStats(m.stats)) messageList.addView(text(m.stats, 10, Color.rgb(130,130,130)));
         }
         if (messageEnd < messages.size()) messageList.addView(windowMarker("newer messages below"));
@@ -2164,7 +2556,7 @@ public class MainActivity extends Activity {
         final ScrollView renderScroll = scroll;
         if (renderScroll != null) renderScroll.post(new Runnable() { @Override public void run() {
             if (renderScroll != scroll || pane != 1) return;
-            if (forceAutoScrollBottom && showBottom && userAtChatBottom) renderScroll.fullScroll(View.FOCUS_DOWN);
+            if (forceAutoScrollBottom && showBottom && userAtChatBottom) scrollChatToBottom(renderScroll);
             else if (restoreScrollOnce) renderScroll.scrollTo(0, savedChatScrollY);
             forceAutoScrollBottom = false;
             restoreScrollOnce = false;
@@ -2466,6 +2858,16 @@ public class MainActivity extends Activity {
         String endpoint = source.equals("custom") ? modelEndpoint(model) : "";
         String key = source.equals("openrouter") ? savedApiKey() : endpointKey(endpoint);
         String text = input == null ? pendingVoiceText.trim() : input.getText().toString().trim();
+        forceSearchThisTurn = false;
+        researchThisTurn = false;
+        if (handleSlashCommandLocal(text)) return true;
+        text = applySlashCommandToOutgoing(text);
+        if ((forceSearchThisTurn || researchThisTurn) && text.length() == 0 && pendingImages.size() == 0) {
+            toast(researchThisTurn ? "add a research query" : "add a search query");
+            forceSearchThisTurn = false;
+            researchThisTurn = false;
+            return false;
+        }
         if (handleMemoryRecall(text)) return true;
         String pendingUserMemoryNote = pendingUserMemoryNote(text);
         String pendingUserMemoryRemoval = pendingUserMemoryRemoval(text);
@@ -2475,6 +2877,7 @@ public class MainActivity extends Activity {
         if (text.length() == 0 && pendingImages.size() == 0) return false;
         if (input != null) hideKeyboardFrom(input);
         if (input != null) input.clearFocus();
+        hideSlashSuggestions();
         userAtChatBottom = true;
         Msg userMsg = new Msg("user", text, "", "", "", "", replyQuote);
         for (AttachedImage img : pendingImages) userMsg.images.add(new AttachedImage(img.base64, img.mime));
@@ -2497,18 +2900,30 @@ public class MainActivity extends Activity {
         final String sendModel = model;
         final String sendPendingUserMemoryNote = pendingUserMemoryNote;
         final String sendPendingUserMemoryRemoval = pendingUserMemoryRemoval;
+        // Capture turn flags before the worker starts — avoid cross-thread races on mutable fields.
+        turnForceSearch = forceSearchThisTurn;
+        turnResearch = researchThisTurn;
+        forceSearchThisTurn = false;
+        researchThisTurn = false;
         new Thread(new Runnable() { @Override public void run() { callOpenRouter(sendKey, sendSource, sendModel, assistant, userText, sendPendingUserMemoryNote, sendPendingUserMemoryRemoval); } }).start();
         return true;
     }
 
     private void callOpenRouter(String key, String source, String model, final Msg assistant, String userText, String pendingUserMemoryNote, String pendingUserMemoryRemoval) {
-        long start = System.nanoTime(), headersAt = start;
+        long start = System.nanoTime();
         try {
-            JSONObject body = new JSONObject(); body.put("model", model);
+            boolean research = turnResearch;
+            boolean forceSearch = turnForceSearch || research;
+            turnResearch = false;
             JSONArray arr = new JSONArray();
             String searchContext = buildSearchContext(userText);
-            if (searchContext.length() > 0) { assistant.searchSources.clear(); assistant.searchSources.addAll(lastSearchSources); arr.put(new JSONObject().put("role", "system").put("content", searchContext)); }
-            addBackgroundSystemContext(arr, true);
+            if (searchContext.length() > 0) {
+                assistant.searchSources.clear();
+                assistant.searchSources.addAll(lastSearchSources);
+                arr.put(new JSONObject().put("role", "system").put("content", searchContext));
+            }
+            boolean searchAlready = searchContext.length() > 0;
+            addBackgroundSystemContext(arr, true, searchAlready && !research, true, false);
             if (assistant.slowVoice) arr.put(new JSONObject().put("role", "system").put("content", "This is a spoken two-way voice conversation. Reply in plain text only. Do not use markdown, headings, bullets, tables, code blocks, or formatting symbols. Keep the response natural for text-to-speech."));
             for (Msg m : messages) {
                 if (isBusyStats(m.stats)) continue;
@@ -2525,87 +2940,167 @@ public class MainActivity extends Activity {
                 } else one.put("content", requestText(m));
                 arr.put(one);
             }
-            boolean streaming = true;
-            body.put("messages", arr);
-            if (source.equals("openrouter")) body.put("usage", new JSONObject().put("include", true));
-            body.put("stream", streaming);
-            HttpURLConnection c = (HttpURLConnection) new URL(chatCompletionsUrl(source, model)).openConnection();
-            c.setRequestMethod("POST"); c.setConnectTimeout(30000); c.setReadTimeout(120000); c.setDoOutput(true);
-            if (key.length() > 0) c.setRequestProperty("Authorization", "Bearer " + key);
-            c.setRequestProperty("Content-Type", "application/json");
-            c.setRequestProperty("Accept", "text/event-stream, application/json");
-            if (source.equals("openrouter")) { c.setRequestProperty("HTTP-Referer", "https://minimal.chat/android"); c.setRequestProperty("X-Title", "chat"); }
-            OutputStream os = c.getOutputStream(); os.write(body.toString().getBytes(StandardCharsets.UTF_8)); os.close();
-            headersAt = System.nanoTime(); int code = c.getResponseCode();
-            if (code >= 400) throw new RuntimeException(readAll(c.getErrorStream()));
-            final StringBuilder answer = new StringBuilder();
-            final StringBuilder reasoning = new StringBuilder();
-            if (streaming) {
-                BufferedReader br = new BufferedReader(new InputStreamReader(c.getInputStream(), StandardCharsets.UTF_8));
-                StringBuilder nonSse = new StringBuilder();
-                boolean[] inThinkTag = new boolean[]{false};
-                String line;
-                while ((line = br.readLine()) != null) {
-                    line = line.trim();
-                    if (!line.startsWith("data:")) { if (line.length() > 0) nonSse.append(line); continue; }
-                    String data = line.substring(5).trim();
-                    if ("[DONE]".equals(data)) break;
-                    JSONObject chunk = new JSONObject(data);
-                    JSONArray choices = chunk.optJSONArray("choices");
-                    if (choices == null || choices.length() == 0) continue;
-                    JSONObject delta = choices.getJSONObject(0).optJSONObject("delta");
-                    if (delta == null) continue;
-                    String content = cleanJsonString(delta, "content");
-                    String thought = reasoningDelta(delta);
-                    if (content.length() == 0 && thought.length() == 0) continue;
-                    appendReasoningAwareContent(content, answer, reasoning, inThinkTag);
-                    reasoning.append(thought);
-                    final String partial = answer.toString();
-                    final String partialReasoning = reasoning.toString();
-                    runOnUiThread(new Runnable() { @Override public void run() { updateStreamingAssistant(assistant, partial, partialReasoning); } });
-                }
-                br.close();
-                if (answer.length() == 0 && reasoning.length() == 0 && nonSse.length() > 0) {
-                    JSONObject resp = new JSONObject(nonSse.toString());
-                    answer.append(extractMessageText(resp));
-                    reasoning.append(extractMessageReasoning(resp));
-                }
-            } else {
-                JSONObject resp = new JSONObject(readAll(c.getInputStream()));
-                answer.append(extractMessageText(resp));
-                reasoning.append(extractMessageReasoning(resp));
-            }
-            long end = System.nanoTime();
-            String finalAnswer = sanitizeAssistantText(answer.toString());
-            String toolQuery = webSearchToolQuery(answer.toString());
-            if (toolQuery.length() == 0) toolQuery = webSearchToolQuery(reasoning.toString());
-            boolean needsSearchAnswer = toolQuery.length() > 0
-                    || ((finalAnswer.length() == 0 || looksLikeToolResidue(answer.toString()))
-                        && (lastSearchResult.length() > 0 || assistant.searchSources.size() > 0));
-            if (needsSearchAnswer) {
-                runOnUiThread(new Runnable() { @Override public void run() {
-                    if (assistant.thoughtMs == 0 && assistant.reasoningCapable) {
-                        assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt);
+            String endpointUrl = chatCompletionsUrl(source, model);
+            boolean nativeTools = !endpointsWithoutNativeTools.contains(endpointUrl);
+            boolean includeSearchTool = webSearchAvailable() && (!searchAlready || research);
+            JSONArray tools = AgentTools.openaiTools(includeSearchTool, memoryEnabled());
+            if (tools.length() == 0) nativeTools = false;
+            int maxRounds = AgentTools.maxRounds(research);
+            StringBuilder allReasoning = new StringBuilder();
+            String finalAnswer = "";
+            String lastRaw = "";
+            ArrayList<String> seenSearchQueries = new ArrayList<String>();
+            ArrayList<String> seenFetchUrls = new ArrayList<String>();
+            long end = start;
+            for (int round = 0; round < maxRounds; round++) {
+                boolean lastRound = round == maxRounds - 1;
+                rememberPromptTokens(assistant, arr, nativeTools && !lastRound ? tools : null);
+                JSONObject req = AgentTools.completionBody(model, arr, nativeTools ? tools : null, true, lastRound);
+                if (source.equals("openrouter")) req.put("usage", new JSONObject().put("include", true));
+                StreamRound sr;
+                try {
+                    sr = streamChatCompletion(req, key, source, assistant);
+                } catch (RuntimeException e) {
+                    if (nativeTools && AgentTools.looksLikeToolsUnsupported(e.getMessage())) {
+                        nativeTools = false;
+                        endpointsWithoutNativeTools.add(endpointUrl);
+                        arr.put(new JSONObject().put("role", "system").put("content", AgentTools.textSearchFallbackPrompt()));
+                        round--;
+                        continue;
                     }
-                    assistant.text = "";
-                    assistant.stats = SEARCHING;
-                    forceAutoScrollBottom = userAtChatBottom;
-                    renderMessages();
-                } });
-                String result = lastSearchResult;
-                String queryForFollowup = lastSearchQuery.length() > 0 ? lastSearchQuery : (userText == null ? "" : userText.trim());
-                if (toolQuery.length() > 0) {
-                    queryForFollowup = toolQuery;
-                    result = webSearch(toolQuery);
-                    rememberSearchResult(toolQuery, result);
+                    throw e;
                 }
-                if (result == null) result = "";
-                if (result.length() > 0) {
-                    assistant.searchSources.clear();
-                    assistant.searchSources.addAll(extractSearchSources(result));
+                end = sr.endAt;
+                if (sr.promptTokens > 0) applyPromptTokens(assistant, sr.promptTokens);
+                if (sr.reasoning.length() > 0) {
+                    if (allReasoning.length() > 0) allReasoning.append('\n');
+                    allReasoning.append(sr.reasoning);
                 }
-                finalAnswer = answerAfterWebSearch(key, source, model, queryForFollowup, result, userText);
+                lastRaw = sr.content;
+                String visible = sanitizeAssistantText(sr.content);
+                boolean usable = ToolText.isUsableFollowupAnswer(visible);
+                ArrayList<AgentTools.ToolCall> calls = AgentTools.resolveCalls(sr.tools, sr.content, sr.reasoning, usable);
+                if (calls.size() == 0) {
+                    boolean hadSearch = lastSearchResult.length() > 0 || assistant.searchSources.size() > 0;
+                    if (hadSearch && ToolText.looksLikeSearchPunt(visible) && round + 1 < maxRounds) {
+                        String fetchUrl = "";
+                        ArrayList<String> candidates = assistant.searchSources.size() > 0
+                                ? assistant.searchSources : extractSearchSources(lastSearchResult);
+                        ArrayList<String> pick = ToolText.preferReaderUrls(candidates);
+                        for (int pi = 0; pi < pick.size(); pi++) {
+                            String u = pick.get(pi);
+                            if (u == null || u.length() == 0) continue;
+                            if (!seenFetchUrls.contains(u.toLowerCase(Locale.US))) { fetchUrl = u; break; }
+                        }
+                        if (fetchUrl.length() > 0) {
+                            seenFetchUrls.add(fetchUrl.toLowerCase(Locale.US));
+                            String result = runFetchForTurn(assistant, fetchUrl);
+                            if (result.length() > 0) {
+                                arr.put(new JSONObject().put("role", "assistant").put("content", visible));
+                                arr.put(AgentTools.textResultUserMessage("fetch", fetchUrl, result));
+                                rememberPromptTokens(assistant, arr, nativeTools ? tools : null);
+                                continue;
+                            }
+                        }
+                        String seed = lastSearchQuery.length() > 0 ? lastSearchQuery : (userText == null ? "" : userText.trim());
+                        String refined = ToolText.refineSearchQuery(seed, seenSearchQueries.size());
+                        String keyQ = refined.toLowerCase(Locale.US);
+                        if (refined.length() > 0 && !seenSearchQueries.contains(keyQ)) {
+                            seenSearchQueries.add(keyQ);
+                            String result = runWebSearchForTurn(assistant, refined, nativeTools);
+                            if (result == null) result = "";
+                            arr.put(new JSONObject().put("role", "assistant").put("content", visible));
+                            arr.put(AgentTools.textResultUserMessage("web_search", refined, result));
+                            rememberPromptTokens(assistant, arr, nativeTools ? tools : null);
+                            continue;
+                        }
+                    }
+                    if (maybeForceWebSearch(round, includeSearchTool, seenSearchQueries, forceSearch, userText, assistant, arr, nativeTools, visible)) {
+                        rememberPromptTokens(assistant, arr, nativeTools ? tools : null);
+                        continue;
+                    }
+                    finalAnswer = visible;
+                    break;
+                }
+                boolean nativeThisRound = nativeTools && sr.tools.nativeCalls().size() > 0;
+                if (nativeThisRound) {
+                    arr.put(AgentTools.assistantNativeMessage(sr.content, calls));
+                } else {
+                    arr.put(new JSONObject().put("role", "assistant").put("content", visible.length() > 0 ? visible : sr.content));
+                }
+                ArrayList<AgentTools.ToolCall> executed = new ArrayList<AgentTools.ToolCall>();
+                for (int i = 0; i < calls.size(); i++) {
+                    AgentTools.ToolCall call = calls.get(i);
+                    if (call == null) continue;
+                    if (call.isSearch()) {
+                        String q = call.query();
+                        if (q.length() == 0) q = userText == null ? "" : userText.trim();
+                        String keyQ = q.toLowerCase(Locale.US);
+                        if (seenSearchQueries.contains(keyQ)) continue;
+                        seenSearchQueries.add(keyQ);
+                        String result = runWebSearchForTurn(assistant, q, nativeTools);
+                        if (result == null) result = "";
+                        if (nativeThisRound) arr.put(AgentTools.toolResultMessage(call.id, result));
+                        else arr.put(AgentTools.textResultUserMessage("web_search", q, result));
+                        executed.add(call);
+                    } else if (call.isFetch()) {
+                        String url = call.url();
+                        String keyU = url.toLowerCase(Locale.US);
+                        if (url.length() == 0 || seenFetchUrls.contains(keyU)) {
+                            String dup = url.length() == 0 ? "No URL provided." : "Already fetched.";
+                            if (nativeThisRound) arr.put(AgentTools.toolResultMessage(call.id, dup));
+                            else arr.put(AgentTools.textResultUserMessage("fetch", url, dup));
+                            executed.add(call);
+                        } else {
+                            seenFetchUrls.add(keyU);
+                            String result = runFetchForTurn(assistant, url);
+                            if (nativeThisRound) arr.put(AgentTools.toolResultMessage(call.id, result));
+                            else arr.put(AgentTools.textResultUserMessage("fetch", url, result));
+                            executed.add(call);
+                        }
+                    } else if (call.isSaveMemory()) {
+                        String note = call.note();
+                        ToolStep memStep = beginToolStep(assistant, "save_memory", note);
+                        String result;
+                        if (!memoryEnabled()) result = "Memory is turned off.";
+                        else if (note.length() == 0) result = "No note provided.";
+                        else {
+                            String saved = appendMemory(note, "model");
+                            if (saved.length() > 0) { assistant.memorySaved = true; assistant.memorySavedText = saved; }
+                            result = saved.length() > 0 ? "Saved." : "Not saved (duplicate or empty).";
+                        }
+                        finishToolStep(memStep, result);
+                        if (nativeThisRound) arr.put(AgentTools.toolResultMessage(call.id, result));
+                        else arr.put(AgentTools.textResultUserMessage("save_memory", note, result));
+                        executed.add(call);
+                    } else if (call.isRemoveMemory()) {
+                        String note = call.note();
+                        ToolStep memStep = beginToolStep(assistant, "remove_memory", note);
+                        String result;
+                        if (!memoryEnabled()) result = "Memory is turned off.";
+                        else {
+                            String removed = removeMemory(note);
+                            if (removed.length() > 0) appendRemovedMemory(assistant, removed);
+                            result = removed.length() > 0 ? "Removed." : "Nothing matched.";
+                        }
+                        finishToolStep(memStep, result);
+                        if (nativeThisRound) arr.put(AgentTools.toolResultMessage(call.id, result));
+                        else arr.put(AgentTools.textResultUserMessage("remove_memory", note, result));
+                        executed.add(call);
+                    }
+                }
+                rememberPromptTokens(assistant, arr, nativeTools ? tools : null);
+                if (maybeForceWebSearch(round, includeSearchTool, seenSearchQueries, forceSearch, userText, assistant, arr, nativeTools, "")) {
+                    rememberPromptTokens(assistant, arr, nativeTools ? tools : null);
+                    continue;
+                }
+                if (!AgentTools.continueAfter(executed, usable, round, maxRounds)) {
+                    finalAnswer = visible;
+                    break;
+                }
+                finalAnswer = visible;
             }
+            if (finalAnswer.length() == 0) finalAnswer = sanitizeAssistantText(lastRaw);
             String memoryNote = memoryToolNote(finalAnswer);
             ArrayList<String> removeNotes = memoryRemoveToolNotes(finalAnswer);
             boolean hasRemoveTool = removeNotes.size() > 0 || finalAnswer.toLowerCase(Locale.US).contains("remove_memory");
@@ -2624,14 +3119,17 @@ public class MainActivity extends Activity {
                 String savedMemory = appendMemory(pendingUserMemoryNote, "user");
                 if (savedMemory.length() > 0) { assistant.memorySaved = true; assistant.memorySavedText = savedMemory; }
             }
+            finalAnswer = recoverEmptyAssistantReply(key, source, model, userText, lastRaw, finalAnswer, allReasoning.toString(), assistant);
             final String finishedAnswer = finalAnswer;
-            int completionTokens = estimateTokens(finishedAnswer) + (reasoning.length() == 0 ? 0 : estimateTokens(reasoning.toString()));
+            int completionTokens = estimateTokens(finishedAnswer) + (allReasoning.length() == 0 ? 0 : estimateTokens(allReasoning.toString()));
             final String stats = String.format(Locale.US, "%.1f tok/s", completionTokens / Math.max(0.001, (end - start) / 1e9));
-            runOnUiThread(new Runnable() { @Override public void run() { finishStreamingAssistant(assistant, finishedAnswer, reasoning.toString(), stats, key, source, model); } });
+            final String finishedReasoning = allReasoning.toString();
+            runOnUiThread(new Runnable() { @Override public void run() { finishStreamingAssistant(assistant, finishedAnswer, finishedReasoning, stats, key, source, model); } });
         } catch (Exception e) {
             final String msg = friendlyError(e);
             runOnUiThread(new Runnable() { @Override public void run() {
                 stopVoiceThinking();
+                completeRunningToolSteps(assistant);
                 assistant.stats = "";
                 assistant.streamDone = true;
                 assistant.text = isModelRefusal(msg) ? "model refused\n" + msg : "failed to load model\n" + msg;
@@ -2642,6 +3140,374 @@ public class MainActivity extends Activity {
                 renderMessages();
             } });
         }
+    }
+
+    private static final class StreamRound {
+        String content = "";
+        String reasoning = "";
+        AgentTools.RoundState tools = new AgentTools.RoundState();
+        int promptTokens = 0;
+        long endAt;
+    }
+
+    private void showSearchingStatus(final Msg assistant, final boolean keepText) {
+        runOnUiThread(new Runnable() { @Override public void run() {
+            freezeThinking(assistant);
+            if (!keepText) assistant.text = "";
+            assistant.stats = SEARCHING;
+            assistant.jumpAnimStartMs = 0L;
+            assistant.jumpAnimWord = "";
+            forceAutoScrollBottom = userAtChatBottom;
+            renderMessages();
+        } });
+    }
+
+    private void freezeThinking(Msg assistant) {
+        if (assistant == null) return;
+        if (assistant.thoughtMs == 0) {
+            assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt);
+        }
+    }
+
+    private ArrayList<ToolStep> copyToolSteps(Msg m) {
+        ArrayList<ToolStep> out = new ArrayList<ToolStep>();
+        if (m == null || m.toolSteps == null) return out;
+        synchronized (m.toolSteps) {
+            out.addAll(m.toolSteps);
+        }
+        return out;
+    }
+
+    private ToolStep beginToolStep(final Msg m, String name, String detail) {
+        final ToolStep s = new ToolStep();
+        s.name = name == null ? "" : name;
+        s.detail = detail == null ? "" : detail;
+        s.status = "running";
+        if (m != null) {
+            freezeThinking(m);
+            synchronized (m.toolSteps) {
+                m.toolSteps.add(s);
+            }
+        }
+        runOnUiThread(new Runnable() { @Override public void run() {
+            if (m != null) {
+                m.jumpAnimStartMs = 0L;
+                m.jumpAnimWord = "";
+            }
+            forceAutoScrollBottom = userAtChatBottom;
+            renderMessages();
+        } });
+        return s;
+    }
+
+    private void finishToolStep(final ToolStep s, String preview) {
+        if (s == null) return;
+        s.status = "done";
+        s.preview = preview == null ? "" : preview;
+        runOnUiThread(new Runnable() { @Override public void run() {
+            forceAutoScrollBottom = userAtChatBottom;
+            renderMessages();
+        } });
+    }
+
+    private void completeRunningToolSteps(Msg m) {
+        if (m == null || m.toolSteps == null) return;
+        synchronized (m.toolSteps) {
+            for (int i = 0; i < m.toolSteps.size(); i++) {
+                ToolStep s = m.toolSteps.get(i);
+                if (s != null && "running".equals(s.status)) s.status = "done";
+            }
+        }
+    }
+
+    private String runWebSearchForTurn(Msg assistant, String query, boolean nativeTools) {
+        showSearchingStatus(assistant, false);
+        ToolStep step = beginToolStep(assistant, "web_search", query);
+        String result;
+        try {
+            result = webSearch(query, nativeTools);
+            rememberSearchResult(query, result);
+        } catch (Exception searchErr) {
+            result = lastSearchResult;
+            if (result == null || result.length() == 0) {
+                result = "Search failed: " + (searchErr.getMessage() == null ? "unknown error" : searchErr.getMessage());
+            }
+        }
+        if (result == null) result = "";
+        addToolTokens(assistant, result);
+        if (result.length() > 0 && assistant != null) {
+            assistant.searchSources.clear();
+            assistant.searchSources.addAll(extractSearchSources(result));
+            prefetchFavicons(assistant.searchSources);
+        }
+        int n = assistant == null ? 0 : assistant.searchSources.size();
+        finishToolStep(step, n > 0 ? (n + " sources") : "no sources");
+        return result;
+    }
+
+    private String runFetchForTurn(Msg assistant, String url) {
+        showSearchingStatus(assistant, false);
+        String host = ToolText.sourceHost(url);
+        ToolStep step = beginToolStep(assistant, "fetch", host.length() > 0 ? host : url);
+        String result = fetchUrlForTool(url);
+        addToolTokens(assistant, result);
+        if (assistant != null && url != null && url.length() > 0 && !assistant.searchSources.contains(url)) {
+            assistant.searchSources.add(url);
+            prefetchFavicons(assistant.searchSources);
+        }
+        finishToolStep(step, host.length() > 0 ? host : "done");
+        return result;
+    }
+
+    private boolean maybeForceWebSearch(int round, boolean includeSearchTool, ArrayList<String> seenSearchQueries,
+                                        boolean forceSearch, String userText, Msg assistant, JSONArray arr,
+                                        boolean nativeTools, String visibleAssistant) {
+        if (round != 0 || !includeSearchTool || seenSearchQueries.size() > 0) return false;
+        if (!(forceSearch || ToolText.wantsWebSearch(userText))) return false;
+        String q = ToolText.extractSearchQuery(userText);
+        if (q.length() == 0) q = userText == null ? "" : userText.trim();
+        if (q.length() == 0) return false;
+        seenSearchQueries.add(q.toLowerCase(Locale.US));
+        String result = runWebSearchForTurn(assistant, q, nativeTools);
+        try {
+            if (visibleAssistant != null && visibleAssistant.length() > 0) {
+                arr.put(new JSONObject().put("role", "assistant").put("content", visibleAssistant));
+            }
+            arr.put(AgentTools.textResultUserMessage("web_search", q, result == null ? "" : result));
+        } catch (Exception e) {
+            return true;
+        }
+        return true;
+    }
+
+    private LinearLayout compactStatusRow() {
+        LinearLayout row = row();
+        row.setClipChildren(false);
+        row.setClipToPadding(false);
+        row.setPadding(0, dp(1), 0, dp(1));
+        row.setMinimumHeight(dp(22));
+        return row;
+    }
+
+    private TextView statusText(String label) {
+        TextView v = text(label, 11, Color.rgb(135, 135, 135));
+        v.setGravity(Gravity.CENTER_VERTICAL);
+        v.setIncludeFontPadding(false);
+        v.setPadding(0, dp(1), 0, dp(1));
+        v.setMinHeight(dp(22));
+        return v;
+    }
+
+    private JumpTextView liveStatus(String word, Msg m) {
+        JumpTextView jump = new JumpTextView(this);
+        jump.word = ToolText.ensureEllipsis(word == null || word.length() == 0 ? "thinking" : word);
+        jump.bind(m);
+        jump.setTextColor(Color.rgb(135, 135, 135));
+        jump.setGravity(Gravity.CENTER_VERTICAL);
+        setTextPx(jump, 11);
+        jump.setIncludeFontPadding(false);
+        jump.setPadding(0, dp(1), 0, dp(1));
+        jump.setMinHeight(dp(22));
+        return jump;
+    }
+
+    private TextView toolDoneView(ToolStep step) {
+        String name = step == null || step.name == null ? "tool" : step.name;
+        String detail = step == null ? "" : step.detail;
+        String label = ToolText.toolDoneLabel(name, detail);
+        SpannableStringBuilder b = new SpannableStringBuilder(label);
+        int nameEnd = name.length();
+        if (nameEnd > 0 && nameEnd <= b.length()) {
+            b.setSpan(new TypefaceSpan("monospace"), 0, nameEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+        TextView v = statusText("");
+        v.setText(b);
+        return v;
+    }
+
+    private View sourceThumbStrip(ArrayList<String> urls) {
+        int size = dp(18);
+        int step = dp(10);
+        FrameLayout stack = new FrameLayout(this);
+        stack.setClipChildren(false);
+        stack.setClipToPadding(false);
+        stack.setBackgroundColor(Color.TRANSPARENT);
+        int n = 0;
+        if (urls != null) {
+            int limit = Math.min(8, urls.size());
+            ArrayList<String> shown = new ArrayList<String>();
+            for (int i = 0; i < limit; i++) {
+                String url = urls.get(i);
+                if (url == null || url.length() == 0) continue;
+                shown.add(url);
+            }
+            n = shown.size();
+            // Add right-to-left so the first source sits on top and later ones peek out.
+            for (int i = n - 1; i >= 0; i--) {
+                final String url = shown.get(i);
+                View dot = sourceThumb(url);
+                FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(size, size);
+                lp.leftMargin = i * step;
+                lp.gravity = Gravity.CENTER_VERTICAL | Gravity.LEFT;
+                stack.addView(dot, lp);
+            }
+        }
+        int width = n <= 0 ? 0 : size + step * (n - 1);
+        HorizontalScrollView scroller = new HorizontalScrollView(this);
+        scroller.setHorizontalScrollBarEnabled(false);
+        scroller.setFillViewport(false);
+        scroller.setClipChildren(false);
+        scroller.setClipToPadding(false);
+        scroller.setBackgroundColor(Color.TRANSPARENT);
+        scroller.addView(stack, new FrameLayout.LayoutParams(width, size));
+        return scroller;
+    }
+
+    private View sourceThumb(final String url) {
+        String host = ToolText.sourceHost(url);
+        Bitmap icon = null;
+        synchronized (faviconCache) {
+            icon = host.length() == 0 ? null : faviconCache.get(host);
+        }
+        SourceDot dot = new SourceDot(this);
+        if (icon != null && !icon.isRecycled()) dot.icon = icon;
+        else dot.letter = ToolText.sourceLetter(host);
+        dot.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { openHttpUrl(url); } });
+        return dot;
+    }
+
+    private void prefetchFavicons(ArrayList<String> urls) {
+        if (urls == null) return;
+        for (int i = 0; i < urls.size(); i++) {
+            final String host = ToolText.sourceHost(urls.get(i));
+            if (host.length() == 0) continue;
+            synchronized (faviconCache) {
+                if (faviconCache.containsKey(host) || faviconLoading.contains(host) || faviconFailed.contains(host)) continue;
+                faviconLoading.add(host);
+            }
+            new Thread(new Runnable() { @Override public void run() {
+                Bitmap b = downloadFavicon(host);
+                synchronized (faviconCache) {
+                    faviconLoading.remove(host);
+                    if (b != null) faviconCache.put(host, b);
+                    else faviconFailed.add(host);
+                }
+                if (b != null) runOnUiThread(new Runnable() { @Override public void run() { scheduleFaviconRender(); } });
+            } }, "favicon").start();
+        }
+    }
+
+    private void scheduleFaviconRender() {
+        if (faviconUi != null) return;
+        faviconUi = new Runnable() { @Override public void run() {
+            faviconUi = null;
+            renderMessages();
+        } };
+        ui.postDelayed(faviconUi, 180);
+    }
+
+    private Bitmap downloadFavicon(String host) {
+        if (host == null || host.length() == 0) return null;
+        String[] urls = new String[]{
+                "https://www.google.com/s2/favicons?sz=64&domain_url=" + host,
+                "https://www.google.com/s2/favicons?sz=32&domain=" + host,
+                "https://icons.duckduckgo.com/ip3/" + host + ".ico"
+        };
+        for (int i = 0; i < urls.length; i++) {
+            HttpURLConnection c = null;
+            try {
+                c = (HttpURLConnection) new URL(urls[i]).openConnection();
+                c.setConnectTimeout(4000);
+                c.setReadTimeout(4000);
+                c.setInstanceFollowRedirects(true);
+                c.setRequestProperty("User-Agent", "lightui/1.0");
+                int code = c.getResponseCode();
+                if (code < 200 || code >= 300) continue;
+                Bitmap b = BitmapFactory.decodeStream(c.getInputStream());
+                if (b == null || b.getWidth() <= 0) continue;
+                if (b.getWidth() > 64 || b.getHeight() > 64) {
+                    Bitmap scaled = Bitmap.createScaledBitmap(b, 32, 32, true);
+                    if (scaled != b) b.recycle();
+                    b = scaled;
+                }
+                return b;
+            } catch (Exception ignored) {
+            } finally {
+                if (c != null) c.disconnect();
+            }
+        }
+        return null;
+    }
+
+    private void openHttpUrl(String url) {
+        if (url == null || url.length() == 0) return;
+        try {
+            Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+        } catch (Exception e) {
+            toast("can't open link");
+        }
+    }
+
+    private StreamRound streamChatCompletion(JSONObject body, String key, String source, final Msg assistant) throws Exception {
+        StreamRound round = new StreamRound();
+        HttpURLConnection c = (HttpURLConnection) new URL(chatCompletionsUrl(source, body.optString("model", ""))).openConnection();
+        c.setRequestMethod("POST"); c.setConnectTimeout(30000); c.setReadTimeout(120000); c.setDoOutput(true);
+        if (key.length() > 0) c.setRequestProperty("Authorization", "Bearer " + key);
+        c.setRequestProperty("Content-Type", "application/json");
+        c.setRequestProperty("Accept", "text/event-stream, application/json");
+        if (source.equals("openrouter")) { c.setRequestProperty("HTTP-Referer", "https://minimal.chat/android"); c.setRequestProperty("X-Title", "chat"); }
+        OutputStream os = c.getOutputStream(); os.write(body.toString().getBytes(StandardCharsets.UTF_8)); os.close();
+        int code = c.getResponseCode();
+        if (code >= 400) {
+            InputStream es = c.getErrorStream();
+            throw new RuntimeException(es == null ? ("HTTP " + code) : readAll(es));
+        }
+        final StringBuilder answer = new StringBuilder();
+        final StringBuilder reasoning = new StringBuilder();
+        BufferedReader br = new BufferedReader(new InputStreamReader(c.getInputStream(), StandardCharsets.UTF_8));
+        StringBuilder nonSse = new StringBuilder();
+        boolean[] inThinkTag = new boolean[]{false};
+        String line;
+        while ((line = br.readLine()) != null) {
+            line = line.trim();
+            if (!line.startsWith("data:")) { if (line.length() > 0) nonSse.append(line); continue; }
+            String data = line.substring(5).trim();
+            if ("[DONE]".equals(data)) break;
+            JSONObject chunk = new JSONObject(data);
+            JSONObject err = chunk.optJSONObject("error");
+            if (err != null) throw new RuntimeException(err.optString("message", err.toString()));
+            AgentTools.absorbChunk(round.tools, chunk);
+            int used = ToolText.usagePromptTokens(chunk);
+            if (used > round.promptTokens) round.promptTokens = used;
+            JSONArray choices = chunk.optJSONArray("choices");
+            if (choices == null || choices.length() == 0) continue;
+            JSONObject delta = choices.getJSONObject(0).optJSONObject("delta");
+            if (delta == null) continue;
+            String content = cleanJsonString(delta, "content");
+            String thought = reasoningDelta(delta);
+            if (content.length() == 0 && thought.length() == 0) continue;
+            appendReasoningAwareContent(content, answer, reasoning, inThinkTag);
+            reasoning.append(thought);
+            final String partial = answer.toString();
+            final String partialReasoning = reasoning.toString();
+            postStreamingAssistant(assistant, partial, partialReasoning);
+        }
+        br.close();
+        if (answer.length() == 0 && reasoning.length() == 0 && nonSse.length() > 0) {
+            JSONObject resp = new JSONObject(nonSse.toString());
+            AgentTools.absorbChunk(round.tools, resp);
+            answer.append(extractMessageText(resp));
+            reasoning.append(extractMessageReasoning(resp));
+            int used = ToolText.usagePromptTokens(resp);
+            if (used > round.promptTokens) round.promptTokens = used;
+        }
+        round.content = answer.toString();
+        round.reasoning = reasoning.toString();
+        round.endAt = System.nanoTime();
+        if (round.tools.error.length() > 0) throw new RuntimeException(round.tools.error);
+        return round;
     }
 
     private boolean isImageInputUnsupported(String msg) {
@@ -2768,21 +3634,103 @@ public class MainActivity extends Activity {
 
     private void updateStreamingAssistant(Msg assistant, String partial, String reasoning) {
         boolean gotReasoning = reasoning.length() > 0;
-        if (gotReasoning) { assistant.reasoning = reasoning; assistant.reasoningCapable = true; assistant.text = ""; }
-        assistant.stats = gotReasoning && partial.length() == 0 ? LOADING : "";
-        if (gotReasoning && partial.length() == 0) { forceAutoScrollBottom = userAtChatBottom; requestStreamingRender(); saveCurrentChatDeferred(); return; }
+        if (gotReasoning) {
+            assistant.reasoning = reasoning;
+            assistant.reasoningCapable = true;
+            // Only clear visible text while still in the reasoning-only phase.
+            if (partial == null || partial.length() == 0) assistant.text = "";
+        }
+        assistant.stats = gotReasoning && (partial == null || partial.length() == 0) ? LOADING : "";
+        if (gotReasoning && (partial == null || partial.length() == 0)) {
+            forceAutoScrollBottom = userAtChatBottom;
+            requestStreamingRender();
+            return;
+        }
         String visiblePartial = visibleStreamingAnswer(partial);
         if (visiblePartial.length() > 0) stopVoiceThinking();
         if (gotReasoning && visiblePartial.length() > 0 && assistant.thoughtMs == 0) assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt);
         assistant.text = visiblePartial.length() == 0 ? "" : cleanSearchArtifacts(visiblePartial);
+        assistant.bodyDisplay = null;
+        assistant.bodyDisplaySrc = "";
         forceAutoScrollBottom = userAtChatBottom;
         if (assistant.slowVoice && voiceMode && voiceFullMode) { updateVoiceStatus("responding"); if (assistant.ttsStarted || !prefs.getBoolean("voiceSpeak", true)) renderVoiceConversation(); }
         maybeSpeakStreamingChunk(assistant, visiblePartial, false);
         requestStreamingRender();
-        saveCurrentChatDeferred();
+    }
+
+    private void postStreamingAssistant(Msg assistant, String partial, String reasoning) {
+        streamUiAssistant = assistant;
+        streamUiPartial = partial == null ? "" : partial;
+        streamUiReasoning = reasoning == null ? "" : reasoning;
+        if (streamUiQueued) return;
+        streamUiQueued = true;
+        runOnUiThread(new Runnable() { @Override public void run() {
+            streamUiQueued = false;
+            Msg m = streamUiAssistant;
+            String p = streamUiPartial;
+            String r = streamUiReasoning;
+            if (m == null) return;
+            updateStreamingAssistant(m, p, r);
+            if (p != streamUiPartial || r != streamUiReasoning) {
+                updateStreamingAssistant(streamUiAssistant, streamUiPartial, streamUiReasoning);
+            }
+        } });
+    }
+
+    private String streamUiKey(Msg m) {
+        if (m == null) return "";
+        int steps = 0;
+        String last = "";
+        if (m.toolSteps != null) {
+            synchronized (m.toolSteps) {
+                steps = m.toolSteps.size();
+                if (steps > 0) {
+                    ToolStep s = m.toolSteps.get(steps - 1);
+                    if (s != null) last = (s.status == null ? "" : s.status) + ":" + (s.name == null ? "" : s.name);
+                }
+            }
+        }
+        int sources = m.searchSources == null ? 0 : m.searchSources.size();
+        boolean hasText = m.text != null && m.text.length() > 0;
+        return (m.stats == null ? "" : m.stats) + "|" + steps + "|" + last + "|" + sources + "|"
+                + (hasText ? "1" : "0") + "|" + (m.streamDone ? "1" : "0") + "|"
+                + (m.thinkingExpanded ? "1" : "0") + "|" + (m.searchExpanded ? "1" : "0");
+    }
+
+    private CharSequence cachedMarkdown(Msg m, String bodyText) {
+        if (m != null && m.bodyDisplay != null && bodyText.equals(m.bodyDisplaySrc)) return m.bodyDisplay;
+        CharSequence rendered = markdownText(bodyText);
+        if (m != null) {
+            m.bodyDisplay = rendered;
+            m.bodyDisplaySrc = bodyText;
+        }
+        return rendered;
+    }
+
+    private void scrollChatToBottom(ScrollView scroller) {
+        if (scroller == null || messageList == null) return;
+        int content = messageList.getHeight();
+        int view = scroller.getHeight();
+        if (content > view) scroller.scrollTo(0, content - view);
+        else scroller.scrollTo(0, 0);
+    }
+
+    private boolean patchStreamingIfPossible(Msg assistant) {
+        if (assistant == null || liveStreamMsg != assistant) return false;
+        if (assistant.streamDone) return false;
+        String key = streamUiKey(assistant);
+        if (!key.equals(liveStreamKey)) return false;
+        if (liveStreamBody != null) {
+            String bodyText = sanitizeAssistantText(assistant.text);
+            liveStreamBody.setText(bodyText);
+        }
+        if (forceAutoScrollBottom && userAtChatBottom) scrollChatToBottom(scroll);
+        forceAutoScrollBottom = false;
+        return true;
     }
 
     private void requestStreamingRender() {
+        if (patchStreamingIfPossible(liveStreamMsg)) return;
         long now = System.currentTimeMillis();
         long wait = STREAM_RENDER_MIN_MS - (now - lastStreamRenderAt);
         if (wait <= 0) {
@@ -2795,6 +3743,7 @@ public class MainActivity extends Activity {
         pendingStreamRender = new Runnable() { @Override public void run() {
             pendingStreamRender = null;
             lastStreamRenderAt = System.currentTimeMillis();
+            if (patchStreamingIfPossible(liveStreamMsg)) return;
             renderMessages();
         } };
         ui.postDelayed(pendingStreamRender, wait);
@@ -2809,45 +3758,25 @@ public class MainActivity extends Activity {
         renderMessages();
     }
 
-    private String visibleStreamingAnswer(String text) {
-        String s = text == null ? "" : text;
-        String cleaned = stripToolCalls(s);
-        String lower = cleaned.toLowerCase(Locale.US);
-        int cut = -1;
-        String[] markers = new String[]{
-                "<|tool_call", "<|tool_calls", "tool_call_started", "tool_call_ended",
-                "<tool_call", "<function", "[google(", "[web_search", "[search(",
-                "save_memory", "remove_memory", "web_search"
-        };
-        for (String marker : markers) {
-            int at = lower.indexOf(marker);
-            if (at >= 0) cut = cut < 0 ? at : Math.min(cut, at);
-        }
-        if (cut < 0) {
-            String[] prefixes = new String[]{"<|tool_call", "<|tool_calls", "<tool_call", "<function", "[google", "[web_search", "[search"};
-            int start = Math.max(0, lower.length() - 40);
-            for (int i = start; i < lower.length(); i++) {
-                String tail = lower.substring(i);
-                if (tail.length() == 0) continue;
-                for (String prefix : prefixes) {
-                    if (prefix.startsWith(tail)) { cut = i; break; }
-                }
-                if (cut >= 0) break;
-            }
-        }
-        if (cut >= 0) cleaned = cleaned.substring(0, cut);
-        return cleanAfterToolStrip(cleaned);
-    }
+    private String visibleStreamingAnswer(String text) { return ToolText.visibleStreamingAnswer(text); }
 
     private void finishStreamingAssistant(Msg assistant, String finalAnswer, String reasoning, String stats, String key, String source, String model) {
         stopVoiceThinking();
+        completeRunningToolSteps(assistant);
         assistant.stats = stats;
         assistant.streamDone = true;
         String cleanedFinal = sanitizeAssistantText(finalAnswer.length() == 0 ? assistant.text : finalAnswer);
-        if ("searching...".equals(cleanedFinal.trim()) || looksLikeToolResidue(cleanedFinal)) cleanedFinal = "";
+        if ("searching...".equals(cleanedFinal.trim()) || looksLikeToolResidue(cleanedFinal) || ToolText.looksLikeSearchPlanning(cleanedFinal)
+                || ToolText.looksLikeSourceMetadataOnly(cleanedFinal) || ToolText.looksLikeInternalMonologue(cleanedFinal)
+                || ToolText.looksLikeSearchPunt(cleanedFinal)) {
+            cleanedFinal = "";
+        }
+        if (cleanedFinal.length() == 0) cleanedFinal = fallbackWhenNoReply(assistant);
         assistant.text = cleanedFinal;
-        if (reasoning.length() > 0) { assistant.reasoning = reasoning; if (assistant.thoughtMs == 0) assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt); }
-        else if (assistant.thoughtMs == 0 && assistant.reasoningCapable) assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt);
+        assistant.bodyDisplay = null;
+        assistant.bodyDisplaySrc = "";
+        if (assistant.thoughtMs == 0) assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt);
+        if (reasoning.length() > 0) assistant.reasoning = reasoning;
         if (assistant.slowVoice && isModelRefusal(assistant.text)) {
             assistant.ttsQueue.clear();
             assistant.ttsRequested = false;
@@ -2864,6 +3793,111 @@ public class MainActivity extends Activity {
         saveCurrentChat();
         maybeGenerateChatTitle(key, source, model);
         if (assistant.slowVoice) { maybeSpeakStreamingChunk(assistant, assistant.text, true); maybeFinishVoiceAfterTts(assistant); }
+    }
+
+    /** Prefer search snippets over a blank hard-fail when sources exist. Never "No reply" if we have sources. */
+    private String fallbackWhenNoReply(Msg assistant) {
+        String snippet = ToolText.searchAnswerFallback(lastSearchResult);
+        if (snippet.length() == 0) snippet = ToolText.searchSnippetFallback(lastSearchResult);
+        if (snippet.length() > 0) {
+            if (ToolText.containsPriceAmount(snippet) || ToolText.containsConcreteFact(snippet)) {
+                return snippet;
+            }
+            return "I couldn't form a clean summary from the sources. Closest detail I found:\n\n" + snippet;
+        }
+        boolean hasSources = (assistant != null && assistant.searchSources.size() > 0) || lastSearchResult.length() > 0;
+        if (hasSources) {
+            return "I gathered sources, but couldn't form a clear answer from them. Try /research, or open one of the gathered links.";
+        }
+        return "No reply from the model.";
+    }
+
+    /**
+     * If the model thought but emitted no usable reply, recover.
+     * When sources exist, synthesis ALWAYS wins over accepting junk / empty.
+     */
+    private String recoverEmptyAssistantReply(String key, String source, String model, String userText,
+                                              String rawAnswer, String finalAnswer, String reasoning, final Msg assistant) {
+        String cleaned = sanitizeAssistantText(finalAnswer);
+        if ("searching...".equals(cleaned.trim()) || looksLikeToolResidue(cleaned) || ToolText.looksLikeSearchPlanning(cleaned)
+                || ToolText.looksLikeSourceMetadataOnly(cleaned) || ToolText.looksLikeInternalMonologue(cleaned)
+                || ToolText.looksLikeSearchPunt(cleaned)) {
+            cleaned = "";
+        }
+        boolean hasSources = lastSearchResult.length() > 0 || (assistant != null && assistant.searchSources.size() > 0);
+
+        // Sources present: only re-synthesize when the kept text is not usable.
+        if (hasSources && !ToolText.isUsableFollowupAnswer(cleaned)) {
+            runOnUiThread(new Runnable() { @Override public void run() {
+                assistant.text = "";
+                assistant.stats = SEARCHING;
+                assistant.jumpAnimStartMs = 0L;
+                assistant.jumpAnimWord = "";
+                forceAutoScrollBottom = userAtChatBottom;
+                renderMessages();
+            } });
+            String q = lastSearchQuery.length() > 0 ? lastSearchQuery : (userText == null ? "" : userText.trim());
+            String fromSearch = answerAfterWebSearch(key, source, model, q, lastSearchResult, userText, 3);
+            if (fromSearch != null && fromSearch.trim().length() > 0) return fromSearch;
+            return fallbackWhenNoReply(assistant);
+        }
+
+        if (!ToolText.needsEmptyReplyRecovery(rawAnswer, cleaned)) {
+            return cleaned.length() > 0 ? cleaned : sanitizeAssistantText(finalAnswer);
+        }
+
+        runOnUiThread(new Runnable() { @Override public void run() {
+            if (assistant.thoughtMs == 0) {
+                assistant.thoughtMs = Math.max(1, System.currentTimeMillis() - assistant.startedAt);
+            }
+            assistant.text = "";
+            assistant.stats = LOADING;
+            forceAutoScrollBottom = userAtChatBottom;
+            renderMessages();
+        } });
+        String recovered = "";
+        try {
+            recovered = sanitizeAssistantText(followupAfterEmptyReply(key, source, model, userText));
+        } catch (Exception ignored) { }
+        if (ToolText.isUsableFollowupAnswer(recovered)) return recovered;
+        try {
+            recovered = sanitizeAssistantText(followupAfterEmptyReply(key, source, model, userText));
+        } catch (Exception ignored) { }
+        if (ToolText.isUsableFollowupAnswer(recovered)) return recovered;
+        return fallbackWhenNoReply(assistant);
+    }
+
+    private String followupAfterEmptyReply(String key, String source, String model, String userText) throws Exception {
+        JSONObject body = new JSONObject();
+        body.put("model", model);
+        body.put("stream", false);
+        JSONArray arr = new JSONArray();
+        arr.put(new JSONObject().put("role", "system").put("content", ToolText.emptyReplyFollowupSystem() + buildCurrentTimeContext()));
+        String folderInstruction = buildFolderInstructionContext();
+        if (folderInstruction.length() > 0) arr.put(new JSONObject().put("role", "system").put("content", folderInstruction));
+        arr.put(new JSONObject().put("role", "user").put("content", userText == null ? "" : userText));
+        body.put("messages", arr);
+        HttpURLConnection c = (HttpURLConnection) new URL(chatCompletionsUrl(source, model)).openConnection();
+        c.setRequestMethod("POST");
+        c.setConnectTimeout(20000);
+        c.setReadTimeout(60000);
+        c.setDoOutput(true);
+        if (key.length() > 0) c.setRequestProperty("Authorization", "Bearer " + key);
+        c.setRequestProperty("Content-Type", "application/json");
+        if (source.equals("openrouter")) {
+            c.setRequestProperty("HTTP-Referer", "https://minimal.chat/android");
+            c.setRequestProperty("X-Title", "empty reply followup");
+        }
+        OutputStream os = c.getOutputStream();
+        os.write(body.toString().getBytes(StandardCharsets.UTF_8));
+        os.close();
+        int code = c.getResponseCode();
+        String raw = readAll(code >= 400 ? c.getErrorStream() : c.getInputStream());
+        if (code >= 400) throw new RuntimeException(raw);
+        String out = extractFollowupAnswerText(new JSONObject(raw));
+        if (ToolText.isUsableFollowupAnswer(out)) return out;
+        out = sanitizeAssistantText(stripReasoningTags(extractMessageText(new JSONObject(raw))));
+        return out;
     }
 
     private void maybeSpeakStreamingChunk(Msg assistant, String fullText, boolean finish) {
@@ -3110,21 +4144,11 @@ public class MainActivity extends Activity {
         lastSearchSources.clear();
         lastSearchResult = "";
         lastSearchQuery = "";
-        boolean forceSearch = prefs.getBoolean("searchNext", false);
-        if (forceSearch) prefs.edit().remove("searchNext").apply();
-        String query = searchQuery(userText);
-        if (voiceMode && voiceFullMode && "on".equals(voiceWebSearchMode()) && query.length() == 0) query = userText == null ? "" : userText.trim();
-        if (voiceMode && voiceFullMode && "auto".equals(voiceWebSearchMode()) && query.length() == 0 && shouldVoiceAutoSearch(userText)) query = userText == null ? "" : userText.trim();
-        String folderInstruction = folderInstruction(selectedFolder);
-        if (query.length() == 0 && folderInstructionForcesSearch(folderInstruction)) query = ((userText == null ? "" : userText.trim()) + " " + folderInstruction).trim();
-        if (webSearchChat && (query == null || query.length() == 0)) query = userText == null ? "" : userText.trim();
-        if (forceSearch && (query == null || query.length() == 0)) query = userText == null ? "" : userText.trim();
-        if (query.length() == 0) return "";
-        String result = webSearch(datedSearchQuery(query));
-        if (result.length() == 0) return "";
-        rememberSearchResult(query, result);
-        String clipped = result.length() > 6000 ? result.substring(0, 6000) : result;
-        return "Web search has already been performed by the app. Do not emit tool calls, XML, function calls, or requests to search. Use the sources below to answer the user's question directly, interpreting relative times with the phone's current local date/time. Cite plain URLs only when useful; do not emit bracketed line citations like [1%L1-L9].\n\nQuery: " + query + "\n\n" + cleanSearchArtifacts(clipped);
+        // Consume one-shot flags so they don't leak into the next turn. The model
+        // calls web_search / fetch itself — do not pre-search and hide tools.
+        turnForceSearch = false;
+        if (prefs.getBoolean("searchNext", false)) prefs.edit().remove("searchNext").apply();
+        return "";
     }
 
     private void rememberSearchResult(String query, String result) {
@@ -3144,89 +4168,67 @@ public class MainActivity extends Activity {
         return q;
     }
 
-    private String cleanSearchArtifacts(String s) {
-        return (s == null ? "" : s)
-                .replaceAll("\\[[0-9]+%L[0-9]+(?:-L[0-9]+)?\\]", "")
-                .replaceAll("\\[[0-9]+[†‡]L[0-9]+(?:-L[0-9]+)?\\]", "")
-                .replaceAll("【[^】]*[†‡%]L[0-9][^】]*】", "")
-                .replaceAll("(?<=\\p{Alpha})[†‡](?=\\p{Alpha})", " ")
-                .replace("†", "")
-                .replace("‡", "");
-    }
+    private String cleanSearchArtifacts(String s) { return ToolText.cleanSearchArtifacts(s); }
 
-    private String webSearchToolQuery(String text) {
-        String s = text == null ? "" : text.trim();
-        String lower = s.toLowerCase(Locale.US);
-        if (!lower.contains("web_search") && !lower.contains("tool_call") && !lower.contains("[google(") && !lower.contains("google(query")) return "";
-        java.util.regex.Matcher google = java.util.regex.Pattern.compile("(?is)\\[?\\s*google\\s*\\(\\s*query\\s*=\\s*[\"']?([^\"'\\)\\]\\n]+)[\"']?\\s*\\)\\s*\\]?").matcher(s);
-        if (google.find()) {
-            String q = google.group(1).replace("\"", "").replace("'", "").trim();
-            if (q.length() > 0) return q;
-        }
-        java.util.regex.Matcher param = java.util.regex.Pattern.compile("(?is)<parameter(?:\\s+name\\s*=\\s*[\"']?query[\"']?|\\s*=\\s*query)[^>]*>(.*?)</parameter>").matcher(s);
-        if (param.find()) {
-            String q = param.group(1).replace("\"", "").replace("'", "").trim();
-            if (q.length() > 0) return q;
-        }
-        String[] markers = new String[]{"<parameter=query>", "query:", "query=", "\"query\":"};
-        for (String marker : markers) {
-            int at = lower.indexOf(marker);
-            if (at < 0) continue;
-            int start = at + marker.length();
-            int end = s.length();
-            String[] stops = new String[]{"</parameter>", "</function>", "</tool_call>", "</|tool_call|>", "<|tool_call_ended|>", "\n", ")", "]"};
-            for (String stop : stops) { int cut = lower.indexOf(stop, start); if (cut >= 0) end = Math.min(end, cut); }
-            String q = s.substring(start, end).replace("\"", "").replace("'", "").trim();
-            if (q.length() > 0) return q;
-        }
-        return "";
-    }
+    private String webSearchToolQuery(String text) { return ToolText.webSearchToolQuery(text); }
 
     private String answerAfterWebSearch(String key, String source, String model, String query, String result, String userText) {
-        String cleaned = result == null ? "" : cleanSearchArtifacts(result);
-        String q = query == null || query.trim().length() == 0 ? (userText == null ? "" : userText.trim()) : query.trim();
-        try {
-            String out = sanitizeAssistantText(followupAfterWebSearch(key, source, model, q, cleaned, userText, false));
-            if (out.length() == 0 || looksLikeToolResidue(out)) {
-                out = sanitizeAssistantText(followupAfterWebSearch(key, source, model, q, cleaned, userText, true));
-            }
-            if (out.length() > 0 && !looksLikeToolResidue(out)) return out;
-        } catch (Exception ignored) { }
-        if (assistantSearchFallback(cleaned).length() > 0) return assistantSearchFallback(cleaned);
-        return "I gathered sources, but couldn't form a clear answer from them.";
+        return answerAfterWebSearch(key, source, model, query, result, userText, 2);
     }
 
-    private String assistantSearchFallback(String result) {
-        if (result == null || result.trim().length() == 0) return "";
-        // Last resort: surface the first useful snippet so the turn is never blank after a search.
-        String[] lines = result.replace('\r', '\n').split("\n");
-        StringBuilder b = new StringBuilder();
-        for (String line : lines) {
-            String t = line.trim();
-            if (t.length() < 28) continue;
-            if (t.startsWith("http://") || t.startsWith("https://")) continue;
-            if (t.matches("^\\d+\\.\\s*.*") && t.length() < 40) continue;
-            b.append(t);
-            break;
+    private String answerAfterWebSearch(String key, String source, String model, String query, String result, String userText, int maxAttempts) {
+        String cleaned = result == null ? "" : cleanSearchArtifacts(result);
+        String q = query == null || query.trim().length() == 0 ? (userText == null ? "" : userText.trim()) : query.trim();
+        int attempts = Math.max(1, Math.min(3, maxAttempts));
+        for (int i = 0; i < attempts; i++) {
+            try {
+                boolean retry = i > 0;
+                String out = sanitizeAssistantText(followupAfterWebSearch(key, source, model, q, cleaned, userText, retry, i));
+                if (ToolText.isUsableFollowupAnswer(out)) return out;
+            } catch (Exception ignored) { }
         }
-        if (b.length() == 0) return "";
-        return "From the gathered sources: " + b.toString();
+        String snippet = ToolText.searchAnswerFallback(cleaned);
+        if (snippet.length() == 0) snippet = ToolText.searchSnippetFallback(cleaned);
+        if (snippet.length() > 0) {
+            if (ToolText.containsPriceAmount(snippet) || ToolText.containsConcreteFact(snippet)) return snippet;
+            return "I couldn't form a clean summary from the sources. Closest detail I found:\n\n" + snippet;
+        }
+        if (cleaned.trim().length() > 0) {
+            return "I gathered sources, but couldn't form a clear answer from them. Try /research, or open one of the gathered links.";
+        }
+        return "Search returned no usable text. Try /research with a more specific query.";
     }
 
     private String followupAfterWebSearch(String key, String source, String model, String query, String result, String userText, boolean retry) throws Exception {
-        if (result.length() > 6000) result = result.substring(0, 6000);
+        return followupAfterWebSearch(key, source, model, query, result, userText, retry, retry ? 1 : 0);
+    }
+
+    private String followupAfterWebSearch(String key, String source, String model, String query, String result, String userText, boolean retry, int attemptIndex) throws Exception {
+        // Keep sources short — long system dumps kill small/local models.
+        if (result.length() > 4000) result = result.substring(0, 4000);
         JSONObject body = new JSONObject();
         body.put("model", model);
         JSONArray arr = new JSONArray();
-        String system = retry
-                ? "Your previous reply was only a tool call or empty. The web search already ran. Answer the user's question now in plain text using the results below. Do not output tool calls, XML, function calls, google(...), or <|tool_call|> markers.\n\n"
-                : "Web search results are provided below. Answer the user's question directly in plain text. Do not output tool calls, XML, function calls, google(...), or <|tool_call|> markers. Prefer concrete facts (scores, dates, final results) from the snippets; cite a URL only when helpful.\n\n";
-        system += buildCurrentTimeContext() + "\n\nQuery: " + query + "\n\n" + cleanSearchArtifacts(result);
+        String system = ToolText.webSearchFollowupSystem(retry, attemptIndex) + buildCurrentTimeContext();
         arr.put(new JSONObject().put("role", "system").put("content", system));
         String folderInstruction = buildFolderInstructionContext();
         if (folderInstruction.length() > 0) arr.put(new JSONObject().put("role", "system").put("content", folderInstruction));
+        // Recent conversation context helps local models resolve pronouns / entities.
+        appendRecentChatHistory(arr, 6);
         String ask = userText == null || userText.trim().length() == 0 ? query : userText.trim();
-        arr.put(new JSONObject().put("role", "user").put("content", ask));
+        // Put sources in the USER turn (recency) — weak models attend here far better than system.
+        StringBuilder userBlock = new StringBuilder();
+        userBlock.append("Question: ").append(ask).append("\n\n");
+        userBlock.append("Search query: ").append(query == null ? "" : query).append("\n\n");
+        userBlock.append("Sources:\n").append(cleanSearchArtifacts(result)).append("\n\n");
+        userBlock.append("Answer the question now in plain text using the sources. Never tell the user to look it up themselves.");
+        if (attemptIndex >= 1) {
+            userBlock.append(" Respond with concrete facts only (prices/numbers/dates if relevant). Do not return a title or citation header.");
+        }
+        if (attemptIndex >= 2) {
+            userBlock.append(" Final attempt: one short paragraph with the best numbers from the snippets.");
+        }
+        arr.put(new JSONObject().put("role", "user").put("content", userBlock.toString()));
         body.put("messages", arr);
         body.put("stream", false);
         HttpURLConnection c = (HttpURLConnection) new URL(chatCompletionsUrl(source, model)).openConnection();
@@ -3244,27 +4246,61 @@ public class MainActivity extends Activity {
         return extractFollowupAnswerText(new JSONObject(raw));
     }
 
+    /** Append recent non-busy turns (plain text only) for post-tool synthesis context. */
+    private void appendRecentChatHistory(JSONArray arr, int maxTurns) throws Exception {
+        ArrayList<Msg> recent = new ArrayList<Msg>();
+        // Skip the trailing user turn — the synthesis user block restates the question + sources.
+        int end = messages.size() - 1;
+        while (end >= 0) {
+            Msg m = messages.get(end);
+            if (m != null && "user".equals(m.role) && !isBusyStats(m.stats)) { end--; break; }
+            if (m != null && "assistant".equals(m.role) && (isBusyStats(m.stats) || (m.text == null || m.text.trim().length() == 0))) {
+                end--;
+                continue;
+            }
+            break;
+        }
+        for (int i = end; i >= 0 && recent.size() < maxTurns; i--) {
+            Msg m = messages.get(i);
+            if (m == null || isBusyStats(m.stats)) continue;
+            if (!"user".equals(m.role) && !"assistant".equals(m.role)) continue;
+            String t = "assistant".equals(m.role) ? sanitizeAssistantText(m.text) : (m.text == null ? "" : m.text.trim());
+            if (t.length() == 0) continue;
+            if ("assistant".equals(m.role) && (ToolText.looksLikeToolResidue(t) || ToolText.looksLikeSearchPlanning(t))) continue;
+            recent.add(m);
+        }
+        for (int i = recent.size() - 1; i >= 0; i--) {
+            Msg m = recent.get(i);
+            String t = "assistant".equals(m.role) ? sanitizeAssistantText(m.text) : (m.text == null ? "" : m.text.trim());
+            if (t.length() > 800) t = t.substring(0, 800);
+            arr.put(new JSONObject().put("role", m.role).put("content", t));
+        }
+    }
+
     private String extractFollowupAnswerText(JSONObject resp) throws Exception {
-        String direct = extractMessageText(resp);
-        if (direct.length() > 0 && !looksLikeToolResidue(direct)) return direct;
+        String direct = sanitizeAssistantText(stripReasoningTags(extractMessageText(resp)));
+        if (ToolText.isUsableFollowupAnswer(direct)) return direct;
         JSONArray choices = resp.optJSONArray("choices");
-        if (choices == null || choices.length() == 0) return direct;
+        if (choices == null || choices.length() == 0) return "";
         JSONObject msg = choices.getJSONObject(0).optJSONObject("message");
-        if (msg == null) return direct;
-        // Some reasoning models leave content empty and park usable text elsewhere.
-        String[] keys = new String[]{"content", "reasoning", "reasoning_content", "thinking", "output_text"};
+        if (msg == null) return "";
+        // Local servers often put the whole answer in reasoning_* / thinking / output / text.
+        String[] keys = new String[]{"content", "output_text", "output", "text", "response", "reasoning", "reasoning_content", "thinking"};
+        String best = "";
+        boolean contentEmpty = !ToolText.isUsableFollowupAnswer(sanitizeAssistantText(stripReasoningTags(cleanJsonString(msg, "content"))));
         for (String key : keys) {
             String v = cleanJsonString(msg, key);
             v = sanitizeAssistantText(stripReasoningTags(v));
-            if (v.length() > 0 && !looksLikeToolResidue(v) && v.length() < 4000) {
-                // Avoid dumping long private chain-of-thought as the user-visible answer.
-                if ("reasoning".equals(key) || "reasoning_content".equals(key) || "thinking".equals(key)) {
-                    if (v.length() > 600) continue;
-                }
-                return v;
+            if (!ToolText.isUsableFollowupAnswer(v) || v.length() >= 6000) continue;
+            boolean reasoningField = "reasoning".equals(key) || "reasoning_content".equals(key) || "thinking".equals(key);
+            if (reasoningField) {
+                // Accept reasoning of any length when content is empty/unusable — local models do this often.
+                if (!contentEmpty && v.length() > 800) continue;
+                if (ToolText.looksLikeSearchPlanning(v) && !ToolText.containsConcreteFact(v)) continue;
             }
+            if (v.length() > best.length()) best = v;
         }
-        return sanitizeAssistantText(direct);
+        return best;
     }
 
     private String followupAfterMemoryTool(String key, String source, String model, String userText) {
@@ -3439,6 +4475,14 @@ public class MainActivity extends Activity {
     }
 
     private void addBackgroundSystemContext(JSONArray arr, boolean includeMemoryTools) throws Exception {
+        addBackgroundSystemContext(arr, includeMemoryTools, false, true, true);
+    }
+
+    private void addBackgroundSystemContext(JSONArray arr, boolean includeMemoryTools, boolean searchContextAlreadyInjected) throws Exception {
+        addBackgroundSystemContext(arr, includeMemoryTools, searchContextAlreadyInjected, true, true);
+    }
+
+    private void addBackgroundSystemContext(JSONArray arr, boolean includeMemoryTools, boolean searchContextAlreadyInjected, boolean allowSearch, boolean textFallback) throws Exception {
         arr.put(new JSONObject().put("role", "system").put("content", buildCurrentTimeContext()));
         String toolMemory = buildToolMemoryContext();
         if (toolMemory.length() > 0) arr.put(new JSONObject().put("role", "system").put("content", toolMemory));
@@ -3446,9 +4490,22 @@ public class MainActivity extends Activity {
         if (folderInstruction.length() > 0) arr.put(new JSONObject().put("role", "system").put("content", folderInstruction));
         String userMemory = buildUserMemoryContext();
         if (userMemory.length() > 0) arr.put(new JSONObject().put("role", "system").put("content", userMemory));
-        if (includeMemoryTools && memoryEnabled()) {
-            arr.put(new JSONObject().put("role", "system").put("content", memoryToolsPrompt()));
+        if (!includeMemoryTools) return;
+        boolean search = allowSearch && webSearchAvailable();
+        boolean memory = memoryEnabled();
+        if (search || memory) {
+            arr.put(new JSONObject().put("role", "system").put("content",
+                    AgentTools.leanToolsPrompt(search, memory, textFallback, searchContextAlreadyInjected)));
         }
+    }
+
+    private boolean webSearchAvailable() {
+        // Search providers work without a key for Jina (rate-limited); Brave needs a key.
+        if ("brave".equals(searchProvider())) {
+            String key = prefs == null ? "" : prefs.getString("braveApiKey", "");
+            return key.length() > 0;
+        }
+        return true;
     }
 
     private String buildCurrentTimeContext() {
@@ -3773,43 +4830,33 @@ public class MainActivity extends Activity {
         return (note == null ? "" : note).replace("&quot;", "\"").replace("&apos;", "'").replace("\"", "").replace("'", "").trim();
     }
 
-    private String stripToolCalls(String text) {
-        if (text == null || text.length() == 0) return "";
-        String s = text;
-        s = s.replaceAll("(?is)<tool_call\\b[^>]*>.*?</tool_call>", "");
-        s = s.replaceAll("(?is)<function\\s*=\\s*(?:save_memory|remove_memory|web_search)[^>]*>.*?</function>", "");
-        // Pipe-token blocks: <|tool_call|>…</|tool_call|>, <|tool_call_started|>…<|tool_call_ended|>, etc.
-        s = s.replaceAll("(?is)<\\|/?tool[_\\s-]?calls?(?:_section)?(?:_started|_ended|_begin|_end)?\\|>.*?<\\|/?tool[_\\s-]?calls?(?:_section)?(?:_started|_ended|_begin|_end)?\\|>", "");
-        s = s.replaceAll("(?is)\\[(?:google|web[_\\s-]?search|search|bing|brave)\\s*\\([^\\]]*\\)\\]", "");
-        s = s.replaceAll("(?is)<\\|/?tool[_\\s-]?calls?(?:_section)?(?:_started|_ended|_begin|_end)?\\|>[\\s\\S]*$", "");
-        s = s.replaceAll("(?is)<tool_call\\b[^>]*>[\\s\\S]*$", "");
-        s = s.replaceAll("(?is)<function\\s*=\\s*(?:save_memory|remove_memory|web_search)[^>]*>[\\s\\S]*$", "");
-        s = s.replaceAll("(?is)\\[(?:google|web[_\\s-]?search|search)\\s*\\([^\\]]*$", "");
-        return s.trim();
-    }
+    private String stripToolCalls(String text) { return ToolText.stripToolCalls(text); }
 
-    private boolean looksLikeToolResidue(String text) {
-        String lower = text == null ? "" : text.toLowerCase(Locale.US).trim();
-        if (lower.length() == 0) return false;
-        return lower.contains("<tool_call") || lower.contains("<|tool_call") || lower.contains("tool_call_started")
-                || lower.contains("tool_call_ended") || lower.contains("[google(") || lower.contains("<function=web_search")
-                || lower.contains("<function=save_memory") || lower.contains("<function=remove_memory")
-                || (lower.contains("web_search") && lower.contains("<"));
-    }
+    private boolean looksLikeToolResidue(String text) { return ToolText.looksLikeToolResidue(text); }
 
     private String sanitizeAssistantText(String text) {
-        return cleanSearchArtifacts(cleanAfterToolStrip(stripToolCalls(text))).trim();
+        return ToolText.sanitizeAssistantText(stripReasoningTags(text == null ? "" : text));
     }
 
-    private String cleanAfterToolStrip(String text) { return (text == null ? "" : text).replaceAll("(?is)(?:i(?:'|’)ll|i will|i(?:'|’)m going to|i am going to|i(?:'|’)ve|i have)\\s+(?:save|saved|remove|removed|delete|deleted|forget|forgot)[^.!?\n]{0,100}[:,-]?\\s*$", "").replaceAll("[\\s:,-]+$", "").trim(); }
+    private String cleanAfterToolStrip(String text) { return ToolText.cleanAfterToolStrip(text); }
 
     private String searchQuery(String text) {
         String trimmed = text == null ? "" : text.trim();
         String lower = trimmed.toLowerCase(Locale.US);
         if (lower.startsWith("/search ")) return trimmed.substring(8).trim();
-        if (!prefs.getBoolean("autoSearch", false)) return "";
+        if (lower.startsWith("/research ")) return trimmed.substring(10).trim();
+        if (lower.equals("/search") || lower.equals("/research")) return "";
+        boolean explicitLookup = lower.contains("look up") || lower.contains("lookup") || lower.contains("search for")
+                || lower.contains("search the web") || lower.contains("web search") || lower.startsWith("google ")
+                || lower.contains(" look up ") || lower.startsWith("lookup ")
+                || lower.startsWith("find me ") || lower.startsWith("find the ")
+                || lower.contains("average price") || lower.contains("how much") || lower.contains("going for");
+        boolean force = turnForceSearch || turnResearch || webSearchChat;
+        if (!prefs.getBoolean("autoSearch", false) && !force) return "";
+        if (explicitLookup) return trimmed;
+        if (force) return trimmed;
         if (!isLikelyQuestion(lower)) return "";
-        if (lower.contains("right now") || lower.contains("currently") || lower.contains("at the moment") || lower.contains("as of now") || lower.contains("today") || lower.contains("yesterday") || lower.contains("last night") || lower.contains("latest") || lower.contains("recent") || lower.contains("newest") || lower.contains("current ") || lower.contains("current-") || lower.contains("news") || lower.contains("score") || lower.contains("this week") || lower.contains("this month") || lower.contains("2025") || lower.contains("2026")) return trimmed;
+        if (lower.contains("right now") || lower.contains("currently") || lower.contains("at the moment") || lower.contains("as of now") || lower.contains("today") || lower.contains("yesterday") || lower.contains("last night") || lower.contains("latest") || lower.contains("recent") || lower.contains("newest") || lower.contains("current ") || lower.contains("current-") || lower.contains("news") || lower.contains("score") || lower.contains("this week") || lower.contains("this month") || lower.contains("2025") || lower.contains("2026") || lower.contains("price") || lower.contains("cost")) return trimmed;
         return "";
     }
 
@@ -3822,9 +4869,178 @@ public class MainActivity extends Activity {
         return lower.contains("?") || lower.startsWith("what ") || lower.startsWith("who ") || lower.startsWith("when ") || lower.startsWith("where ") || lower.startsWith("why ") || lower.startsWith("how ") || lower.startsWith("is ") || lower.startsWith("are ") || lower.startsWith("can ") || lower.startsWith("does ") || lower.startsWith("do ") || lower.startsWith("did ") || lower.startsWith("which ");
     }
 
+    private static final String SEARCH_UA = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36";
+
     private String webSearch(String query) throws Exception {
+        return webSearch(query, false);
+    }
+
+    private String webSearch(String query, boolean modelCanFetch) throws Exception {
         String q = datedSearchQuery(query);
-        return "brave".equals(searchProvider()) ? braveSearch(q) : jinaSearch(q);
+        String raw = "";
+        Exception last = null;
+        if ("brave".equals(searchProvider())) {
+            raw = braveSearch(q);
+        } else {
+            try {
+                raw = jinaSearch(q);
+            } catch (Exception e) {
+                last = e;
+                raw = "";
+            }
+            boolean weak = ToolText.searchResultsLackFacts(raw) || mostlyVideoHits(raw);
+            if (ToolText.looksLikePriceQuery(q) && ToolText.searchResultsLackPriceFacts(raw)) weak = true;
+            if (weak) {
+                try {
+                    String ddg = duckDuckGoSearch(q);
+                    if (ddg.length() > 0) raw = raw.length() == 0 ? ddg : (raw + "\n\n" + ddg);
+                } catch (Exception e2) {
+                    if (raw.length() == 0) {
+                        if (last != null) throw last;
+                        throw e2;
+                    }
+                }
+            }
+        }
+        String compact = ToolText.compactWebSearch(raw);
+        if (compact.length() == 0) compact = raw;
+        // When the model can fetch, keep search compact (Pi: search then fetch).
+        // Without native fetch, inline page facts so SEARCH: fallback still has numbers.
+        if (!modelCanFetch && ToolText.looksLikePriceQuery(q)) {
+            compact = enrichWithPageFacts(raw, compact);
+        }
+        return compact.trim().length() > 0 ? compact.trim() : raw;
+    }
+
+    private boolean mostlyVideoHits(String raw) {
+        ArrayList<String> urls = extractSearchSources(raw);
+        if (urls.size() == 0) {
+            String l = raw == null ? "" : raw.toLowerCase(Locale.US);
+            return l.contains("youtube.com") || l.contains("youtu.be");
+        }
+        int bad = 0;
+        for (int i = 0; i < urls.size(); i++) if (ToolText.isLowValueSearchUrl(urls.get(i))) bad++;
+        return bad * 2 >= urls.size();
+    }
+
+    private String enrichWithPageFacts(String raw, String compact) {
+        ArrayList<String> urls = extractSearchSources(raw);
+        if (urls.size() == 0) urls = extractSearchSources(compact);
+        ArrayList<String> pick = ToolText.preferReaderUrls(urls);
+        if (pick.size() == 0) return compact;
+        StringBuilder extra = new StringBuilder();
+        for (int i = 0; i < pick.size(); i++) {
+            String url = pick.get(i);
+            String facts = readPageFacts(url);
+            if (facts.length() == 0) continue;
+            if (extra.length() > 0) extra.append("\n\n");
+            extra.append("Page facts (").append(url).append("):\n").append(facts);
+        }
+        if (extra.length() == 0) return compact;
+        return AgentTools.clipResult(extra.toString() + "\n\n" + compact);
+    }
+
+    private String readPageFacts(String url) {
+        String page = "";
+        try { page = jinaRead(url); } catch (Exception ignored) { page = ""; }
+        String facts = ToolText.extractFactLines(page, 900);
+        if (facts.length() > 0) return facts;
+        try { page = fetchPage(url); } catch (Exception ignored) { return ""; }
+        return ToolText.extractFactLines(page, 900);
+    }
+
+    private String fetchUrlForTool(String url) {
+        String u = url == null ? "" : url.trim();
+        if (u.length() == 0) return "No URL provided.";
+        if (ToolText.isLowValueSearchUrl(u)) return "Skipped low-value URL.";
+        if (!u.startsWith("http://") && !u.startsWith("https://")) u = "https://" + u;
+        String page = "";
+        try { page = jinaRead(u); } catch (Exception ignored) { page = ""; }
+        if (page.length() == 0) {
+            try { page = fetchPage(u); } catch (Exception e) {
+                return "Fetch failed: " + (e.getMessage() == null ? "unknown error" : e.getMessage());
+            }
+        }
+        String facts = ToolText.extractFactLines(page, 2000);
+        if (facts.length() > 0) return facts;
+        String plain = ToolText.looksLikeHtml(page) ? ToolText.htmlToPlainText(page) : page;
+        plain = plain.trim();
+        if (plain.length() == 0) return "No readable text on that page.";
+        return AgentTools.clipResult(plain);
+    }
+
+    private String jinaRead(String url) throws Exception {
+        String u = url == null ? "" : url.trim();
+        if (u.length() == 0) return "";
+        if (!u.startsWith("http://") && !u.startsWith("https://")) u = "https://" + u;
+        HttpURLConnection c = (HttpURLConnection) new URL("https://r.jina.ai/" + u).openConnection();
+        c.setConnectTimeout(8000);
+        c.setReadTimeout(12000);
+        c.setRequestProperty("User-Agent", SEARCH_UA);
+        c.setRequestProperty("Accept", "text/plain");
+        String jinaKey = prefs.getString("jinaApiKey", "");
+        if (jinaKey.length() > 0) c.setRequestProperty("Authorization", "Bearer " + jinaKey);
+        int code = c.getResponseCode();
+        String raw = readAllLimited(code >= 400 ? c.getErrorStream() : c.getInputStream(), 250000);
+        if (code >= 400) throw new RuntimeException(raw);
+        if (ToolText.looksLikeBlockedPage(raw)) throw new RuntimeException("reader blocked");
+        return raw.trim();
+    }
+
+    private String fetchPage(String url) throws Exception {
+        String u = url == null ? "" : url.trim();
+        if (u.length() == 0) return "";
+        if (!u.startsWith("http://") && !u.startsWith("https://")) u = "https://" + u;
+        HttpURLConnection c = (HttpURLConnection) new URL(u).openConnection();
+        c.setInstanceFollowRedirects(true);
+        c.setConnectTimeout(10000);
+        c.setReadTimeout(15000);
+        c.setRequestProperty("User-Agent", SEARCH_UA);
+        c.setRequestProperty("Accept", "text/html,text/plain;q=0.9,*/*;q=0.8");
+        c.setRequestProperty("Accept-Language", "en-US,en;q=0.9");
+        int code = c.getResponseCode();
+        String raw = readAllLimited(code >= 400 ? c.getErrorStream() : c.getInputStream(), 250000);
+        if (code >= 400) throw new RuntimeException("page http " + code);
+        if (ToolText.looksLikeBlockedPage(raw)) throw new RuntimeException("page blocked");
+        return raw;
+    }
+
+    private String readAllLimited(InputStream in, int max) throws Exception {
+        if (in == null) return "";
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        int n;
+        int total = 0;
+        while ((n = in.read(buf)) >= 0) {
+            int room = max - total;
+            if (room <= 0) break;
+            int w = n < room ? n : room;
+            out.write(buf, 0, w);
+            total += w;
+            if (total >= max) break;
+        }
+        return new String(out.toByteArray(), StandardCharsets.UTF_8);
+    }
+
+    private String duckDuckGoSearch(String query) throws Exception {
+        String encoded = URLEncoder.encode(query, "UTF-8");
+        String parsed = fetchDuckDuckGo("https://html.duckduckgo.com/html/?q=" + encoded);
+        if (parsed.length() == 0) parsed = fetchDuckDuckGo("https://lite.duckduckgo.com/lite/?q=" + encoded);
+        if (parsed.length() == 0) throw new RuntimeException("duckduckgo returned no results");
+        return parsed;
+    }
+
+    private String fetchDuckDuckGo(String url) throws Exception {
+        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+        c.setConnectTimeout(15000);
+        c.setReadTimeout(20000);
+        c.setRequestProperty("User-Agent", SEARCH_UA);
+        c.setRequestProperty("Accept", "text/html,application/xhtml+xml");
+        c.setRequestProperty("Accept-Language", "en-US,en;q=0.9");
+        int code = c.getResponseCode();
+        String raw = readAll(code >= 400 ? c.getErrorStream() : c.getInputStream());
+        if (code >= 400) throw new RuntimeException(raw);
+        return ToolText.parseDuckDuckGoHtml(raw);
     }
 
     private String jinaSearch(String query) throws Exception {
@@ -3832,6 +5048,7 @@ public class MainActivity extends Activity {
         HttpURLConnection c = (HttpURLConnection) new URL("https://s.jina.ai/" + encoded).openConnection();
         c.setConnectTimeout(15000);
         c.setReadTimeout(30000);
+        c.setRequestProperty("User-Agent", SEARCH_UA);
         c.setRequestProperty("Accept", "text/plain");
         String jinaKey = prefs.getString("jinaApiKey", "");
         if (jinaKey.length() > 0) c.setRequestProperty("Authorization", "Bearer " + jinaKey);
@@ -3879,25 +5096,103 @@ public class MainActivity extends Activity {
         final Dialog d = panel("models");
         LinearLayout box = panelBox();
         box.addView(panelTitle("models"));
+        TextView hint = text("hold to pin a favorite", 11, Color.rgb(120, 120, 120));
+        hint.setPadding(0, 0, 0, dp(8));
+        box.addView(hint);
         ScrollView scroller = new ScrollView(this);
         scroller.setVerticalScrollBarEnabled(false);
-        LinearLayout list = new LinearLayout(this);
+        final LinearLayout list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
         scroller.addView(list);
-        for (int i = 0; i < myModels.size(); i++) {
-            final String m = myModels.get(i);
-            TextView item = panelItem(shortModel(m), "");
-            if (m.equals(selectedModel())) item.setText(shortModel(m) + " *");
-            item.setSingleLine(true);
-            item.setEllipsize(android.text.TextUtils.TruncateAt.END);
-            item.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); setModel(m); } });
-            list.addView(item);
-        }
+        final Runnable[] render = new Runnable[1];
+        render[0] = new Runnable() { @Override public void run() {
+            list.removeAllViews();
+            ArrayList<String> ordered = ToolText.orderedModels(myModels, pinnedModels);
+            for (int i = 0; i < ordered.size(); i++) {
+                final String m = ordered.get(i);
+                boolean selected = m.equals(selectedModel());
+                boolean pinned = pinnedModels.contains(m);
+                View row = modelListRow(m, selected, pinned, i, false);
+                row.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); setModel(m); } });
+                row.setOnLongClickListener(new View.OnLongClickListener() { @Override public boolean onLongClick(View v) {
+                    togglePinnedModel(m);
+                    render[0].run();
+                    return true;
+                } });
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+                if (i > 0) lp.topMargin = dp(6);
+                list.addView(row, lp);
+            }
+        } };
+        render[0].run();
         box.addView(scroller, new LinearLayout.LayoutParams(-1, 0, 1));
         TextView cancel = panelAction("cancel");
         cancel.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); } });
         box.addView(cancel, new LinearLayout.LayoutParams(-1, dp(48)));
         showPanel(d, box);
+    }
+
+    private View modelListRow(String model, boolean selected, boolean pinned, int index, boolean settings) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setPadding(dp(10), dp(9), dp(10), dp(9));
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(index % 2 == 0 ? Color.BLACK : Color.rgb(16, 16, 16));
+        bg.setStroke(1, selected ? Color.rgb(88, 88, 88) : Color.rgb(34, 34, 34));
+        bg.setCornerRadius(dp(3));
+        row.setBackground(bg);
+
+        LinearLayout top = row();
+        top.setBackgroundColor(Color.TRANSPARENT);
+        TextView name = text(shortModel(model), 15, Color.WHITE);
+        name.setSingleLine(true);
+        name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        name.setBackgroundColor(Color.TRANSPARENT);
+        top.addView(name, new LinearLayout.LayoutParams(0, -2, 1));
+        if (pinned) {
+            TextView pin = text("pin", 11, Color.rgb(135, 135, 135));
+            pin.setBackgroundColor(Color.TRANSPARENT);
+            pin.setPadding(dp(8), 0, 0, 0);
+            top.addView(pin, new LinearLayout.LayoutParams(-2, -2));
+        }
+        if (selected && !settings) {
+            TextView on = text("on", 11, Color.rgb(180, 180, 180));
+            on.setBackgroundColor(Color.TRANSPARENT);
+            on.setPadding(dp(8), 0, 0, 0);
+            top.addView(on, new LinearLayout.LayoutParams(-2, -2));
+        }
+        row.addView(top, new LinearLayout.LayoutParams(-1, -2));
+        TextView sub = text(modelRowSubtitle(model), 11, Color.rgb(135, 135, 135));
+        sub.setSingleLine(true);
+        sub.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        sub.setBackgroundColor(Color.TRANSPARENT);
+        sub.setPadding(0, dp(2), 0, 0);
+        row.addView(sub, new LinearLayout.LayoutParams(-1, -2));
+        return row;
+    }
+
+    private String modelRowSubtitle(String model) {
+        String src = modelSource(model);
+        String label = ToolText.modelProviderLabel(model, src);
+        if ("custom".equals(src)) {
+            String host = ToolText.sourceHost(modelEndpoint(model));
+            return host.length() > 0 ? "endpoint · " + host : "endpoint";
+        }
+        Integer ctx = modelContexts.get(model);
+        if (ctx != null && ctx > 0) return label + " · " + shortTokens(ctx);
+        return label;
+    }
+
+    private void togglePinnedModel(String model) {
+        if (model == null || model.length() == 0 || !myModels.contains(model)) return;
+        if (pinnedModels.contains(model)) {
+            pinnedModels.remove(model);
+            toast("unpinned");
+        } else {
+            pinnedModels.add(model);
+            toast("pinned · top of list");
+        }
+        savePinnedModels();
     }
 
     private void addModel() {
@@ -3941,7 +5236,7 @@ public class MainActivity extends Activity {
             for (int i = 0; i < models.size(); i++) {
                 final String m = models.get(i);
                 if (modelMatches(m, q)) {
-                    TextView item = searchResultItem(shortModel(m), modelSourceLabel(m));
+                    TextView item = searchResultItem(shortModel(m), modelRowSubtitle(m));
                     item.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); addMyModel(m); } });
                     list.addView(item);
                     shown++;
@@ -3974,7 +5269,9 @@ public class MainActivity extends Activity {
 
     private void removeMyModel(String m) {
         myModels.remove(m);
+        pinnedModels.remove(m);
         saveMyModels();
+        savePinnedModels();
         if (m.equals(selectedModel())) prefs.edit().remove("model").putBoolean("modelSelected", false).apply();
         showSettingsPane();
     }
@@ -4042,7 +5339,7 @@ public class MainActivity extends Activity {
                     }
                     models.clear(); models.addAll(found); modelContexts.clear(); modelContexts.putAll(foundContexts); modelSources.clear(); modelSources.putAll(foundSources); modelEndpoints.clear(); modelEndpoints.putAll(foundEndpoints); audioOutputModels.clear(); audioOutputModels.addAll(foundAudioOutput); audioInputModels.clear(); audioInputModels.addAll(foundAudioInput); reasoningModels.clear(); reasoningModels.addAll(foundReasoning); speedModels.clear(); speedModels.addAll(foundSpeed);
                     for (String m : found) if ("custom".equals(foundSources.get(m)) && !myModels.contains(m)) myModels.add(m);
-                    saveCustomEndpoints(); saveEndpointKeys(); saveModels(); saveModelContexts(); saveModelSources(); saveModelEndpoints(); saveAudioOutputModels(); saveAudioInputModels(); saveReasoningModels(); saveSpeedModels(); saveMyModels();
+                    saveCustomEndpoints(); saveEndpointKeys(); saveModels(); saveModelContexts(); saveModelSources(); saveModelEndpoints(); saveAudioOutputModels(); saveAudioInputModels(); saveReasoningModels(); saveSpeedModels(); saveMyModels(); savePinnedModels();
                     prefs.edit().putLong("modelsRefreshedAt", System.currentTimeMillis()).apply();
                     if (manual) toast("models updated");
                     if (manual || pane == 2) renderPane();
@@ -4243,10 +5540,10 @@ public class MainActivity extends Activity {
         endpointKeys.remove(endpoint);
         for (int i = models.size() - 1; i >= 0; i--) {
             String m = models.get(i);
-            if (endpoint.equals(modelEndpoints.get(m))) { if (m.equals(selectedModel())) removedSelected = true; models.remove(i); myModels.remove(m); modelContexts.remove(m); modelSources.remove(m); modelEndpoints.remove(m); }
+            if (endpoint.equals(modelEndpoints.get(m))) { if (m.equals(selectedModel())) removedSelected = true; models.remove(i); myModels.remove(m); pinnedModels.remove(m); modelContexts.remove(m); modelSources.remove(m); modelEndpoints.remove(m); }
         }
         if (removedSelected) prefs.edit().remove("model").putBoolean("modelSelected", false).apply();
-        saveCustomEndpoints(); saveEndpointKeys(); saveModels(); saveMyModels(); saveModelContexts(); saveModelSources(); saveModelEndpoints();
+        saveCustomEndpoints(); saveEndpointKeys(); saveModels(); saveMyModels(); savePinnedModels(); saveModelContexts(); saveModelSources(); saveModelEndpoints();
     }
 
     private void initTts() {
@@ -4344,6 +5641,10 @@ public class MainActivity extends Activity {
 
     private void beginListening() {
         if (voiceReply != null) voiceReply.setVisibility(View.GONE);
+        if (voiceWaves != null) {
+            voiceWaves.animate().cancel();
+            voiceWaves.setAlpha(1f);
+        }
         voiceAwaitingSpeechResult = true;
         vibrateListenStarted();
         if (voiceFullMode) renderVoiceConversation();
@@ -4359,7 +5660,7 @@ public class MainActivity extends Activity {
             @Override public void onBeginningOfSpeech() { updateVoiceStatus("listening"); }
             @Override public void onRmsChanged(float rmsdB) { setVoiceLevel(Math.max(0.05f, Math.min(1f, (rmsdB + 2f) / 12f))); }
             @Override public void onBufferReceived(byte[] buffer) { }
-            @Override public void onEndOfSpeech() { vibrateInputEnded(); updateVoiceStatus("thinking"); setVoiceLevel(0.05f); fadeVoiceWaves(); }
+            @Override public void onEndOfSpeech() { vibrateInputEnded(); updateVoiceStatus("thinking..."); setVoiceLevel(0.05f); fadeVoiceWaves(); }
             @Override public void onError(int error) { handleVoiceMiss(); }
             @Override public void onResults(Bundle results) { handleVoiceResults(results); }
             @Override public void onPartialResults(Bundle partialResults) { showPartialVoice(partialResults); }
@@ -4380,7 +5681,7 @@ public class MainActivity extends Activity {
             if (!voiceSessionActive(session) || run != voiceListenRun || !voiceAwaitingSpeechResult) return;
             if (recordingFallback) { stopRecorder(true); return; }
             if (speechRecognizer != null) {
-                updateVoiceStatus("thinking");
+                updateVoiceStatus("thinking...");
                 try { speechRecognizer.stopListening(); } catch (Exception ignored) { }
                 ui.postDelayed(new Runnable() { @Override public void run() { if (voiceSessionActive(session) && run == voiceListenRun && voiceAwaitingSpeechResult) handleVoiceMiss(); } }, 1800);
             } else handleVoiceMiss();
@@ -4390,7 +5691,7 @@ public class MainActivity extends Activity {
     private void finishListeningNow() {
         if (!voiceMode || !voiceFullMode || !voiceAwaitingSpeechResult) return;
         vibrateInputEnded();
-        updateVoiceStatus("thinking");
+        updateVoiceStatus("thinking...");
         fadeVoiceWaves();
         if (recordingFallback) { stopRecorder(true); return; }
         if (speechRecognizer != null) {
@@ -4442,8 +5743,8 @@ public class MainActivity extends Activity {
         }
         pendingVoiceText = clean;
         if (input != null) input.setText(clean);
-        updateVoiceStatus("thinking");
-        startVoiceThinking("thinking");
+        updateVoiceStatus("thinking...");
+        startVoiceThinking("thinking...");
         fadeVoiceWaves();
         closeCompactVoiceOverlay();
         if (!send()) stopVoiceThinking();
@@ -4950,8 +6251,8 @@ public class MainActivity extends Activity {
         final String model = configuredVoiceAnswerModel();
         if (model.length() == 0) { updateVoiceStatus("select a model first"); return; }
         if (key.length() == 0) { updateVoiceStatus("add openrouter key"); return; }
-        updateVoiceStatus("thinking");
-        startVoiceThinking("thinking");
+        updateVoiceStatus("thinking...");
+        startVoiceThinking("thinking...");
         final Msg user = new Msg("user", "[voice input]", "", "", "", "", "");
         final Msg assistant = new Msg("assistant", "", "", "", LOADING, shortModel(model));
         assistant.slowVoice = true;
@@ -4975,7 +6276,7 @@ public class MainActivity extends Activity {
             body.put("modalities", new JSONArray().put("text").put("audio"));
             body.put("audio", new JSONObject().put("voice", ttsVoiceForModel(model)).put("format", "pcm16"));
             JSONArray arr = new JSONArray();
-            addBackgroundSystemContext(arr, true);
+            addBackgroundSystemContext(arr, true, false, false, false);
             arr.put(new JSONObject().put("role", "system").put("content", "This is a spoken two-way voice conversation. Reply in plain text only. Do not use markdown, headings, bullets, tables, code blocks, or formatting symbols. Keep the response natural for text-to-speech."));
             for (int i = 0; i < messages.size(); i++) {
                 Msg m = messages.get(i);
@@ -5376,8 +6677,8 @@ public class MainActivity extends Activity {
         voiceReply.setVisibility(View.GONE);
         if (full) voiceReply.setBackgroundColor(Color.TRANSPARENT);
         voiceReply.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { voiceReply.setVisibility(View.GONE); beginListening(); } });
-        box.addView(voiceStatus, new LinearLayout.LayoutParams(-1, full ? dp(62) : dp(28)));
-        if (!full) box.addView(voiceWaves, new LinearLayout.LayoutParams(-1, dp(64)));
+        box.addView(voiceStatus, new LinearLayout.LayoutParams(-1, full ? dp(48) : dp(28)));
+        box.addView(voiceWaves, new LinearLayout.LayoutParams(-1, full ? dp(52) : dp(64)));
         if (full) {
             voiceTextScroll = new ScrollView(this);
             voiceTextScroll.setVerticalScrollBarEnabled(false);
@@ -5545,11 +6846,11 @@ public class MainActivity extends Activity {
         setVoiceText(b.toString());
     }
 
-    private void startVoiceThinking() { startVoiceThinking("thinking"); }
+    private void startVoiceThinking() { startVoiceThinking("thinking..."); }
 
     private void startVoiceThinking(String word) {
         if (!voiceFullMode || voiceStatus == null) return;
-        voiceThinkingWord = word == null || word.length() == 0 ? "thinking" : word;
+        voiceThinkingWord = ToolText.ensureEllipsis(word == null || word.length() == 0 ? "thinking" : word);
         voiceThinking = true;
         voiceThinkingRun++;
         animateVoiceThinking(voiceThinkingRun, 0);
@@ -6220,25 +7521,21 @@ public class MainActivity extends Activity {
     private void chatActions(final Chat c) {
         final Dialog d = panel(c.title);
         LinearLayout box = panelBox();
-        TextView title = text(c.title.length() == 0 ? "chat" : c.title, 18, Color.WHITE);
-        title.setPadding(0, 0, 0, dp(14));
-        box.addView(title);
-        LinearLayout actions = row();
-        TextView rename = panelAction("rename");
-        TextView move = panelAction("move");
-        TextView remove = panelAction("unfile");
-        TextView delete = panelAction("delete");
+        box.addView(panelTitle(c.title.length() == 0 ? "chat" : c.title));
+        TextView rename = panelItem("rename", "");
+        TextView move = panelItem("move to project", "");
+        TextView remove = panelItem("remove from project", "");
+        TextView delete = panelItem("delete", "");
         TextView cancel = panelAction("cancel");
         rename.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); renameChat(c); } });
         move.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); moveChat(c); } });
-        remove.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { c.folder = "Inbox"; saveState(); d.dismiss(); showChatsPane(); } });
+        remove.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { c.folder = "Inbox"; touchChat(c); saveState(); d.dismiss(); showChatsPane(); } });
         delete.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); confirmDeleteChat(c); } });
         cancel.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); } });
-        actions.addView(rename, new LinearLayout.LayoutParams(0, dp(52), 1));
-        actions.addView(move, new LinearLayout.LayoutParams(0, dp(52), 1));
-        if (!"Inbox".equals(c.folder)) actions.addView(remove, new LinearLayout.LayoutParams(0, dp(52), 1));
-        actions.addView(delete, new LinearLayout.LayoutParams(0, dp(52), 1));
-        box.addView(actions);
+        box.addView(rename);
+        box.addView(move);
+        if (!"Inbox".equals(c.folder)) box.addView(remove);
+        box.addView(delete);
         box.addView(cancel, new LinearLayout.LayoutParams(-1, dp(46)));
         showPanel(d, box);
     }
@@ -6270,7 +7567,7 @@ public class MainActivity extends Activity {
         TextView delete = panelItem("delete", "");
         TextView cancel = panelAction("cancel");
         move.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); moveSelectedChats(); } });
-        remove.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { for (Chat c : chats) if (selectedChats.contains(c.id)) c.folder = "Inbox"; selectedChats.clear(); saveState(); d.dismiss(); showChatsPane(); } });
+        remove.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { for (Chat c : chats) if (selectedChats.contains(c.id)) { c.folder = "Inbox"; touchChat(c); } selectedChats.clear(); saveState(); d.dismiss(); showChatsPane(); } });
         delete.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); confirmDeleteSelectedChats(); } });
         cancel.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); } });
         box.addView(move); box.addView(remove); box.addView(delete); box.addView(cancel, new LinearLayout.LayoutParams(-1, dp(52)));
@@ -6286,7 +7583,7 @@ public class MainActivity extends Activity {
             if ("Inbox".equals(f)) continue;
             TextView item = panelItem(f, "");
             item.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
-                for (Chat c : chats) if (selectedChats.contains(c.id)) c.folder = f;
+                for (Chat c : chats) if (selectedChats.contains(c.id)) { c.folder = f; touchChat(c); }
                 selectedChats.clear(); saveState(); d.dismiss(); showChatsPane();
             } });
             box.addView(item);
@@ -6341,7 +7638,7 @@ public class MainActivity extends Activity {
             final String f = folders.get(i);
             if ("Inbox".equals(f)) continue;
             TextView item = panelItem(f, "");
-            item.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { c.folder = f; saveState(); d.dismiss(); showChatsPane(); } });
+            item.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { c.folder = f; touchChat(c); saveState(); d.dismiss(); showChatsPane(); } });
             box.addView(item);
         }
         TextView cancel = panelAction("cancel");
@@ -6368,6 +7665,8 @@ public class MainActivity extends Activity {
         Chat t = null;
         for (Chat c : chats) if (c.id.equals(currentChatId)) t = c;
         if (t == null) { t = new Chat(); t.id = currentChatId; chats.add(0, t); }
+        else if (chats.indexOf(t) > 0) { chats.remove(t); chats.add(0, t); }
+        t.updatedAt = System.currentTimeMillis();
         t.folder = selectedFolder;
         if (t.title.length() == 0 || "[voice input]".equals(t.title)) t.title = firstUserText();
         t.webSearch = webSearchChat;
@@ -6453,6 +7752,130 @@ public class MainActivity extends Activity {
     private void updateComposerAction() {
         if (composerAction == null) return;
         composerAction.setImageResource(composerHasOutgoing() ? R.drawable.ic_send_up : R.drawable.ic_mic);
+    }
+
+    private void hideSlashSuggestions() {
+        if (slashSuggestRow == null) return;
+        slashSuggestRow.removeAllViews();
+        slashSuggestRow.setVisibility(View.GONE);
+        lastSlashPaletteKey = "";
+    }
+
+    private void updateSlashSuggestions(String raw) {
+        if (slashSuggestRow == null) return;
+        ArrayList<ToolText.SlashCommand> matches = ToolText.filterSlashCommands(raw);
+        String key = raw == null ? "" : raw;
+        if (matches.size() == 0) {
+            if (lastSlashPaletteKey.length() > 0 || slashSuggestRow.getVisibility() == View.VISIBLE) {
+                hideSlashSuggestions();
+            }
+            return;
+        }
+        StringBuilder kb = new StringBuilder();
+        for (int i = 0; i < matches.size(); i++) kb.append(matches.get(i).name).append('|');
+        kb.append('#').append(key);
+        String paletteKey = kb.toString();
+        if (paletteKey.equals(lastSlashPaletteKey) && slashSuggestRow.getVisibility() == View.VISIBLE) return;
+        lastSlashPaletteKey = paletteKey;
+        slashSuggestRow.removeAllViews();
+        slashSuggestRow.setVisibility(View.VISIBLE);
+        int shown = Math.min(6, matches.size());
+        int nameCol = dp(96);
+        for (int i = 0; i < shown; i++) {
+            final ToolText.SlashCommand cmd = matches.get(i);
+            LinearLayout row = row();
+            row.setPadding(0, dp(7), 0, dp(7));
+            TextView name = text(cmd.paletteName(), 13, Color.WHITE);
+            name.setTypeface(Typeface.MONOSPACE);
+            name.setIncludeFontPadding(false);
+            name.setMinWidth(nameCol);
+            String descText = cmd.description;
+            if (cmd.takesArgs && cmd.hint.length() > 0) descText = cmd.description + "  " + cmd.hint;
+            TextView desc = text(descText, 12, Color.rgb(135, 135, 135));
+            desc.setIncludeFontPadding(false);
+            desc.setPadding(dp(8), 0, 0, 0);
+            row.addView(name, new LinearLayout.LayoutParams(-2, -2));
+            row.addView(desc, new LinearLayout.LayoutParams(0, -2, 1));
+            row.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    if (input == null) return;
+                    if (cmd.takesArgs) {
+                        String next = "/" + cmd.name + " ";
+                        input.setText(next);
+                        input.setSelection(next.length());
+                        hideSlashSuggestions();
+                    } else {
+                        input.setText("/" + cmd.name);
+                        input.setSelection(input.getText().length());
+                        send();
+                    }
+                }
+            });
+            slashSuggestRow.addView(row, new LinearLayout.LayoutParams(-1, -2));
+        }
+    }
+
+    /** Handle slash commands that never hit the model. */
+    private boolean handleSlashCommandLocal(String text) {
+        ToolText.SlashParse parsed = ToolText.parseSlash(text);
+        if (parsed == null) return false;
+        if ("help".equals(parsed.name)) {
+            int col = ToolText.slashNameColumnChars();
+            StringBuilder b = new StringBuilder();
+            for (ToolText.SlashCommand c : ToolText.SLASH_COMMANDS) {
+                String name = c.paletteName();
+                while (name.length() < col) name = name + " ";
+                b.append(name).append("  ").append(c.description);
+                if (c.takesArgs && c.hint.length() > 0) b.append("  ").append(c.hint);
+                b.append('\n');
+            }
+            messages.add(new Msg("user", text, "", "", "", "", replyQuote));
+            messages.add(new Msg("assistant", b.toString().trim(), "", "", "", "help"));
+            if (input != null) input.setText("");
+            pendingVoiceText = ""; replyQuote = ""; updateReplyChip(); hideSlashSuggestions();
+            saveCurrentChat(); resetMessageWindowToLatest(); forceAutoScrollBottom = true; renderMessages();
+            return true;
+        }
+        if ("new".equals(parsed.name)) {
+            if (input != null) input.setText("");
+            pendingVoiceText = ""; replyQuote = ""; updateReplyChip(); hideSlashSuggestions();
+            newChat();
+            toast("new chat");
+            return true;
+        }
+        if ("web".equals(parsed.name)) {
+            webSearchChat = !webSearchChat;
+            saveCurrentChat();
+            if (webSearchIcon != null) {
+                webSearchIcon.active = webSearchChat;
+                webSearchIcon.setClickable(webSearchChat);
+                webSearchIcon.invalidate();
+            }
+            if (input != null) input.setText("");
+            pendingVoiceText = ""; hideSlashSuggestions();
+            toast(webSearchChat ? "web search on" : "web search off");
+            return true;
+        }
+        if ("memory".equals(parsed.name)) {
+            return handleMemoryRecall("show memory");
+        }
+        return false;
+    }
+
+    /** Strip /search|/research prefixes and set force/research flags for this turn. */
+    private String applySlashCommandToOutgoing(String text) {
+        ToolText.SlashParse parsed = ToolText.parseSlash(text);
+        if (parsed == null) return text == null ? "" : text;
+        if ("search".equals(parsed.name)) {
+            forceSearchThisTurn = true;
+            return parsed.args.length() > 0 ? parsed.args : "";
+        }
+        if ("research".equals(parsed.name)) {
+            forceSearchThisTurn = true;
+            researchThisTurn = true;
+            return parsed.args.length() > 0 ? parsed.args : "";
+        }
+        return text == null ? "" : text;
     }
 
     private void updateAttachChip() {
@@ -6667,10 +8090,12 @@ public class MainActivity extends Activity {
         for (String m : models) if (!modelSources.containsKey(m)) modelSources.put(m, "openrouter");
         for (String m : models) if ("custom".equals(modelSources.get(m)) && !modelEndpoints.containsKey(m) && customEndpointBase().length() > 0) modelEndpoints.put(m, customEndpointBase());
         String savedMyModels = prefs.getString("myModels", ""); if (savedMyModels.length() > 0) for (String m : savedMyModels.split("\\n")) { String clean = m.trim(); if (clean.length() > 0 && !myModels.contains(clean)) myModels.add(clean); }
+        String savedPins = prefs.getString("pinnedModels", ""); if (savedPins.length() > 0) for (String m : savedPins.split("\\n")) { String clean = m.trim(); if (clean.length() > 0 && myModels.contains(clean) && !pinnedModels.contains(clean)) pinnedModels.add(clean); }
         String selected = prefs.getString("model", "").trim();
         if (prefs.getBoolean("modelSelected", false) && selected.length() > 0 && !myModels.contains(selected)) myModels.add(selected);
         saveModels();
         saveMyModels();
+        savePinnedModels();
     }
     private JSONObject folderInstructionsJson() { JSONObject o = new JSONObject(); try { for (String folder : folderInstructions.keySet()) { String instruction = folderInstructions.get(folder); if (instruction != null && instruction.trim().length() > 0 && folders.contains(folder)) o.put(folder, instruction.trim()); } } catch (Exception ignored) { } return o; }
     private String folderInstruction(String folder) { String s = folderInstructions.get(folder == null ? "" : folder); return s == null ? "" : s.trim(); }
@@ -6716,28 +8141,36 @@ public class MainActivity extends Activity {
         writeChatStoreIfDirty();
     }
 
+    private final Object chatStoreWriteLock = new Object();
+
     private void writeChatStoreIfDirty() {
         if (!chatsDirty) return;
         chatsDirty = false;
-        String payload = chatStoreJson().toString();
-        try {
-            File dir = getFilesDir();
-            File tmp = new File(dir, CHATS_STORE + ".tmp");
-            File out = new File(dir, CHATS_STORE);
-            FileOutputStream fos = new FileOutputStream(tmp);
-            fos.write(payload.getBytes(StandardCharsets.UTF_8));
-            fos.getFD().sync();
-            fos.close();
-            if (!tmp.renameTo(out)) {
-                FileOutputStream direct = new FileOutputStream(out);
-                direct.write(payload.getBytes(StandardCharsets.UTF_8));
-                direct.getFD().sync();
-                direct.close();
-                tmp.delete();
+        final String payload;
+        try { payload = chatStoreJson().toString(); }
+        catch (Exception e) { chatsDirty = true; return; }
+        new Thread(new Runnable() { @Override public void run() {
+            synchronized (chatStoreWriteLock) {
+                try {
+                    File dir = getFilesDir();
+                    File tmp = new File(dir, CHATS_STORE + ".tmp");
+                    File out = new File(dir, CHATS_STORE);
+                    FileOutputStream fos = new FileOutputStream(tmp);
+                    fos.write(payload.getBytes(StandardCharsets.UTF_8));
+                    fos.getFD().sync();
+                    fos.close();
+                    if (!tmp.renameTo(out)) {
+                        FileOutputStream direct = new FileOutputStream(out);
+                        direct.write(payload.getBytes(StandardCharsets.UTF_8));
+                        direct.getFD().sync();
+                        direct.close();
+                        tmp.delete();
+                    }
+                } catch (Exception ignored) {
+                    chatsDirty = true;
+                }
             }
-        } catch (Exception ignored) {
-            chatsDirty = true;
-        }
+        } }, "chats-store").start();
     }
     private void saveModels() { prefs.edit().putString("modelCatalog", join(models)).apply(); }
     private void saveModelContexts() { JSONObject o = new JSONObject(); try { for (String m : modelContexts.keySet()) o.put(m, modelContexts.get(m)); } catch (Exception ignored) { } prefs.edit().putString("modelContexts", o.toString()).apply(); }
@@ -6755,6 +8188,7 @@ public class MainActivity extends Activity {
         prefs.edit().putString("endpointKeys", o.toString()).apply();
     }
     private void saveMyModels() { prefs.edit().putString("myModels", join(myModels)).apply(); }
+    private void savePinnedModels() { prefs.edit().putString("pinnedModels", join(pinnedModels)).apply(); }
     private String savedApiKey() { return prefs.getString("apiKey", ""); }
     private void saveApiKey() {
         SharedPreferences.Editor e = prefs.edit();
@@ -6762,10 +8196,15 @@ public class MainActivity extends Activity {
         e.apply();
     }
     private void saveJinaSettings() { if (jinaKeyInput != null) prefs.edit().putString("jinaApiKey", jinaKeyInput.getText().toString().trim()).apply(); }
+    private void flushSettingsInputs() {
+        saveApiKey();
+        saveJinaSettings();
+        if (braveKeyInput != null) prefs.edit().putString("braveApiKey", braveKeyInput.getText().toString().trim()).apply();
+    }
     private void removeCustomModels() {
         for (int i = models.size() - 1; i >= 0; i--) {
             String m = models.get(i);
-            if ("custom".equals(modelSources.get(m))) { models.remove(i); myModels.remove(m); modelContexts.remove(m); modelSources.remove(m); modelEndpoints.remove(m); }
+            if ("custom".equals(modelSources.get(m))) { models.remove(i); myModels.remove(m); pinnedModels.remove(m); modelContexts.remove(m); modelSources.remove(m); modelEndpoints.remove(m); }
         }
     }
     private String selectedModel() { return prefs.getBoolean("modelSelected", false) ? prefs.getString("model", "") : ""; }
@@ -6774,20 +8213,22 @@ public class MainActivity extends Activity {
     private String activeAnswerModel() { return voiceMode && voiceFullMode && voiceAnswerModel().length() > 0 ? voiceAnswerModel() : selectedModel(); }
     private String modelSource(String model) { return modelSources.containsKey(model) ? modelSources.get(model) : "openrouter"; }
     private String modelEndpoint(String model) { String endpoint = modelEndpoints.get(model); return endpoint == null ? customEndpointBase() : endpoint; }
-    private String modelSourceLabel(String m) { return "custom".equals(modelSources.get(m)) ? "endpoint" : "openrouter"; }
-    private String modelLabel() { String m = selectedModel(); return m.length() == 0 ? "model" : shortModel(m); }
+    private String modelSourceLabel(String m) { return ToolText.modelProviderLabel(m, modelSource(m)); }
+    private String modelLabel() {
+        String m = selectedModel();
+        if (m.length() == 0) return "model";
+        String name = shortModel(m);
+        if ("custom".equals(selectedModelSource())) return name;
+        String vendor = ToolText.modelVendor(m);
+        if (vendor.length() == 0) return name;
+        String lower = name.toLowerCase(Locale.US);
+        if (lower.startsWith(vendor) || lower.contains(vendor)) return name;
+        return vendor + " · " + name;
+    }
     private String messageModelLabel(Msg m) { return m.model.length() == 0 ? "assistant" : m.model; }
     private String shortModel(String m) { int slash = m.lastIndexOf('/'); return slash >= 0 ? m.substring(slash + 1) : m; }
     private String thoughtDuration(long ms) { long s = Math.max(1, Math.round(ms / 1000f)); long m = s / 60; long r = s % 60; return m > 0 ? m + " minutes and " + r + " seconds" : s + " seconds"; }
-    private int estimateTokens(String s) {
-        String text = s == null ? "" : s.trim();
-        if (text.length() == 0) return 0;
-        int chars = text.length();
-        int words = text.split("\\s+").length;
-        int byChars = (int)Math.ceil(chars / 3.15);
-        int byWords = (int)Math.ceil(words * 1.35);
-        return Math.max(1, Math.max(byChars, byWords));
-    }
+    private int estimateTokens(String s) { return ToolText.estimateTokens(s); }
     private String requestText(Msg m) {
         String t = m.text == null ? "" : m.text;
         if ("assistant".equals(m.role)) t = sanitizeAssistantText(t);
@@ -6796,7 +8237,7 @@ public class MainActivity extends Activity {
         }
         return t;
     }
-    private int contextTokens() {
+    private int messageTokens() {
         int t = 0;
         for (Msg m : messages) {
             if (isBusyStats(m.stats)) continue;
@@ -6804,12 +8245,85 @@ public class MainActivity extends Activity {
                     + (m.reasoning.length() == 0 ? 0 : estimateTokens(m.reasoning))
                     + requestImages(m).size() * 1200;
         }
+        return t;
+    }
+    private int backgroundContextTokens() {
+        int t = estimateTokens(buildCurrentTimeContext());
+        try {
+            String toolMemory = buildToolMemoryContext();
+            if (toolMemory.length() > 0) t += estimateTokens(toolMemory);
+            String folder = buildFolderInstructionContext();
+            if (folder.length() > 0) t += estimateTokens(folder);
+            String mem = buildUserMemoryContext();
+            if (mem.length() > 0) t += estimateTokens(mem);
+        } catch (Exception ignored) { }
+        boolean search = webSearchAvailable();
+        boolean memory = memoryEnabled();
+        if (search || memory) t += estimateTokens(AgentTools.leanToolsPrompt(search, memory, false, false));
+        if (search) t += 120;
         return t + 24;
+    }
+    private Msg lastAssistantMessage() {
+        if (messages.size() == 0) return null;
+        Msg last = messages.get(messages.size() - 1);
+        return last != null && "assistant".equals(last.role) ? last : null;
+    }
+    private int lastPromptTokens() {
+        Msg m = lastAssistantMessage();
+        return m == null ? 0 : m.promptTokens;
+    }
+    private int lastToolTokens() {
+        Msg m = lastAssistantMessage();
+        return m == null ? 0 : m.toolTokens;
+    }
+    private int contextTokens() {
+        int live = messageTokens() + backgroundContextTokens() + lastToolTokens();
+        int prompt = lastPromptTokens();
+        return prompt > live ? prompt : live;
     }
     private int contextMaxTokens() { Integer max = modelContexts.get(selectedModel()); return max == null ? 0 : max; }
     private float contextPercent() { int max = contextMaxTokens(); return max <= 0 ? 0f : Math.min(100f, (float) (contextTokens() * 100.0 / max)); }
     private String contextPercentText() { return String.format(Locale.US, "%.1f%%", contextPercent()); }
-    private void showContext() { int max = contextMaxTokens(); toast(max <= 0 ? shortTokens(contextTokens()) + "/? - refresh model catalog" : shortTokens(contextTokens()) + "/" + shortTokens(max) + " - " + contextPercentText()); }
+    private void showContext() {
+        int used = contextTokens();
+        int max = contextMaxTokens();
+        int chat = messageTokens();
+        int sys = backgroundContextTokens();
+        int tools = lastToolTokens();
+        int prompt = lastPromptTokens();
+        String cap = max <= 0 ? "?" : shortTokens(max);
+        StringBuilder b = new StringBuilder();
+        b.append(shortTokens(used)).append("/").append(cap);
+        b.append("  chat ").append(shortTokens(chat));
+        if (sys > 0) b.append("  sys ").append(shortTokens(sys));
+        if (tools > 0) b.append("  tools ").append(shortTokens(tools));
+        if (prompt > chat + sys) b.append("  req ").append(shortTokens(prompt));
+        if (max <= 0) b.append("  refresh model catalog");
+        toast(b.toString());
+    }
+    private void applyPromptTokens(final Msg assistant, int n) {
+        if (assistant == null || n <= 0) return;
+        if (n > assistant.promptTokens) assistant.promptTokens = n;
+        refreshContextMeter();
+    }
+    private void rememberPromptTokens(final Msg assistant, JSONArray arr, JSONArray tools) {
+        applyPromptTokens(assistant, ToolText.estimateRequestTokens(arr, tools));
+    }
+    private void addToolTokens(Msg assistant, String payload) {
+        if (assistant == null) return;
+        int n = estimateTokens(payload);
+        if (n > 0) assistant.toolTokens += n;
+        refreshContextMeter();
+    }
+    private void refreshContextMeter() {
+        runOnUiThread(new Runnable() { @Override public void run() {
+            if (meter != null) { meter.percent = contextPercent(); meter.invalidate(); }
+            if (contextText != null) contextText.setText(contextPercentText());
+        } });
+    }
+    private int estimateRequestTokens(JSONArray arr, JSONArray tools) {
+        return ToolText.estimateRequestTokens(arr, tools);
+    }
     private String shortTokens(int n) { return n >= 1000 ? Math.round(n / 1000.0) + "k" : String.valueOf(n); }
     private String friendlyError(Exception e) { String msg = e.getMessage(); if (msg == null || msg.length() == 0) msg = e.getClass().getSimpleName(); msg = msg.replace('\n', ' ').trim(); return msg.length() > 120 ? msg.substring(0, 120) : msg; }
     private String detailedError(Exception e) { String msg = e.getMessage(); if (msg == null || msg.length() == 0) msg = e.getClass().getSimpleName(); msg = msg.replace('\n', ' ').trim(); return msg.length() > 700 ? msg.substring(0, 700) : msg; }
@@ -6966,13 +8480,31 @@ public class MainActivity extends Activity {
     private String shortPanelText(String s) { String clean = (s == null ? "" : s).replace('\n', ' ').trim(); return clean.length() > 52 ? clean.substring(0, 52) + "..." : clean; }
 
     private TextView searchResultItem(String primary, String secondary) {
-        TextView v = text(primary == null ? "" : primary.toLowerCase(Locale.US), 18, Color.WHITE);
+        String p = primary == null ? "" : primary;
+        String s = secondary == null ? "" : secondary;
+        TextView v = text("", 16, Color.WHITE);
+        if (s.length() == 0) v.setText(p);
+        else {
+            SpannableStringBuilder b = new SpannableStringBuilder();
+            b.append(p);
+            b.append('\n');
+            int start = b.length();
+            b.append(s);
+            b.setSpan(new RelativeSizeSpan(0.7f), start, b.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            b.setSpan(new ForegroundColorSpan(Color.rgb(135, 135, 135)), start, b.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            v.setText(b);
+        }
         v.setGravity(Gravity.CENTER_VERTICAL);
-        v.setPadding(dp(26), 0, dp(18), 0);
-        v.setMinHeight(dp(64));
-        v.setSingleLine(true);
-        v.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        v.setBackground(grayBorder());
+        v.setPadding(dp(12), dp(10), dp(12), dp(10));
+        v.setMinHeight(dp(52));
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(Color.BLACK);
+        bg.setStroke(1, Color.rgb(34, 34, 34));
+        bg.setCornerRadius(dp(3));
+        v.setBackground(bg);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.topMargin = dp(6);
+        v.setLayoutParams(lp);
         return v;
     }
 
@@ -6980,6 +8512,38 @@ public class MainActivity extends Activity {
         TextView v = text(s, 16, Color.LTGRAY);
         v.setGravity(Gravity.CENTER);
         return v;
+    }
+
+    private void slidePaneIn() {
+        if (root == null) return;
+        root.animate().cancel();
+        float from = paneSlide == 0 ? 0f : (paneSlide < 0 ? dp(18) : -dp(18));
+        root.setAlpha(paneSlide == 0 ? 1f : 0.4f);
+        root.setTranslationX(from);
+        if (paneSlide == 0 && from == 0f) { root.setAlpha(1f); return; }
+        root.animate().alpha(1f).translationX(0).setDuration(150).setInterpolator(new DecelerateInterpolator()).withLayer().start();
+        paneSlide = 0;
+    }
+
+    private void bindPress(final View v) {
+        if (v == null) return;
+        v.setOnTouchListener(new View.OnTouchListener() {
+            @Override public boolean onTouch(View view, MotionEvent e) {
+                int action = e.getAction();
+                if (action == MotionEvent.ACTION_DOWN) view.animate().alpha(0.55f).setDuration(60).start();
+                else if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) view.animate().alpha(1f).setDuration(120).start();
+                return false;
+            }
+        });
+    }
+
+    private GradientDrawable listCardBg(boolean selected, boolean current, int index) {
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(index % 2 == 0 ? Color.BLACK : Color.rgb(16, 16, 16));
+        if (selected) bg.setStroke(2, Color.WHITE);
+        else bg.setStroke(1, current ? Color.rgb(88, 88, 88) : Color.rgb(34, 34, 34));
+        bg.setCornerRadius(dp(3));
+        return bg;
     }
 
     private LinearLayout row() { LinearLayout l = new LinearLayout(this); l.setOrientation(LinearLayout.HORIZONTAL); l.setGravity(Gravity.CENTER_VERTICAL); l.setBackgroundColor(Color.BLACK); return l; }
@@ -7176,23 +8740,94 @@ public class MainActivity extends Activity {
     public class TogglePill extends View { Paint p = new Paint(Paint.ANTI_ALIAS_FLAG); boolean checked = false; public TogglePill(Context c) { super(c); } @Override protected void onDraw(Canvas c) { int w=getWidth(), h=getHeight(); p.setStrokeWidth(dp(1)); p.setStyle(checked ? Paint.Style.FILL : Paint.Style.STROKE); p.setColor(Color.WHITE); c.drawRoundRect(dp(1), dp(1), w-dp(1), h-dp(1), h/2f, h/2f, p); } }
     public class ScrollIndicator extends View { Paint p = new Paint(Paint.ANTI_ALIAS_FLAG); ScrollView target; public ScrollIndicator(Context c) { super(c); } @Override protected void onDraw(Canvas c) { if (target == null || target.getChildCount() == 0) return; int thumb; int top; if (target == scroll && messages.size() > MESSAGE_WINDOW) { thumb = Math.max(dp(28), Math.round(getHeight() * (MESSAGE_WINDOW / (float) messages.size()))); int maxTop = Math.max(0, getHeight() - thumb); int denominator = Math.max(1, messages.size() - MESSAGE_WINDOW); top = messageEnd >= messages.size() ? maxTop : Math.round(maxTop * (messageStart / (float) denominator)); } else { int content = target.getChildAt(0).getHeight(); int view = target.getHeight(); if (content <= view || view <= 0) return; float ratio = view / (float) content; thumb = Math.max(dp(28), Math.round(getHeight() * ratio)); int maxScroll = content - view; int maxTop = Math.max(0, getHeight() - thumb); top = Math.round(maxTop * (target.getScrollY() / (float) maxScroll)); } p.setColor(Color.rgb(125,125,125)); p.setStyle(Paint.Style.FILL); c.drawRect(0, top, getWidth(), top + thumb, p); } }
     public class FadeView extends View { Paint p = new Paint(); public FadeView(Context c) { super(c); } @Override protected void onDraw(Canvas c) { p.setShader(new LinearGradient(0, 0, 0, getHeight(), Color.TRANSPARENT, Color.BLACK, Shader.TileMode.CLAMP)); c.drawRect(0, 0, getWidth(), getHeight(), p); p.setShader(null); } }
-    public class WaveView extends View { Paint p = new Paint(Paint.ANTI_ALIAS_FLAG); float level = 0.05f; public WaveView(Context c) { super(c); } @Override protected void onDraw(Canvas c) { int bars = 9; int gap = dp(8); int barW = dp(3); int total = bars * barW + (bars - 1) * gap; int start = (getWidth() - total) / 2; int mid = getHeight() / 2; p.setColor(Color.WHITE); p.setStyle(Paint.Style.FILL); for (int i = 0; i < bars; i++) { float distance = Math.abs(i - (bars - 1) / 2f); float scale = Math.max(0.15f, 1f - distance * 0.14f); int h = Math.max(dp(8), Math.round(dp(78) * level * scale)); int x = start + i * (barW + gap); c.drawRect(x, mid - h / 2f, x + barW, mid + h / 2f, p); } } }
-    public class BorderWaveView extends View { Paint p = new Paint(Paint.ANTI_ALIAS_FLAG); float level = 0.05f; public BorderWaveView(Context c) { super(c); } @Override protected void onDraw(Canvas c) { p.setStyle(Paint.Style.STROKE); p.setStrokeCap(Paint.Cap.SQUARE); p.setStrokeJoin(Paint.Join.MITER); p.setColor(Color.argb(145,255,255,255)); p.setStrokeWidth(dp(2)); float h = dp(1); c.drawRect(h, h, getWidth() - h, getHeight() - h, p); if (level > 0.12f) { p.setColor(Color.argb(Math.min(210, 90 + Math.round(level * 120)),255,255,255)); p.setStrokeWidth(dp(1)); float in = dp(7); c.drawRect(in, in, getWidth() - in, getHeight() - in, p); } } }
+    public class WaveView extends View {
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        float level = 0.05f;
+        float shown = 0.05f;
+        final Runnable tick = new Runnable() {
+            @Override public void run() {
+                shown += (level - shown) * (level < shown ? 0.5f : 0.35f);
+                invalidate();
+                postDelayed(this, 50);
+            }
+        };
+        public WaveView(Context c) { super(c); setBackgroundColor(Color.TRANSPARENT); }
+        @Override protected void onAttachedToWindow() { super.onAttachedToWindow(); removeCallbacks(tick); post(tick); }
+        @Override protected void onDetachedFromWindow() { removeCallbacks(tick); super.onDetachedFromWindow(); }
+        @Override protected void onDraw(Canvas c) {
+            int bars = 9; int gap = dp(8); int barW = dp(3); int total = bars * barW + (bars - 1) * gap; int start = (getWidth() - total) / 2; int mid = getHeight() / 2;
+            p.setColor(Color.WHITE); p.setStyle(Paint.Style.FILL);
+            for (int i = 0; i < bars; i++) {
+                float distance = Math.abs(i - (bars - 1) / 2f);
+                float scale = Math.max(0.15f, 1f - distance * 0.14f);
+                int h = Math.max(dp(8), Math.round(getHeight() * 0.92f * shown * scale));
+                int x = start + i * (barW + gap);
+                c.drawRect(x, mid - h / 2f, x + barW, mid + h / 2f, p);
+            }
+        }
+    }
+    public class BorderWaveView extends View {
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        float level = 0.05f;
+        float shown = 0.05f;
+        long born = android.os.SystemClock.uptimeMillis();
+        final Runnable tick = new Runnable() {
+            @Override public void run() {
+                shown += (level - shown) * (level < shown ? 0.5f : 0.35f);
+                invalidate();
+                postDelayed(this, 50);
+            }
+        };
+        public BorderWaveView(Context c) {
+            super(c);
+            setBackgroundColor(Color.TRANSPARENT);
+            setClickable(false);
+            setFocusable(false);
+        }
+        @Override protected void onAttachedToWindow() { super.onAttachedToWindow(); born = android.os.SystemClock.uptimeMillis(); removeCallbacks(tick); post(tick); }
+        @Override protected void onDetachedFromWindow() { removeCallbacks(tick); super.onDetachedFromWindow(); }
+        @Override protected void onDraw(Canvas c) {
+            int w = getWidth(), h = getHeight();
+            if (w < 8 || h < 8) return;
+            float breath = 0.5f + 0.5f * (float) Math.sin((android.os.SystemClock.uptimeMillis() - born) / 2400.0 * 2.0 * Math.PI);
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeCap(Paint.Cap.SQUARE);
+            p.setStrokeJoin(Paint.Join.MITER);
+            p.setStrokeWidth(dp(2));
+            p.setColor(Color.argb(Math.round(138 + breath * 22), 255, 255, 255));
+            float m = dp(1);
+            c.drawRect(m, m, w - m, h - m, p);
+            if (shown > 0.12f) {
+                p.setStrokeWidth(1);
+                p.setColor(Color.argb(Math.min(210, 90 + Math.round(shown * 120)), 255, 255, 255));
+                float in = dp(7);
+                c.drawRect(in, in, w - in, h - in, p);
+            }
+        }
+    }
     public class GlobeButton extends View { Paint p = new Paint(Paint.ANTI_ALIAS_FLAG); boolean active = false; public GlobeButton(Context c) { super(c); } @Override protected void onDraw(Canvas c) { if (!active) return; int w=getWidth(), h=getHeight(); float r=Math.min(w,h)*0.25f, cx=w/2f, cy=h/2f; p.setColor(Color.WHITE); p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(Math.max(1f, dp(1))); p.setStrokeCap(Paint.Cap.ROUND); c.drawCircle(cx, cy, r, p); c.drawOval(cx-r*0.45f, cy-r, cx+r*0.45f, cy+r, p); c.drawArc(cx-r, cy-r*0.55f, cx+r, cy+r*0.55f, 0, 360, false, p); c.drawLine(cx-r*0.94f, cy, cx+r*0.94f, cy, p); } }
     public class JumpTextView extends TextView {
-        String word = "thinking";
-        int step = 0;
+        String word = "thinking...";
         Msg bound;
+        final Paint wavePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         final Runnable tick = new Runnable() { @Override public void run() { animateJump(); } };
         public JumpTextView(Context c) {
             super(c);
             setSingleLine(true);
-            setIncludeFontPadding(true);
+            setIncludeFontPadding(false);
             setGravity(Gravity.CENTER_VERTICAL);
+            setTextColor(Color.TRANSPARENT);
         }
         void bind(Msg m) {
             bound = m;
-            if (m != null) step = Math.max(0, m.thinkingAnimStep);
+            String w = word == null || word.length() == 0 ? "thinking..." : word;
+            setText(w);
+            if (m != null) {
+                if (m.jumpAnimStartMs == 0L || m.jumpAnimWord == null || !w.equals(m.jumpAnimWord)) {
+                    m.jumpAnimWord = w;
+                    m.jumpAnimStartMs = android.os.SystemClock.uptimeMillis();
+                }
+            }
         }
         @Override protected void onAttachedToWindow() {
             super.onAttachedToWindow();
@@ -7201,24 +8836,92 @@ public class MainActivity extends Activity {
         }
         @Override protected void onDetachedFromWindow() {
             removeCallbacks(tick);
-            if (bound != null) bound.thinkingAnimStep = step;
             super.onDetachedFromWindow();
         }
         private void animateJump() {
             if (!isAttachedToWindow()) return;
-            String w = word == null || word.length() == 0 ? "thinking" : word;
-            SpannableString span = new SpannableString(w);
-            int cycle = w.length() + 4, pos = step++ % cycle, peak = Math.min(pos, w.length() - 1);
-            if (bound != null) bound.thinkingAnimStep = step;
-            for (int i = 0; i < w.length(); i++) {
-                final int dist = Math.abs(i - peak);
-                final int shift = pos >= w.length() ? 0 : dist == 0 ? dp(3) : dist == 1 ? dp(1) : 0;
-                if (shift > 0) span.setSpan(new android.text.style.CharacterStyle() {
-                    @Override public void updateDrawState(android.text.TextPaint tp) { tp.baselineShift += shift; }
-                }, i, i + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            invalidate();
+            postDelayed(tick, 40);
+        }
+        @Override protected void onDraw(Canvas c) {
+            String w = word == null || word.length() == 0 ? "thinking..." : word;
+            long start = bound != null && bound.jumpAnimStartMs > 0L
+                    ? bound.jumpAnimStartMs : android.os.SystemClock.uptimeMillis();
+            if (bound != null && bound.jumpAnimStartMs == 0L) {
+                bound.jumpAnimStartMs = start;
+                bound.jumpAnimWord = w;
             }
-            setText(span);
-            postDelayed(tick, pos >= w.length() ? 260 : 135);
+            final float periodSec = 1.45f;
+            long elapsed = Math.max(0L, android.os.SystemClock.uptimeMillis() - start);
+            double cycle = (elapsed / 1000.0) / periodSec;
+            final float ampPx = 2.6f * uiScale();
+            final int baseR = 135, baseG = 135, baseB = 135;
+            Paint tp = getPaint();
+            wavePaint.set(tp);
+            wavePaint.setAntiAlias(true);
+            float x = getPaddingLeft();
+            Paint.FontMetrics fm = wavePaint.getFontMetrics();
+            float y = getPaddingTop() + ((getHeight() - getPaddingTop() - getPaddingBottom()) - (fm.bottom - fm.top)) / 2f - fm.top;
+            int n = Math.max(1, w.length());
+            for (int i = 0; i < w.length(); i++) {
+                float wave = (float) Math.sin((2.0 * Math.PI) * (cycle - i / (double) n));
+                float lift = ampPx * (0.55f + 0.45f * wave);
+                float bright = 0.62f + 0.38f * ((wave + 1f) * 0.5f);
+                int r = Math.min(255, Math.round(baseR + (255 - baseR) * (bright - 0.62f)));
+                int g = Math.min(255, Math.round(baseG + (255 - baseG) * (bright - 0.62f)));
+                int b = Math.min(255, Math.round(baseB + (255 - baseB) * (bright - 0.62f)));
+                wavePaint.setColor(Color.argb(255, r, g, b));
+                String ch = w.substring(i, i + 1);
+                c.drawText(ch, x, y - lift, wavePaint);
+                x += tp.measureText(ch);
+            }
+        }
+    }
+    public class SourceDot extends View {
+        final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
+        final Paint ring = new Paint(Paint.ANTI_ALIAS_FLAG);
+        final Paint glyph = new Paint(Paint.ANTI_ALIAS_FLAG);
+        final Paint bitmapPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+        final Path clip = new Path();
+        final RectF dest = new RectF();
+        Bitmap icon;
+        String letter = "";
+        public SourceDot(Context c) {
+            super(c);
+            setBackgroundColor(Color.TRANSPARENT);
+            fill.setStyle(Paint.Style.FILL);
+            ring.setStyle(Paint.Style.STROKE);
+            ring.setStrokeWidth(1f);
+            ring.setColor(Color.rgb(52, 52, 52));
+            glyph.setColor(Color.rgb(135, 135, 135));
+            glyph.setTextAlign(Paint.Align.CENTER);
+        }
+        @Override protected void onDraw(Canvas c) {
+            int w = getWidth(), h = getHeight();
+            if (w <= 0 || h <= 0) return;
+            float cx = w / 2f, cy = h / 2f;
+            float r = Math.min(w, h) / 2f - 0.5f;
+            fill.setColor(Color.BLACK);
+            c.drawCircle(cx, cy, r, fill);
+            if (icon != null && !icon.isRecycled()) {
+                float inset = 1f;
+                dest.set(cx - r + inset, cy - r + inset, cx + r - inset, cy + r - inset);
+                clip.reset();
+                clip.addCircle(cx, cy, Math.max(1f, r - inset), Path.Direction.CW);
+                c.save();
+                c.clipPath(clip);
+                c.drawBitmap(icon, null, dest, bitmapPaint);
+                c.restore();
+            } else {
+                fill.setColor(Color.rgb(22, 22, 22));
+                c.drawCircle(cx, cy, Math.max(1f, r - 1f), fill);
+                if (letter != null && letter.length() > 0) {
+                    glyph.setTextSize(Math.max(8f, h * 0.48f));
+                    Paint.FontMetrics fm = glyph.getFontMetrics();
+                    c.drawText(letter, cx, cy - (fm.ascent + fm.descent) / 2f, glyph);
+                }
+            }
+            c.drawCircle(cx, cy, r - 0.5f, ring);
         }
     }
     public static class ContextMeter extends View {
@@ -7253,18 +8956,45 @@ public class MainActivity extends Activity {
             mime = mimeType == null || mimeType.length() == 0 ? "image/jpeg" : mimeType;
         }
     }
+    public static class ToolStep {
+        String name = "";
+        String detail = "";
+        String status = "done";
+        String preview = "";
+        JSONObject toJson() throws Exception {
+            return new JSONObject().put("name", name == null ? "" : name)
+                    .put("detail", detail == null ? "" : detail)
+                    .put("status", "running".equals(status) ? "done" : (status == null ? "done" : status))
+                    .put("preview", preview == null ? "" : preview);
+        }
+        static ToolStep fromJson(JSONObject o) {
+            ToolStep s = new ToolStep();
+            if (o == null) return s;
+            s.name = o.optString("name", "");
+            s.detail = o.optString("detail", "");
+            s.status = o.optString("status", "done");
+            if ("running".equals(s.status)) s.status = "done";
+            s.preview = o.optString("preview", "");
+            return s;
+        }
+    }
     public static class Msg {
         String role, text, imageBase64 = "", imageMime = "", stats, model, replyQuote, reasoning = "", memorySavedText = "";
         boolean slowVoice = false, reasoningCapable = false, thinkingExpanded = false, searchExpanded = false, memorySaved = false, memoryExpanded = false, ttsRequested = false, ttsPrefetching = false, ttsStarted = false, ttsPlaying = false, ttsStartDelayDone = false, streamDone = false, skipImagesInRequest = false;
-        int spokenChars = 0, ttsPlaybackFailures = 0, voiceSessionId = 0, thinkingAnimStep = 0;
-        long startedAt = System.currentTimeMillis(), thoughtMs = 0;
+        int spokenChars = 0, ttsPlaybackFailures = 0, voiceSessionId = 0, thinkingAnimStep = 0, promptTokens = 0, toolTokens = 0;
+        long startedAt = 0, thoughtMs = 0, jumpAnimStartMs = 0;
+        String jumpAnimWord = "";
+        transient CharSequence bodyDisplay;
+        transient String bodyDisplaySrc = "";
         ArrayList<AttachedImage> images = new ArrayList<AttachedImage>();
         ArrayList<String> ttsQueue = new ArrayList<String>();
         ArrayList<String> searchSources = new ArrayList<String>();
+        ArrayList<ToolStep> toolSteps = new ArrayList<ToolStep>();
         Msg(String r, String t, String i, String m, String s) { this(r,t,i,m,s,"",""); }
         Msg(String r, String t, String i, String m, String s, String modelName) { this(r,t,i,m,s,modelName,""); }
         Msg(String r, String t, String i, String m, String s, String modelName, String reply) {
             role=r; text=t==null?"":t; imageBase64=i==null?"":i; imageMime=m==null?"":m; stats=s==null?"":s; model=modelName==null?"":modelName; replyQuote=reply==null?"":reply;
+            startedAt = System.currentTimeMillis();
             if (imageBase64.length() > 0) images.add(new AttachedImage(imageBase64, imageMime));
         }
         void ensureImagesFromLegacy() {
@@ -7284,20 +9014,30 @@ public class MainActivity extends Activity {
             syncLegacyImageFields();
             JSONArray src = new JSONArray();
             for (String s : searchSources) src.put(s);
+            JSONArray steps = new JSONArray();
+            synchronized (toolSteps) {
+                for (ToolStep step : toolSteps) {
+                    if (step == null) continue;
+                    try { steps.put(step.toJson()); } catch (Exception ignored) {}
+                }
+            }
             JSONArray imgs = new JSONArray();
             for (AttachedImage img : images) {
                 if (img == null || img.base64 == null || img.base64.length() == 0) continue;
                 imgs.put(new JSONObject().put("data", img.base64).put("mime", img.mime == null || img.mime.length() == 0 ? "image/jpeg" : img.mime));
             }
-            return new JSONObject().put("role",role).put("text",text).put("image",imageBase64).put("mime",imageMime).put("images",imgs).put("skipImagesInRequest",skipImagesInRequest).put("stats",stats).put("model",model).put("replyQuote",replyQuote).put("reasoning",reasoning).put("thoughtMs",thoughtMs).put("memorySaved",memorySaved).put("memorySavedText",memorySavedText).put("searchSources",src);
+            return new JSONObject().put("role",role).put("text",text).put("image",imageBase64).put("mime",imageMime).put("images",imgs).put("skipImagesInRequest",skipImagesInRequest).put("stats",stats).put("model",model).put("replyQuote",replyQuote).put("reasoning",reasoning).put("startedAt",startedAt).put("thoughtMs",thoughtMs).put("memorySaved",memorySaved).put("memorySavedText",memorySavedText).put("searchSources",src).put("toolSteps",steps).put("promptTokens",promptTokens).put("toolTokens",toolTokens);
         }
         static Msg fromJson(JSONObject o) {
             Msg m = new Msg(o.optString("role"),o.optString("text"),o.optString("image"),o.optString("mime"),o.optString("stats"),o.optString("model"),o.optString("replyQuote"));
             m.reasoning = o.optString("reasoning", "");
+            m.startedAt = o.optLong("startedAt", 0);
             m.thoughtMs = o.optLong("thoughtMs", 0);
             m.memorySaved = o.optBoolean("memorySaved", false);
             m.memorySavedText = o.optString("memorySavedText", "");
             m.skipImagesInRequest = o.optBoolean("skipImagesInRequest", false);
+            m.promptTokens = o.optInt("promptTokens", 0);
+            m.toolTokens = o.optInt("toolTokens", 0);
             JSONArray imgs = o.optJSONArray("images");
             if (imgs != null && imgs.length() > 0) {
                 m.images.clear();
@@ -7314,9 +9054,43 @@ public class MainActivity extends Activity {
             }
             JSONArray src = o.optJSONArray("searchSources");
             if (src != null) for (int i = 0; i < src.length(); i++) { String s = src.optString(i, ""); if (s.length() > 0) m.searchSources.add(s); }
+            JSONArray steps = o.optJSONArray("toolSteps");
+            if (steps != null) {
+                for (int i = 0; i < steps.length(); i++) {
+                    JSONObject so = steps.optJSONObject(i);
+                    if (so == null) continue;
+                    ToolStep ts = ToolStep.fromJson(so);
+                    if (ts.name != null && ts.name.length() > 0) m.toolSteps.add(ts);
+                }
+            }
             m.streamDone = !isBusyStats(m.stats);
             return m;
         }
     }
-    public static class Chat { String id="", title="", folder="Inbox", model=""; boolean webSearch=false, titleGenerated=false; ArrayList<Msg> messages=new ArrayList<Msg>(); JSONObject toJson() throws Exception { JSONArray a=new JSONArray(); for(Msg m:messages)a.put(m.toJson()); return new JSONObject().put("id",id).put("title",title).put("titleGenerated",titleGenerated).put("folder",folder).put("model",model).put("webSearch",webSearch).put("messages",a); } static Chat fromJson(JSONObject o) { Chat c=new Chat(); c.id=o.optString("id"); c.title=o.optString("title"); c.titleGenerated=o.optBoolean("titleGenerated", false); c.folder=o.optString("folder","Inbox"); c.model=o.optString("model", ""); c.webSearch=o.optBoolean("webSearch", false); JSONArray a=o.optJSONArray("messages"); if(a!=null) for(int i=0;i<a.length();i++) c.messages.add(Msg.fromJson(a.optJSONObject(i))); return c; } }
+    public static class Chat {
+        String id="", title="", folder="Inbox", model="";
+        boolean webSearch=false, titleGenerated=false;
+        long updatedAt = 0;
+        ArrayList<Msg> messages=new ArrayList<Msg>();
+        JSONObject toJson() throws Exception {
+            JSONArray a=new JSONArray();
+            for (Msg m : messages) a.put(m.toJson());
+            return new JSONObject().put("id",id).put("title",title).put("titleGenerated",titleGenerated)
+                    .put("folder",folder).put("model",model).put("webSearch",webSearch)
+                    .put("updatedAt",updatedAt).put("messages",a);
+        }
+        static Chat fromJson(JSONObject o) {
+            Chat c=new Chat();
+            c.id=o.optString("id");
+            c.title=o.optString("title");
+            c.titleGenerated=o.optBoolean("titleGenerated", false);
+            c.folder=o.optString("folder","Inbox");
+            c.model=o.optString("model", "");
+            c.webSearch=o.optBoolean("webSearch", false);
+            c.updatedAt=o.optLong("updatedAt", 0);
+            JSONArray a=o.optJSONArray("messages");
+            if (a != null) for (int i = 0; i < a.length(); i++) c.messages.add(Msg.fromJson(a.optJSONObject(i)));
+            return c;
+        }
+    }
 }
