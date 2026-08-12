@@ -17,7 +17,7 @@ public final class AgentTools {
 
     public static final int DEFAULT_MAX_ROUNDS = 4;
     public static final int RESEARCH_MAX_ROUNDS = 6;
-    public static final int TOOL_RESULT_CHARS = 2500;
+    public static final int TOOL_RESULT_CHARS = 4000;
 
     public static final String WEB_SEARCH = "web_search";
     public static final String SAVE_MEMORY = "save_memory";
@@ -115,7 +115,8 @@ public final class AgentTools {
         } else if (search) {
             b.append("- Use web_search for moving facts instead of guessing\n");
         }
-        b.append("- After tool results, answer the user in plain text\n");
+        b.append("- After tool results, answer the user in plain text with concrete numbers\n");
+        b.append("- If results lack the numbers asked for, search again with a more specific query. Never tell the user to look it up themselves\n");
         if (memory) {
             b.append("- save_memory only for durable facts (name, preferences, constraints) — never one-off chatter, secrets, or medical/financial details\n");
         }
@@ -363,6 +364,13 @@ public final class AgentTools {
         return arr;
     }
 
+    public static String withSearchAnswerHint(String result) {
+        return clipResult(result)
+                + "\n\nAnswer the user now in plain text with concrete numbers from this result. "
+                + "If it lacks the numbers they asked for, search again with a more specific query. "
+                + "Never tell the user to look it up themselves.";
+    }
+
     public static JSONObject toolResultMessage(String toolCallId, String content) throws Exception {
         JSONObject o = new JSONObject();
         o.put("role", "tool");
@@ -371,13 +379,22 @@ public final class AgentTools {
         return o;
     }
 
+    public static JSONObject searchToolResultMessage(String toolCallId, String result) throws Exception {
+        JSONObject o = new JSONObject();
+        o.put("role", "tool");
+        o.put("tool_call_id", toolCallId == null || toolCallId.length() == 0 ? "call_0" : toolCallId);
+        o.put("content", withSearchAnswerHint(result));
+        return o;
+    }
+
     public static JSONObject textResultUserMessage(String toolName, String query, String result) throws Exception {
         JSONObject o = new JSONObject();
         StringBuilder b = new StringBuilder();
         b.append("Tool result (").append(toolName == null ? "tool" : toolName).append(")");
         if (query != null && query.trim().length() > 0) b.append(" for: ").append(query.trim());
-        b.append("\n\n").append(clipResult(result));
-        b.append("\n\nAnswer the user now in plain text using this result. Do not emit another tool call unless you need a different search query.");
+        b.append("\n\n");
+        boolean search = toolName != null && toolName.toLowerCase(Locale.US).contains("search");
+        b.append(search ? withSearchAnswerHint(result) : clipResult(result));
         o.put("role", "user");
         o.put("content", b.toString());
         return o;

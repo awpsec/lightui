@@ -318,6 +318,7 @@ public final class ToolText {
         if (looksLikeSearchPlanning(v)) return false;
         if (looksLikeSourceMetadataOnly(v)) return false;
         if (looksLikeInternalMonologue(v)) return false;
+        if (looksLikeSearchPunt(v)) return false;
         // Pure punctuation / braces left after stripping JSON tool wrappers ("}").
         if (v.matches("^[\\s\\p{Punct}]+$")) return false;
         int alnum = 0;
@@ -326,6 +327,382 @@ public final class ToolText {
             if (alnum >= 2) break;
         }
         return alnum >= 2;
+    }
+
+    public static boolean containsPriceAmount(String text) {
+        if (text == null || text.length() == 0) return false;
+        if (text.matches("(?s).*(\\$|€|£)\\s?\\d.*")) return true;
+        String lower = text.toLowerCase(Locale.US);
+        return lower.matches("(?s).*\\b\\d+(?:[.,]\\d+)?\\s*(usd|dollars?)\\b.*");
+    }
+
+    /**
+     * "I don't have the price, look it up yourself" — not an answer when we just searched.
+     * Real answers that include a $ / € / £ amount are never punts.
+     */
+    public static boolean looksLikeSearchPunt(String text) {
+        String t = text == null ? "" : text.trim();
+        if (t.length() == 0) return false;
+        if (containsPriceAmount(t)) return false;
+        String lower = t.toLowerCase(Locale.US).replace('’', '\'').replace('`', '\'');
+        lower = lower.replace("'", "");
+        String[] needles = new String[]{
+                "dont have specific",
+                "do not have specific",
+                "no specific pricing",
+                "no specific current",
+                "no current pricing",
+                "doesnt provide specific",
+                "does not provide specific",
+                "doesnt include specific",
+                "does not include specific",
+                "look it up",
+                "look that up yourself",
+                "search for it yourself",
+                "youll need to check",
+                "you will need to check",
+                "i recommend checking",
+                "i recommend visiting",
+                "please check amazon",
+                "please check newegg",
+                "check a retailer",
+                "check retailers",
+                "i cannot find specific",
+                "couldnt find specific",
+                "could not find specific",
+                "unable to find specific",
+                "not enough information in the",
+                "the sources dont",
+                "the available context only",
+                "available context only includes",
+                "i dont have access to live",
+                "i dont have access to current",
+                "i dont have access to real-time"
+        };
+        for (int i = 0; i < needles.length; i++) {
+            if (lower.contains(needles[i])) return true;
+        }
+        return false;
+    }
+
+    public static boolean looksLikePriceQuery(String query) {
+        String l = query == null ? "" : query.toLowerCase(Locale.US);
+        if (l.length() == 0) return false;
+        if (l.contains("price") || l.contains("cost") || l.contains("how much") || l.contains("going for")
+                || l.contains("usd") || l.contains("$")) return true;
+        boolean ram = l.contains("ddr") || l.contains("ram");
+        return ram && (l.contains("gb") || l.contains("kit") || l.contains("mhz") || l.contains("cl"));
+    }
+
+    public static boolean searchResultsLackFacts(String result) {
+        String t = result == null ? "" : result.trim();
+        if (t.length() == 0) return true;
+        String lower = t.toLowerCase(Locale.US);
+        if (looksLikeBlockedPage(t)) return true;
+        if (lower.contains("authenticationrequired") || lower.contains("authentication is required")) return true;
+        if (lower.contains("anomaly-modal") || lower.contains("bots use duckduckgo")) return true;
+        return !containsConcreteFact(t);
+    }
+
+    /** Price questions need a $ / € / £ amount, not a YouTube title with a year. */
+    public static boolean searchResultsLackPriceFacts(String result) {
+        if (searchResultsLackFacts(result)) return true;
+        return !containsPriceAmount(result);
+    }
+
+    public static boolean isLowValueSearchUrl(String url) {
+        String l = url == null ? "" : url.toLowerCase(Locale.US);
+        return l.contains("youtube.com") || l.contains("youtu.be") || l.contains("tiktok.com")
+                || l.contains("instagram.com") || l.contains("facebook.com") || l.contains("/shorts/")
+                || l.contains("duckduckgo.com/y.js") || l.contains("ad_provider=");
+    }
+
+    public static String refineSearchQuery(String query, int attempt) {
+        String q = query == null ? "" : query.trim();
+        if (q.length() == 0) return q;
+        String lower = q.toLowerCase(Locale.US);
+        if (attempt <= 0) {
+            if (looksLikePriceQuery(q) && !lower.contains("usd") && !lower.contains("newegg")) {
+                return q + " current price USD";
+            }
+            return q;
+        }
+        if (attempt == 1) {
+            String stripped = q.replaceAll("(?i)\\b(what|what's|whats|how much|is|are|do|does|the|for|a|an)\\b", " ");
+            stripped = stripped.replaceAll("\\s+", " ").trim();
+            if (stripped.length() == 0) stripped = q;
+            return stripped + " Newegg Amazon kit";
+        }
+        if (lower.contains("-youtube")) return q;
+        return q + " -youtube";
+    }
+
+    public static boolean looksLikeBlockedPage(String body) {
+        String l = body == null ? "" : body.toLowerCase(Locale.US);
+        if (l.length() == 0) return false;
+        if (l.contains("anomaly-modal") || l.contains("bots use duckduckgo")) return true;
+        if (l.contains("just a moment") && (l.contains("challenge") || l.contains("cloudflare") || l.contains("_cf_chl"))) return true;
+        if (l.contains("enable javascript and cookies to continue")) return true;
+        if (l.contains("authenticationrequired") || l.contains("authentication is required")) return true;
+        if (l.contains("unusual traffic from your computer") || l.contains("are you a robot")) return true;
+        return false;
+    }
+
+    public static String duckDuckGoTargetUrl(String href) {
+        if (href == null) return "";
+        String h = href.trim();
+        int at = h.indexOf("uddg=");
+        if (at >= 0) {
+            String rest = h.substring(at + 5);
+            int amp = rest.indexOf('&');
+            if (amp >= 0) rest = rest.substring(0, amp);
+            try {
+                return java.net.URLDecoder.decode(rest, "UTF-8").trim();
+            } catch (Exception ignored) {
+                return rest.trim();
+            }
+        }
+        if (h.startsWith("http://") || h.startsWith("https://")) return h;
+        if (h.startsWith("//")) return "https:" + h;
+        return "";
+    }
+
+    public static String parseDuckDuckGoHtml(String html) {
+        if (html == null || html.length() == 0) return "";
+        if (looksLikeBlockedPage(html)) return "";
+        String serp = parseDuckDuckGoSerp(html);
+        if (serp.length() > 0) return serp;
+        return parseDuckDuckGoLite(html);
+    }
+
+    private static String parseDuckDuckGoSerp(String html) {
+        String[] parts = html.split("class=\"result ");
+        StringBuilder out = new StringBuilder();
+        int n = 0;
+        for (int i = 1; i < parts.length && n < 8; i++) {
+            String p = parts[i];
+            if (p.contains("result--ad") || p.startsWith("results_links_deep result--ad")) continue;
+            java.util.regex.Matcher titleM = java.util.regex.Pattern.compile("class=\"result__a\"[^>]*>(.*?)</a>", java.util.regex.Pattern.DOTALL).matcher(p);
+            java.util.regex.Matcher hrefM = java.util.regex.Pattern.compile("class=\"result__a\"[^>]*href=\"([^\"]+)\"").matcher(p);
+            java.util.regex.Matcher snipM = java.util.regex.Pattern.compile("class=\"result__snippet\"[^>]*>(.*?)</", java.util.regex.Pattern.DOTALL).matcher(p);
+            String title = titleM.find() ? stripHtml(titleM.group(1)) : "";
+            String url = "";
+            if (hrefM.find()) url = duckDuckGoTargetUrl(hrefM.group(1).replace("&amp;", "&"));
+            String snip = snipM.find() ? stripHtml(snipM.group(1)) : "";
+            if (isLowValueSearchUrl(url) || isLowValueSearchUrl(title)) continue;
+            if (title.length() == 0 && snip.length() == 0) continue;
+            n++;
+            out.append(n).append(". ").append(title.length() > 0 ? title : "untitled").append('\n');
+            if (url.length() > 0) out.append(url).append('\n');
+            if (snip.length() > 0) out.append(snip).append('\n');
+            out.append('\n');
+        }
+        return out.toString().trim();
+    }
+
+    private static String parseDuckDuckGoLite(String html) {
+        java.util.regex.Matcher a = java.util.regex.Pattern.compile("<a([^>]*)>(.*?)</a>", java.util.regex.Pattern.DOTALL).matcher(html);
+        StringBuilder out = new StringBuilder();
+        int n = 0;
+        while (a.find() && n < 8) {
+            String attrs = a.group(1);
+            if (attrs.indexOf("result-link") < 0) continue;
+            String title = stripHtml(a.group(2));
+            if (title.length() == 0 || "more info".equalsIgnoreCase(title)) continue;
+            String before = html.substring(Math.max(0, a.start() - 280), a.start());
+            if (before.contains("result-sponsored") || before.contains("Sponsored link")) continue;
+            java.util.regex.Matcher href = java.util.regex.Pattern.compile("href=['\"]([^'\"]+)['\"]").matcher(attrs);
+            String url = href.find() ? duckDuckGoTargetUrl(href.group(1).replace("&amp;", "&")) : "";
+            if (isLowValueSearchUrl(url) || isLowValueSearchUrl(title)) continue;
+            String after = html.substring(a.end(), Math.min(html.length(), a.end() + 1800));
+            java.util.regex.Matcher snip = java.util.regex.Pattern.compile("class=['\"]result-snippet['\"][^>]*>(.*?)</td>", java.util.regex.Pattern.DOTALL).matcher(after);
+            String snippet = snip.find() ? stripHtml(snip.group(1)) : "";
+            n++;
+            out.append(n).append(". ").append(title).append('\n');
+            if (url.length() > 0) out.append(url).append('\n');
+            if (snippet.length() > 0) out.append(snippet).append('\n');
+            out.append('\n');
+        }
+        return out.toString().trim();
+    }
+
+    private static String stripHtml(String s) {
+        if (s == null) return "";
+        String t = s.replaceAll("(?is)<[^>]+>", " ");
+        t = t.replace("&amp;", "&").replace("&quot;", "\"").replace("&#x27;", "'").replace("&apos;", "'")
+                .replace("&lt;", "<").replace("&gt;", ">").replace("&nbsp;", " ");
+        return t.replaceAll("\\s+", " ").trim();
+    }
+
+    public static String compactWebSearch(String raw) {
+        String t = raw == null ? "" : raw.trim();
+        if (t.length() == 0) return "";
+        String facts = searchSnippetFallback(t);
+        StringBuilder out = new StringBuilder();
+        if (facts.length() > 0 && !looksLikeSourceMetadataOnly(facts)
+                && (containsPriceAmount(facts) || containsConcreteFact(facts))
+                && !isLowValueSearchUrl(facts)) {
+            out.append("Facts:\n").append(facts).append("\n\n");
+        }
+        String[] lines = t.replace('\r', '\n').split("\n");
+        StringBuilder sources = new StringBuilder();
+        int kept = 0;
+        int skippedVideo = 0;
+        String pendingTitle = "";
+        String pendingUrl = "";
+        for (int i = 0; i <= lines.length; i++) {
+            String line = i < lines.length ? lines[i].trim() : "";
+            boolean end = i == lines.length || line.length() == 0;
+            if (!end) {
+                String lower = line.toLowerCase(Locale.US);
+                if (lower.startsWith("http://") || lower.startsWith("https://") || lower.startsWith("www.")) {
+                    pendingUrl = line.startsWith("www.") ? "https://" + line : line;
+                    continue;
+                }
+                if (lower.startsWith("url source:")) {
+                    pendingUrl = line.substring(line.indexOf(':') + 1).trim();
+                    continue;
+                }
+                if (lower.startsWith("title:") || lower.matches("(?i)^\\[\\d+\\]\\s*title\\s*:.*") || lower.matches("(?i)^\\d+[.)]\\s+\\S.*")) {
+                    if (pendingTitle.length() > 0 || pendingUrl.length() > 0) {
+                        kept += appendCompactHit(sources, pendingTitle, pendingUrl, "", kept, skippedVideo);
+                    }
+                    pendingTitle = line.replaceFirst("(?i)^(?:\\[\\d+\\]\\s*)?(?:\\d+[.)]\\s*)?(?:title\\s*:\\s*)?", "").trim();
+                    pendingUrl = "";
+                    continue;
+                }
+                if (lower.startsWith("description:")) {
+                    String d = line.substring("description:".length()).trim();
+                    if (isLowValueSearchUrl(pendingUrl)) { skippedVideo++; pendingTitle = ""; pendingUrl = ""; continue; }
+                    kept += appendCompactHit(sources, pendingTitle, pendingUrl, d, kept, skippedVideo);
+                    pendingTitle = "";
+                    pendingUrl = "";
+                    continue;
+                }
+                if (pendingTitle.length() > 0 || pendingUrl.length() > 0) {
+                    if (isLowValueSearchUrl(pendingUrl) || isLowValueSearchUrl(pendingTitle)) {
+                        skippedVideo++;
+                    } else {
+                        kept += appendCompactHit(sources, pendingTitle, pendingUrl, line, kept, skippedVideo);
+                    }
+                    pendingTitle = "";
+                    pendingUrl = "";
+                }
+                continue;
+            }
+            if (pendingTitle.length() > 0 || pendingUrl.length() > 0) {
+                if (isLowValueSearchUrl(pendingUrl) || isLowValueSearchUrl(pendingTitle)) skippedVideo++;
+                else kept += appendCompactHit(sources, pendingTitle, pendingUrl, "", kept, skippedVideo);
+                pendingTitle = "";
+                pendingUrl = "";
+            }
+        }
+        if (sources.length() > 0) {
+            out.append("Sources:\n").append(sources.toString().trim()).append('\n');
+        } else if (out.length() == 0) {
+            return t;
+        }
+        return out.toString().trim();
+    }
+
+    private static int appendCompactHit(StringBuilder sources, String title, String url, String snip, int kept, int skippedVideo) {
+        if (kept >= 6) return 0;
+        if (isLowValueSearchUrl(url) || isLowValueSearchUrl(title)) return 0;
+        if (title.length() == 0 && url.length() == 0 && snip.length() == 0) return 0;
+        sources.append(kept + 1).append(". ").append(title.length() > 0 ? title : url).append('\n');
+        if (url.length() > 0) sources.append(url).append('\n');
+        if (snip.length() > 0) sources.append(snip).append('\n');
+        sources.append('\n');
+        return 1;
+    }
+
+    public static boolean looksLikeHtml(String page) {
+        if (page == null) return false;
+        String t = page.trim();
+        if (t.length() < 8) return false;
+        String head = t.length() > 200 ? t.substring(0, 200).toLowerCase(Locale.US) : t.toLowerCase(Locale.US);
+        return head.startsWith("<!doctype") || head.startsWith("<html") || head.contains("<div") || head.contains("<p ")
+                || head.contains("<head") || head.contains("<body");
+    }
+
+    public static String htmlToPlainText(String html) {
+        if (html == null || html.length() == 0) return "";
+        String s = html;
+        s = s.replaceAll("(?is)<script[^>]*>.*?</script>", " ");
+        s = s.replaceAll("(?is)<style[^>]*>.*?</style>", " ");
+        s = s.replaceAll("(?is)<noscript[^>]*>.*?</noscript>", " ");
+        s = s.replaceAll("(?is)</(p|div|tr|h[1-6]|li|section|article|table|ul|ol)>", "\n");
+        s = s.replaceAll("(?is)<br\\s*/?>", "\n");
+        s = s.replaceAll("(?is)<[^>]+>", " ");
+        s = s.replace("&amp;", "&").replace("&quot;", "\"").replace("&#x27;", "'").replace("&apos;", "'")
+                .replace("&lt;", "<").replace("&gt;", ">").replace("&nbsp;", " ").replace("&#x27;", "'");
+        s = s.replaceAll("[ \\t]+", " ");
+        return s.trim();
+    }
+
+    public static String extractFactLines(String page, int maxChars) {
+        if (page == null || page.trim().length() == 0) return "";
+        if (looksLikeBlockedPage(page)) return "";
+        String src = looksLikeHtml(page) ? htmlToPlainText(page) : page;
+        String[] lines = src.replace('\r', '\n').split("\n");
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < lines.length; i++) {
+            String t = lines[i].trim();
+            if (t.length() < 8) continue;
+            String lower = t.toLowerCase(Locale.US);
+            if (lower.contains("cookie") || lower.contains("sign in") || lower.contains("skip to")
+                    || lower.contains("javascript") || lower.startsWith("[](") || lower.startsWith("![image")) {
+                continue;
+            }
+            boolean juicy = containsPriceAmount(t)
+                    || lower.matches(".*\\b\\d+(?:\\.\\d+)?\\s*/\\s*gb\\b.*")
+                    || (lower.matches(".*\\bcl\\d+\\b.*") && lower.matches(".*\\b(ddr5|mhz|price)\\b.*"));
+            if (!juicy) continue;
+            if (t.length() > 240) {
+                int at = t.indexOf('$');
+                if (at < 0) at = t.toLowerCase(Locale.US).indexOf("usd");
+                if (at < 0) at = 0;
+                int start = Math.max(0, at - 80);
+                while (start > 0 && Character.isLetterOrDigit(t.charAt(start))) start--;
+                if (start < t.length() && !Character.isLetterOrDigit(t.charAt(start))) start++;
+                int end = Math.min(t.length(), at + 160);
+                t = t.substring(start, end).trim();
+            }
+            if (out.length() > 0) out.append('\n');
+            out.append(t);
+            if (out.length() >= maxChars) break;
+        }
+        return out.toString().trim();
+    }
+
+    public static ArrayList<String> preferReaderUrls(ArrayList<String> urls) {
+        ArrayList<String> scored = new ArrayList<String>();
+        ArrayList<Integer> scores = new ArrayList<Integer>();
+        if (urls == null) return scored;
+        for (int i = 0; i < urls.size(); i++) {
+            String u = urls.get(i);
+            if (u == null || u.length() == 0) continue;
+            if (isLowValueSearchUrl(u)) continue;
+            String l = u.toLowerCase(Locale.US);
+            int s = 1;
+            if (l.contains("ramprices") || l.contains("whereismyram") || l.contains("pcpartpicker")
+                    || l.contains("camelcamelcamel") || l.contains("tomshardware") || l.contains("techpowerup")) s += 5;
+            if (l.contains("newegg") || l.contains("bestbuy") || l.contains("microcenter")) s += 4;
+            if (l.contains("amazon.") || l.contains("ebay.") || l.contains("walmart.")) s += 2;
+            if (l.contains("price") || l.contains("deal")) s += 2;
+            if (l.contains("reddit.com")) s += 2;
+            scored.add(u);
+            scores.add(Integer.valueOf(s));
+        }
+        ArrayList<String> out = new ArrayList<String>();
+        while (out.size() < 2 && scored.size() > 0) {
+            int best = 0;
+            for (int i = 1; i < scores.size(); i++) if (scores.get(i).intValue() > scores.get(best).intValue()) best = i;
+            out.add(scored.get(best));
+            scored.remove(best);
+            scores.remove(best);
+        }
+        return out;
     }
 
     /**
@@ -484,6 +861,39 @@ public final class ToolText {
         if (pick.length() == 0) return "";
         if (looksLikeSourceMetadataOnly(pick) && bestDesc.length() == 0) return "";
         return pick;
+    }
+
+    /**
+     * Last-resort chat text when the model punts after search.
+     * Prefers extracted $ / page-fact lines over an apology.
+     */
+    public static String searchAnswerFallback(String result) {
+        String t = result == null ? "" : result.trim();
+        if (t.length() == 0) return "";
+        StringBuilder facts = new StringBuilder();
+        String[] blocks = t.split("\n\n");
+        for (int i = 0; i < blocks.length; i++) {
+            String b = blocks[i].trim();
+            String lower = b.toLowerCase(Locale.US);
+            if (lower.startsWith("facts:") || lower.startsWith("page facts")) {
+                String body = b.contains("\n") ? b.substring(b.indexOf('\n') + 1).trim() : b;
+                if (containsPriceAmount(body) || containsConcreteFact(body)) {
+                    if (facts.length() > 0) facts.append("\n\n");
+                    facts.append(body);
+                }
+            }
+        }
+        if (facts.length() == 0) {
+            String extracted = extractFactLines(t, 900);
+            if (containsPriceAmount(extracted)) facts.append(extracted);
+        }
+        if (facts.length() > 0) {
+            String out = facts.toString().trim();
+            return out.length() > 1200 ? out.substring(0, 1200).trim() + "…" : out;
+        }
+        String snip = searchSnippetFallback(t);
+        if (containsPriceAmount(snip)) return snip;
+        return snip;
     }
 
     public static String webSearchToolsPrompt() {

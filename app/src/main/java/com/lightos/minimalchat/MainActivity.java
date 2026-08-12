@@ -107,7 +107,7 @@ public class MainActivity extends Activity {
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
     private static final String SEARCHING = "__searching__";
-    private static final String APP_VERSION = "1.0.26";
+    private static final String APP_VERSION = "1.0.27";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 64;
@@ -2604,6 +2604,34 @@ public class MainActivity extends Activity {
                 boolean usable = ToolText.isUsableFollowupAnswer(visible);
                 ArrayList<AgentTools.ToolCall> calls = AgentTools.resolveCalls(sr.tools, sr.content, sr.reasoning, usable);
                 if (calls.size() == 0) {
+                    boolean hadSearch = lastSearchResult.length() > 0 || assistant.searchSources.size() > 0;
+                    if (hadSearch && ToolText.looksLikeSearchPunt(visible) && round + 1 < maxRounds) {
+                        String seed = lastSearchQuery.length() > 0 ? lastSearchQuery : (userText == null ? "" : userText.trim());
+                        String refined = ToolText.refineSearchQuery(seed, seenSearchQueries.size());
+                        String keyQ = refined.toLowerCase(Locale.US);
+                        if (refined.length() > 0 && !seenSearchQueries.contains(keyQ)) {
+                            seenSearchQueries.add(keyQ);
+                            showSearchingStatus(assistant, false);
+                            String result;
+                            try {
+                                result = webSearch(refined);
+                                rememberSearchResult(refined, result);
+                            } catch (Exception searchErr) {
+                                result = lastSearchResult;
+                                if (result == null || result.length() == 0) {
+                                    result = "Search failed: " + (searchErr.getMessage() == null ? "unknown error" : searchErr.getMessage());
+                                }
+                            }
+                            if (result == null) result = "";
+                            if (result.length() > 0) {
+                                assistant.searchSources.clear();
+                                assistant.searchSources.addAll(extractSearchSources(result));
+                            }
+                            arr.put(new JSONObject().put("role", "assistant").put("content", visible));
+                            arr.put(AgentTools.textResultUserMessage("web_search", refined, result));
+                            continue;
+                        }
+                    }
                     finalAnswer = visible;
                     break;
                 }
@@ -2639,8 +2667,9 @@ public class MainActivity extends Activity {
                             assistant.searchSources.clear();
                             assistant.searchSources.addAll(extractSearchSources(result));
                         }
-                        if (nativeThisRound) arr.put(AgentTools.toolResultMessage(call.id, result));
-                        else arr.put(AgentTools.textResultUserMessage("web_search", q, result));
+                        String packed = result;
+                        if (nativeThisRound) arr.put(AgentTools.searchToolResultMessage(call.id, packed));
+                        else arr.put(AgentTools.textResultUserMessage("web_search", q, packed));
                         executed.add(call);
                     } else if (call.isSaveMemory()) {
                         String note = call.note();
@@ -2976,7 +3005,8 @@ public class MainActivity extends Activity {
         assistant.streamDone = true;
         String cleanedFinal = sanitizeAssistantText(finalAnswer.length() == 0 ? assistant.text : finalAnswer);
         if ("searching...".equals(cleanedFinal.trim()) || looksLikeToolResidue(cleanedFinal) || ToolText.looksLikeSearchPlanning(cleanedFinal)
-                || ToolText.looksLikeSourceMetadataOnly(cleanedFinal) || ToolText.looksLikeInternalMonologue(cleanedFinal)) {
+                || ToolText.looksLikeSourceMetadataOnly(cleanedFinal) || ToolText.looksLikeInternalMonologue(cleanedFinal)
+                || ToolText.looksLikeSearchPunt(cleanedFinal)) {
             cleanedFinal = "";
         }
         if (cleanedFinal.length() == 0) cleanedFinal = fallbackWhenNoReply(assistant);
@@ -3003,8 +3033,12 @@ public class MainActivity extends Activity {
 
     /** Prefer search snippets over a blank hard-fail when sources exist. Never "No reply" if we have sources. */
     private String fallbackWhenNoReply(Msg assistant) {
-        String snippet = ToolText.searchSnippetFallback(lastSearchResult);
+        String snippet = ToolText.searchAnswerFallback(lastSearchResult);
+        if (snippet.length() == 0) snippet = ToolText.searchSnippetFallback(lastSearchResult);
         if (snippet.length() > 0) {
+            if (ToolText.containsPriceAmount(snippet) || ToolText.containsConcreteFact(snippet)) {
+                return snippet;
+            }
             return "I couldn't form a clean summary from the sources. Closest detail I found:\n\n" + snippet;
         }
         boolean hasSources = (assistant != null && assistant.searchSources.size() > 0) || lastSearchResult.length() > 0;
@@ -3022,7 +3056,8 @@ public class MainActivity extends Activity {
                                               String rawAnswer, String finalAnswer, String reasoning, final Msg assistant) {
         String cleaned = sanitizeAssistantText(finalAnswer);
         if ("searching...".equals(cleaned.trim()) || looksLikeToolResidue(cleaned) || ToolText.looksLikeSearchPlanning(cleaned)
-                || ToolText.looksLikeSourceMetadataOnly(cleaned) || ToolText.looksLikeInternalMonologue(cleaned)) {
+                || ToolText.looksLikeSourceMetadataOnly(cleaned) || ToolText.looksLikeInternalMonologue(cleaned)
+                || ToolText.looksLikeSearchPunt(cleaned)) {
             cleaned = "";
         }
         boolean hasSources = lastSearchResult.length() > 0 || (assistant != null && assistant.searchSources.size() > 0);
@@ -3402,9 +3437,10 @@ public class MainActivity extends Activity {
                 if (ToolText.isUsableFollowupAnswer(out)) return out;
             } catch (Exception ignored) { }
         }
-        // Guaranteed non-empty when we have any search payload.
-        String snippet = ToolText.searchSnippetFallback(cleaned);
+        String snippet = ToolText.searchAnswerFallback(cleaned);
+        if (snippet.length() == 0) snippet = ToolText.searchSnippetFallback(cleaned);
         if (snippet.length() > 0) {
+            if (ToolText.containsPriceAmount(snippet) || ToolText.containsConcreteFact(snippet)) return snippet;
             return "I couldn't form a clean summary from the sources. Closest detail I found:\n\n" + snippet;
         }
         if (cleaned.trim().length() > 0) {
@@ -3419,7 +3455,7 @@ public class MainActivity extends Activity {
 
     private String followupAfterWebSearch(String key, String source, String model, String query, String result, String userText, boolean retry, int attemptIndex) throws Exception {
         // Keep sources short — long system dumps kill small/local models.
-        if (result.length() > 2500) result = result.substring(0, 2500);
+        if (result.length() > 4000) result = result.substring(0, 4000);
         JSONObject body = new JSONObject();
         body.put("model", model);
         JSONArray arr = new JSONArray();
@@ -3435,7 +3471,7 @@ public class MainActivity extends Activity {
         userBlock.append("Question: ").append(ask).append("\n\n");
         userBlock.append("Search query: ").append(query == null ? "" : query).append("\n\n");
         userBlock.append("Sources:\n").append(cleanSearchArtifacts(result)).append("\n\n");
-        userBlock.append("Answer the question now in plain text using the sources.");
+        userBlock.append("Answer the question now in plain text using the sources. Never tell the user to look it up themselves.");
         if (attemptIndex >= 1) {
             userBlock.append(" Respond with concrete facts only (prices/numbers/dates if relevant). Do not return a title or citation header.");
         }
@@ -4083,9 +4119,152 @@ public class MainActivity extends Activity {
         return lower.contains("?") || lower.startsWith("what ") || lower.startsWith("who ") || lower.startsWith("when ") || lower.startsWith("where ") || lower.startsWith("why ") || lower.startsWith("how ") || lower.startsWith("is ") || lower.startsWith("are ") || lower.startsWith("can ") || lower.startsWith("does ") || lower.startsWith("do ") || lower.startsWith("did ") || lower.startsWith("which ");
     }
 
+    private static final String SEARCH_UA = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36";
+
     private String webSearch(String query) throws Exception {
         String q = datedSearchQuery(query);
-        return "brave".equals(searchProvider()) ? braveSearch(q) : jinaSearch(q);
+        String raw = "";
+        Exception last = null;
+        if ("brave".equals(searchProvider())) {
+            raw = braveSearch(q);
+        } else {
+            try {
+                raw = jinaSearch(q);
+            } catch (Exception e) {
+                last = e;
+                raw = "";
+            }
+            boolean weak = ToolText.searchResultsLackFacts(raw) || mostlyVideoHits(raw);
+            if (ToolText.looksLikePriceQuery(q) && ToolText.searchResultsLackPriceFacts(raw)) weak = true;
+            if (weak) {
+                try {
+                    String ddg = duckDuckGoSearch(q);
+                    if (ddg.length() > 0) raw = raw.length() == 0 ? ddg : (raw + "\n\n" + ddg);
+                } catch (Exception e2) {
+                    if (raw.length() == 0) {
+                        if (last != null) throw last;
+                        throw e2;
+                    }
+                }
+            }
+        }
+        String compact = ToolText.compactWebSearch(raw);
+        if (compact.length() == 0) compact = raw;
+        if (ToolText.looksLikePriceQuery(q)) {
+            compact = enrichWithPageFacts(raw, compact);
+        }
+        return compact.trim().length() > 0 ? compact.trim() : raw;
+    }
+
+    private boolean mostlyVideoHits(String raw) {
+        ArrayList<String> urls = extractSearchSources(raw);
+        if (urls.size() == 0) {
+            String l = raw == null ? "" : raw.toLowerCase(Locale.US);
+            return l.contains("youtube.com") || l.contains("youtu.be");
+        }
+        int bad = 0;
+        for (int i = 0; i < urls.size(); i++) if (ToolText.isLowValueSearchUrl(urls.get(i))) bad++;
+        return bad * 2 >= urls.size();
+    }
+
+    private String enrichWithPageFacts(String raw, String compact) {
+        ArrayList<String> urls = extractSearchSources(raw);
+        if (urls.size() == 0) urls = extractSearchSources(compact);
+        ArrayList<String> pick = ToolText.preferReaderUrls(urls);
+        if (pick.size() == 0) return compact;
+        StringBuilder extra = new StringBuilder();
+        for (int i = 0; i < pick.size(); i++) {
+            String url = pick.get(i);
+            String facts = readPageFacts(url);
+            if (facts.length() == 0) continue;
+            if (extra.length() > 0) extra.append("\n\n");
+            extra.append("Page facts (").append(url).append("):\n").append(facts);
+        }
+        if (extra.length() == 0) return compact;
+        return AgentTools.clipResult(extra.toString() + "\n\n" + compact);
+    }
+
+    private String readPageFacts(String url) {
+        String page = "";
+        try { page = jinaRead(url); } catch (Exception ignored) { page = ""; }
+        String facts = ToolText.extractFactLines(page, 900);
+        if (facts.length() > 0) return facts;
+        try { page = fetchPage(url); } catch (Exception ignored) { return ""; }
+        return ToolText.extractFactLines(page, 900);
+    }
+
+    private String jinaRead(String url) throws Exception {
+        String u = url == null ? "" : url.trim();
+        if (u.length() == 0) return "";
+        if (!u.startsWith("http://") && !u.startsWith("https://")) u = "https://" + u;
+        HttpURLConnection c = (HttpURLConnection) new URL("https://r.jina.ai/" + u).openConnection();
+        c.setConnectTimeout(8000);
+        c.setReadTimeout(12000);
+        c.setRequestProperty("User-Agent", SEARCH_UA);
+        c.setRequestProperty("Accept", "text/plain");
+        String jinaKey = prefs.getString("jinaApiKey", "");
+        if (jinaKey.length() > 0) c.setRequestProperty("Authorization", "Bearer " + jinaKey);
+        int code = c.getResponseCode();
+        String raw = readAllLimited(code >= 400 ? c.getErrorStream() : c.getInputStream(), 250000);
+        if (code >= 400) throw new RuntimeException(raw);
+        if (ToolText.looksLikeBlockedPage(raw)) throw new RuntimeException("reader blocked");
+        return raw.trim();
+    }
+
+    private String fetchPage(String url) throws Exception {
+        String u = url == null ? "" : url.trim();
+        if (u.length() == 0) return "";
+        if (!u.startsWith("http://") && !u.startsWith("https://")) u = "https://" + u;
+        HttpURLConnection c = (HttpURLConnection) new URL(u).openConnection();
+        c.setInstanceFollowRedirects(true);
+        c.setConnectTimeout(10000);
+        c.setReadTimeout(15000);
+        c.setRequestProperty("User-Agent", SEARCH_UA);
+        c.setRequestProperty("Accept", "text/html,text/plain;q=0.9,*/*;q=0.8");
+        c.setRequestProperty("Accept-Language", "en-US,en;q=0.9");
+        int code = c.getResponseCode();
+        String raw = readAllLimited(code >= 400 ? c.getErrorStream() : c.getInputStream(), 250000);
+        if (code >= 400) throw new RuntimeException("page http " + code);
+        if (ToolText.looksLikeBlockedPage(raw)) throw new RuntimeException("page blocked");
+        return raw;
+    }
+
+    private String readAllLimited(InputStream in, int max) throws Exception {
+        if (in == null) return "";
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        int n;
+        int total = 0;
+        while ((n = in.read(buf)) >= 0) {
+            int room = max - total;
+            if (room <= 0) break;
+            int w = n < room ? n : room;
+            out.write(buf, 0, w);
+            total += w;
+            if (total >= max) break;
+        }
+        return new String(out.toByteArray(), StandardCharsets.UTF_8);
+    }
+
+    private String duckDuckGoSearch(String query) throws Exception {
+        String encoded = URLEncoder.encode(query, "UTF-8");
+        String parsed = fetchDuckDuckGo("https://html.duckduckgo.com/html/?q=" + encoded);
+        if (parsed.length() == 0) parsed = fetchDuckDuckGo("https://lite.duckduckgo.com/lite/?q=" + encoded);
+        if (parsed.length() == 0) throw new RuntimeException("duckduckgo returned no results");
+        return parsed;
+    }
+
+    private String fetchDuckDuckGo(String url) throws Exception {
+        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+        c.setConnectTimeout(15000);
+        c.setReadTimeout(20000);
+        c.setRequestProperty("User-Agent", SEARCH_UA);
+        c.setRequestProperty("Accept", "text/html,application/xhtml+xml");
+        c.setRequestProperty("Accept-Language", "en-US,en;q=0.9");
+        int code = c.getResponseCode();
+        String raw = readAll(code >= 400 ? c.getErrorStream() : c.getInputStream());
+        if (code >= 400) throw new RuntimeException(raw);
+        return ToolText.parseDuckDuckGoHtml(raw);
     }
 
     private String jinaSearch(String query) throws Exception {
@@ -4093,6 +4272,7 @@ public class MainActivity extends Activity {
         HttpURLConnection c = (HttpURLConnection) new URL("https://s.jina.ai/" + encoded).openConnection();
         c.setConnectTimeout(15000);
         c.setReadTimeout(30000);
+        c.setRequestProperty("User-Agent", SEARCH_UA);
         c.setRequestProperty("Accept", "text/plain");
         String jinaKey = prefs.getString("jinaApiKey", "");
         if (jinaKey.length() > 0) c.setRequestProperty("Authorization", "Bearer " + jinaKey);

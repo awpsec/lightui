@@ -118,7 +118,7 @@ public class ToolLoopHarness {
                 seen.add(q.toLowerCase());
                 String result = "Description: DDR5-6000 CL30 2x32GB kits are commonly listing around $280-$360 this week.\n"
                         + "URL Source: https://example.com/ddr5\n";
-                if (nativeThisRound) arr.put(AgentTools.toolResultMessage(call.id, result));
+                if (nativeThisRound) arr.put(AgentTools.searchToolResultMessage(call.id, result));
                 else arr.put(AgentTools.textResultUserMessage("web_search", q, result));
                 executed.add(call);
             }

@@ -25,7 +25,7 @@ public class AgentToolsTest {
         assertTrue("lean has SEARCH fallback", lean.contains("SEARCH:"));
         assertTrue("lean has no XML tutorial", !lean.contains("<function=") && !lean.contains("<tool_call>"));
         assertTrue("lean prompt under 400 tokens", AgentTools.promptTokenEstimate(lean) < 400);
-        assertTrue("lean prompt under 1600 chars", lean.length() < 1600);
+        assertTrue("lean prompt under 1800 chars", lean.length() < 1800);
 
         String injected = AgentTools.leanToolsPrompt(true, true, true, true);
         assertTrue("injected omits SEARCH dialect", !injected.contains("SEARCH:"));
@@ -100,9 +100,15 @@ public class AgentToolsTest {
         assertEq("tool role", "tool", toolMsg.getString("role"));
         assertEq("tool id", "call_abc", toolMsg.getString("tool_call_id"));
 
+        JSONObject searchTool = AgentTools.searchToolResultMessage("call_abc", "kits are $299");
+        assertEq("search tool role", "tool", searchTool.getString("role"));
+        assertTrue("search tool keeps numbers", searchTool.getString("content").contains("$299"));
+        assertTrue("search tool forbids look-it-up", searchTool.getString("content").toLowerCase().contains("look it up"));
+
         JSONObject userMsg = AgentTools.textResultUserMessage("web_search", "ddr5", "kits are $299");
         assertEq("text fallback role", "user", userMsg.getString("role"));
         assertTrue("text fallback has result", userMsg.getString("content").contains("$299"));
+        assertTrue("text fallback forbids look-it-up", userMsg.getString("content").toLowerCase().contains("look it up"));
 
         assertTrue("unsupported: extra tools field", AgentTools.looksLikeToolsUnsupported("unexpected field: tools"));
         assertTrue("unsupported: does not support", AgentTools.looksLikeToolsUnsupported("This model does not support tools"));

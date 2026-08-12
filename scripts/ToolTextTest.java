@@ -1,5 +1,7 @@
 package com.lightos.minimalchat;
 
+import java.util.ArrayList;
+
 public class ToolTextTest {
     private static int failed = 0;
 
@@ -160,6 +162,70 @@ public class ToolTextTest {
         String based = "Based on the sources I checked, 64GB DDR5 kits are typically $280-$360 right now.";
         assertTrue("based-on-sources factful usable", ToolText.isUsableFollowupAnswer(based));
         assertTrue("based-on-sources not planning", !ToolText.looksLikeSearchPlanning(based));
+
+        String userPunt = "Based on the search results provided, I dont have specific pricing information for 64GB DDR5 6000 kits. "
+                + "The available context only includs a YouTube video from 4 months ago titled "
+                + "\"DDR5 RAM Prices are FINALLY Dropping! Buy Now or Wait?\" which suggests that DDR5 RAM prices have been decreasing, "
+                + "but doesnt provide specific current pricing data.\n\n"
+                + "You should look it up yourself on Newegg or Amazon.";
+        assertTrue("user punt detected", ToolText.looksLikeSearchPunt(userPunt));
+        assertTrue("user punt unusable", !ToolText.isUsableFollowupAnswer(userPunt));
+        assertTrue("priced answer is not a punt", !ToolText.looksLikeSearchPunt(based));
+
+        assertTrue("jina 401 lacks facts", ToolText.searchResultsLackFacts(
+                "AuthenticationRequiredError: Authentication is required to use this endpoint."));
+        String youtubeDump = "[1] Title: DDR5 RAM Prices are FINALLY Dropping! Buy Now or Wait?\n"
+                + "URL Source: https://www.youtube.com/watch?v=abc\n"
+                + "Published Date: 2026-04-12\n"
+                + "Description: Talking about RAM prices in general.\n";
+        assertTrue("youtube year dump lacks price facts", ToolText.searchResultsLackPriceFacts(youtubeDump));
+        assertTrue("youtube url is low value", ToolText.isLowValueSearchUrl("https://www.youtube.com/watch?v=abc"));
+
+        String ddgHtml = "<div class=\"result results_links results_links_deep web-result \">"
+                + "<h2 class=\"result__title\"><a rel=\"nofollow\" class=\"result__a\" "
+                + "href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Frampricesusa.com%2Fbest-64gb-ddr5-ram&amp;rut=abc\">"
+                + "Best 64GB DDR5 RAM</a></h2>"
+                + "<div class=\"result__snippet\">Median 64GB kits around $10.77/GB</div></div>"
+                + "<div class=\"result results_links result--ad \"><a class=\"result__a\" href=\"https://duckduckgo.com/y.js?ad_provider=x\">Shop Amazon</a>"
+                + "<div class=\"result__snippet\">Ad</div></div>";
+        String ddgParsed = ToolText.parseDuckDuckGoHtml(ddgHtml);
+        assertTrue("ddg keeps ramprices", ddgParsed.contains("rampricesusa.com"));
+        assertTrue("ddg drops ads", !ddgParsed.toLowerCase().contains("shop amazon"));
+        assertTrue("ddg keeps snippet price", ddgParsed.contains("10.77"));
+
+        String ddgLite = "<tr><td><a rel=\"nofollow\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.newegg.com%2Fp%2Fpl%3Fd%3D64gb&amp;rut=x\" class='result-link'>64gb ddr5 6000 | Newegg.com</a></td></tr>"
+                + "<tr><td class='result-snippet'>Search Newegg.com for 64gb ddr5 6000 kits from $299</td></tr>";
+        String liteParsed = ToolText.parseDuckDuckGoHtml(ddgLite);
+        assertTrue("lite keeps newegg", liteParsed.toLowerCase().contains("newegg"));
+        assertTrue("lite keeps price", liteParsed.contains("299"));
+
+        String captcha = "<div class=\"anomaly-modal__title\">Unfortunately, bots use DuckDuckGo too.</div>";
+        assertEq("captcha parses empty", "", ToolText.parseDuckDuckGoHtml(captcha));
+
+        String compactYoutube = ToolText.compactWebSearch(youtubeDump + "\n1. Best 64GB DDR5\nhttps://rampricesusa.com/best-64gb-ddr5-ram\nMedian $10.77/GB\n");
+        assertTrue("compact drops youtube", !compactYoutube.toLowerCase().contains("youtube.com"));
+        assertTrue("compact keeps ramprices", compactYoutube.contains("rampricesusa.com"));
+
+        assertTrue("refine adds usd", ToolText.refineSearchQuery("64GB DDR5 6000 kit price", 0).contains("USD"));
+        assertTrue("refine attempt 1 retailers", ToolText.refineSearchQuery("64GB DDR5 6000 kit price", 1).toLowerCase().contains("newegg"));
+
+        ArrayList<String> urls = new ArrayList<String>();
+        urls.add("https://www.youtube.com/watch?v=x");
+        urls.add("https://www.amazon.com/ddr5");
+        urls.add("https://rampricesusa.com/best-64gb-ddr5-ram");
+        ArrayList<String> prefer = ToolText.preferReaderUrls(urls);
+        assertTrue("prefer ramprices first", prefer.size() > 0 && prefer.get(0).contains("rampricesusa"));
+
+        String ramHtml = "<html><body><h1>Best 64GB DDR5 RAM</h1>"
+                + "<p>Median $/GB $10.77/GB From $114.95</p>"
+                + "<p>Sweet spot: 64GB (2×32GB) DDR5-6000 CL30 EXPO</p>"
+                + "<p>G.SKILL Ripjaws S5 $219.99</p></body></html>";
+        String facts = ToolText.extractFactLines(ramHtml, 900);
+        assertTrue("html facts have $", facts.contains("10.77") || facts.contains("114.95") || facts.contains("219.99"));
+        assertTrue("html facts mention 6000 or CL", facts.toLowerCase().contains("cl30") || facts.contains("6000") || facts.contains("$"));
+
+        String fallback = ToolText.searchAnswerFallback("Page facts (https://rampricesusa.com):\nMedian $10.77/GB · kits from $114.95\n\nSources:\n1. youtube");
+        assertTrue("answer fallback uses page facts", fallback.contains("114.95") || fallback.contains("10.77"));
 
         if (failed > 0) { System.err.println(failed + " failed"); System.exit(1); }
         System.out.println("all passed");
