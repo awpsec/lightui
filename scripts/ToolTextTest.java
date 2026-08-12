@@ -313,6 +313,7 @@ public class ToolTextTest {
         assertEq("relative now", "now", ToolText.relativeTime(100000, 90000));
         assertEq("relative minutes", "3m", ToolText.relativeTime(1000000, 1000000 - 3 * 60000));
         assertEq("relative hours", "2h", ToolText.relativeTime(10000000, 10000000 - 2 * 3600000));
+        assertEq("relative months", "3mo", ToolText.relativeTime(10000000000L, 10000000000L - 90L * 86400000L));
         assertTrue("query matches title", ToolText.textMatchesQuery("ddr", "DDR5 prices", "empty chat"));
         assertTrue("query matches preview", ToolText.textMatchesQuery("ram", "untitled", "ai: ram is expensive"));
         assertTrue("empty query matches", ToolText.textMatchesQuery("", "x", "y"));
