@@ -112,7 +112,7 @@ public class MainActivity extends Activity {
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
     private static final String SEARCHING = "__searching__";
-    private static final String APP_VERSION = "1.0.34";
+    private static final String APP_VERSION = "1.0.36";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 120;
@@ -560,7 +560,7 @@ public class MainActivity extends Activity {
         captureChatScroll();
         clearPaneViews();
         root.setOnClickListener(null);
-        root.setPadding(dp(26), dp(14), dp(26), dp(10));
+        root.setPadding(dp(16), dp(8), dp(16), dp(8));
         apiKey = null;
         endpointInput = null;
         endpointKeyInput = null;
@@ -572,8 +572,10 @@ public class MainActivity extends Activity {
         settingsScrollView = settingsScroll;
         LinearLayout settings = new LinearLayout(this);
         settings.setOrientation(LinearLayout.VERTICAL);
+        settings.setGravity(Gravity.TOP | Gravity.START);
         settings.setBackgroundColor(Color.BLACK);
-        settingsScroll.addView(settings);
+        settingsScroll.setFillViewport(true);
+        settingsScroll.addView(settings, new ScrollView.LayoutParams(-1, -2));
         settingsScroll.setVerticalScrollBarEnabled(false);
 
         if (settingsPage.length() == 0) addSettingsIndex(settings);
@@ -638,20 +640,23 @@ public class MainActivity extends Activity {
     private View settingsNav(final String title, final String page, String detail, int index) {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
+        card.setGravity(Gravity.TOP | Gravity.START);
         card.setPadding(dp(10), dp(9), dp(10), dp(9));
         card.setBackground(listCardBg(false, false, index));
         LinearLayout top = row();
         top.setBackgroundColor(Color.TRANSPARENT);
         TextView name = text(title, 15, Color.WHITE);
+        name.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
         name.setBackgroundColor(Color.TRANSPARENT);
         TextView arrow = text(">", 14, Color.rgb(135, 135, 135));
-        arrow.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
+        arrow.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
         arrow.setBackgroundColor(Color.TRANSPARENT);
         top.addView(name, new LinearLayout.LayoutParams(0, -2, 1));
         top.addView(arrow, new LinearLayout.LayoutParams(dp(28), -2));
         card.addView(top, new LinearLayout.LayoutParams(-1, -2));
         if (detail != null && detail.length() > 0) {
             TextView sub = text(detail, 11, Color.rgb(135, 135, 135));
+            sub.setGravity(Gravity.START);
             sub.setSingleLine(true);
             sub.setEllipsize(android.text.TextUtils.TruncateAt.END);
             sub.setBackgroundColor(Color.TRANSPARENT);
@@ -5636,6 +5641,10 @@ public class MainActivity extends Activity {
 
     private void beginListening() {
         if (voiceReply != null) voiceReply.setVisibility(View.GONE);
+        if (voiceWaves != null) {
+            voiceWaves.animate().cancel();
+            voiceWaves.setAlpha(1f);
+        }
         voiceAwaitingSpeechResult = true;
         vibrateListenStarted();
         if (voiceFullMode) renderVoiceConversation();
@@ -6668,8 +6677,8 @@ public class MainActivity extends Activity {
         voiceReply.setVisibility(View.GONE);
         if (full) voiceReply.setBackgroundColor(Color.TRANSPARENT);
         voiceReply.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { voiceReply.setVisibility(View.GONE); beginListening(); } });
-        box.addView(voiceStatus, new LinearLayout.LayoutParams(-1, full ? dp(62) : dp(28)));
-        if (!full) box.addView(voiceWaves, new LinearLayout.LayoutParams(-1, dp(64)));
+        box.addView(voiceStatus, new LinearLayout.LayoutParams(-1, full ? dp(48) : dp(28)));
+        box.addView(voiceWaves, new LinearLayout.LayoutParams(-1, full ? dp(52) : dp(64)));
         if (full) {
             voiceTextScroll = new ScrollView(this);
             voiceTextScroll.setVerticalScrollBarEnabled(false);
@@ -8731,8 +8740,71 @@ public class MainActivity extends Activity {
     public class TogglePill extends View { Paint p = new Paint(Paint.ANTI_ALIAS_FLAG); boolean checked = false; public TogglePill(Context c) { super(c); } @Override protected void onDraw(Canvas c) { int w=getWidth(), h=getHeight(); p.setStrokeWidth(dp(1)); p.setStyle(checked ? Paint.Style.FILL : Paint.Style.STROKE); p.setColor(Color.WHITE); c.drawRoundRect(dp(1), dp(1), w-dp(1), h-dp(1), h/2f, h/2f, p); } }
     public class ScrollIndicator extends View { Paint p = new Paint(Paint.ANTI_ALIAS_FLAG); ScrollView target; public ScrollIndicator(Context c) { super(c); } @Override protected void onDraw(Canvas c) { if (target == null || target.getChildCount() == 0) return; int thumb; int top; if (target == scroll && messages.size() > MESSAGE_WINDOW) { thumb = Math.max(dp(28), Math.round(getHeight() * (MESSAGE_WINDOW / (float) messages.size()))); int maxTop = Math.max(0, getHeight() - thumb); int denominator = Math.max(1, messages.size() - MESSAGE_WINDOW); top = messageEnd >= messages.size() ? maxTop : Math.round(maxTop * (messageStart / (float) denominator)); } else { int content = target.getChildAt(0).getHeight(); int view = target.getHeight(); if (content <= view || view <= 0) return; float ratio = view / (float) content; thumb = Math.max(dp(28), Math.round(getHeight() * ratio)); int maxScroll = content - view; int maxTop = Math.max(0, getHeight() - thumb); top = Math.round(maxTop * (target.getScrollY() / (float) maxScroll)); } p.setColor(Color.rgb(125,125,125)); p.setStyle(Paint.Style.FILL); c.drawRect(0, top, getWidth(), top + thumb, p); } }
     public class FadeView extends View { Paint p = new Paint(); public FadeView(Context c) { super(c); } @Override protected void onDraw(Canvas c) { p.setShader(new LinearGradient(0, 0, 0, getHeight(), Color.TRANSPARENT, Color.BLACK, Shader.TileMode.CLAMP)); c.drawRect(0, 0, getWidth(), getHeight(), p); p.setShader(null); } }
-    public class WaveView extends View { Paint p = new Paint(Paint.ANTI_ALIAS_FLAG); float level = 0.05f; public WaveView(Context c) { super(c); } @Override protected void onDraw(Canvas c) { int bars = 9; int gap = dp(8); int barW = dp(3); int total = bars * barW + (bars - 1) * gap; int start = (getWidth() - total) / 2; int mid = getHeight() / 2; p.setColor(Color.WHITE); p.setStyle(Paint.Style.FILL); for (int i = 0; i < bars; i++) { float distance = Math.abs(i - (bars - 1) / 2f); float scale = Math.max(0.15f, 1f - distance * 0.14f); int h = Math.max(dp(8), Math.round(dp(78) * level * scale)); int x = start + i * (barW + gap); c.drawRect(x, mid - h / 2f, x + barW, mid + h / 2f, p); } } }
-    public class BorderWaveView extends View { Paint p = new Paint(Paint.ANTI_ALIAS_FLAG); float level = 0.05f; public BorderWaveView(Context c) { super(c); } @Override protected void onDraw(Canvas c) { p.setStyle(Paint.Style.STROKE); p.setStrokeCap(Paint.Cap.SQUARE); p.setStrokeJoin(Paint.Join.MITER); p.setColor(Color.argb(145,255,255,255)); p.setStrokeWidth(dp(2)); float h = dp(1); c.drawRect(h, h, getWidth() - h, getHeight() - h, p); if (level > 0.12f) { p.setColor(Color.argb(Math.min(210, 90 + Math.round(level * 120)),255,255,255)); p.setStrokeWidth(dp(1)); float in = dp(7); c.drawRect(in, in, getWidth() - in, getHeight() - in, p); } } }
+    public class WaveView extends View {
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        float level = 0.05f;
+        float shown = 0.05f;
+        final Runnable tick = new Runnable() {
+            @Override public void run() {
+                shown += (level - shown) * (level < shown ? 0.5f : 0.35f);
+                invalidate();
+                postDelayed(this, 50);
+            }
+        };
+        public WaveView(Context c) { super(c); setBackgroundColor(Color.TRANSPARENT); }
+        @Override protected void onAttachedToWindow() { super.onAttachedToWindow(); removeCallbacks(tick); post(tick); }
+        @Override protected void onDetachedFromWindow() { removeCallbacks(tick); super.onDetachedFromWindow(); }
+        @Override protected void onDraw(Canvas c) {
+            int bars = 9; int gap = dp(8); int barW = dp(3); int total = bars * barW + (bars - 1) * gap; int start = (getWidth() - total) / 2; int mid = getHeight() / 2;
+            p.setColor(Color.WHITE); p.setStyle(Paint.Style.FILL);
+            for (int i = 0; i < bars; i++) {
+                float distance = Math.abs(i - (bars - 1) / 2f);
+                float scale = Math.max(0.15f, 1f - distance * 0.14f);
+                int h = Math.max(dp(8), Math.round(getHeight() * 0.92f * shown * scale));
+                int x = start + i * (barW + gap);
+                c.drawRect(x, mid - h / 2f, x + barW, mid + h / 2f, p);
+            }
+        }
+    }
+    public class BorderWaveView extends View {
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        float level = 0.05f;
+        float shown = 0.05f;
+        long born = android.os.SystemClock.uptimeMillis();
+        final Runnable tick = new Runnable() {
+            @Override public void run() {
+                shown += (level - shown) * (level < shown ? 0.5f : 0.35f);
+                invalidate();
+                postDelayed(this, 50);
+            }
+        };
+        public BorderWaveView(Context c) {
+            super(c);
+            setBackgroundColor(Color.TRANSPARENT);
+            setClickable(false);
+            setFocusable(false);
+        }
+        @Override protected void onAttachedToWindow() { super.onAttachedToWindow(); born = android.os.SystemClock.uptimeMillis(); removeCallbacks(tick); post(tick); }
+        @Override protected void onDetachedFromWindow() { removeCallbacks(tick); super.onDetachedFromWindow(); }
+        @Override protected void onDraw(Canvas c) {
+            int w = getWidth(), h = getHeight();
+            if (w < 8 || h < 8) return;
+            float breath = 0.5f + 0.5f * (float) Math.sin((android.os.SystemClock.uptimeMillis() - born) / 2400.0 * 2.0 * Math.PI);
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeCap(Paint.Cap.SQUARE);
+            p.setStrokeJoin(Paint.Join.MITER);
+            p.setStrokeWidth(dp(2));
+            p.setColor(Color.argb(Math.round(138 + breath * 22), 255, 255, 255));
+            float m = dp(1);
+            c.drawRect(m, m, w - m, h - m, p);
+            if (shown > 0.12f) {
+                p.setStrokeWidth(1);
+                p.setColor(Color.argb(Math.min(210, 90 + Math.round(shown * 120)), 255, 255, 255));
+                float in = dp(7);
+                c.drawRect(in, in, w - in, h - in, p);
+            }
+        }
+    }
     public class GlobeButton extends View { Paint p = new Paint(Paint.ANTI_ALIAS_FLAG); boolean active = false; public GlobeButton(Context c) { super(c); } @Override protected void onDraw(Canvas c) { if (!active) return; int w=getWidth(), h=getHeight(); float r=Math.min(w,h)*0.25f, cx=w/2f, cy=h/2f; p.setColor(Color.WHITE); p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(Math.max(1f, dp(1))); p.setStrokeCap(Paint.Cap.ROUND); c.drawCircle(cx, cy, r, p); c.drawOval(cx-r*0.45f, cy-r, cx+r*0.45f, cy+r, p); c.drawArc(cx-r, cy-r*0.55f, cx+r, cy+r*0.55f, 0, 360, false, p); c.drawLine(cx-r*0.94f, cy, cx+r*0.94f, cy, p); } }
     public class JumpTextView extends TextView {
         String word = "thinking...";
@@ -8910,7 +8982,7 @@ public class MainActivity extends Activity {
         String role, text, imageBase64 = "", imageMime = "", stats, model, replyQuote, reasoning = "", memorySavedText = "";
         boolean slowVoice = false, reasoningCapable = false, thinkingExpanded = false, searchExpanded = false, memorySaved = false, memoryExpanded = false, ttsRequested = false, ttsPrefetching = false, ttsStarted = false, ttsPlaying = false, ttsStartDelayDone = false, streamDone = false, skipImagesInRequest = false;
         int spokenChars = 0, ttsPlaybackFailures = 0, voiceSessionId = 0, thinkingAnimStep = 0, promptTokens = 0, toolTokens = 0;
-        long startedAt = System.currentTimeMillis(), thoughtMs = 0, jumpAnimStartMs = 0;
+        long startedAt = 0, thoughtMs = 0, jumpAnimStartMs = 0;
         String jumpAnimWord = "";
         transient CharSequence bodyDisplay;
         transient String bodyDisplaySrc = "";
@@ -8922,6 +8994,7 @@ public class MainActivity extends Activity {
         Msg(String r, String t, String i, String m, String s, String modelName) { this(r,t,i,m,s,modelName,""); }
         Msg(String r, String t, String i, String m, String s, String modelName, String reply) {
             role=r; text=t==null?"":t; imageBase64=i==null?"":i; imageMime=m==null?"":m; stats=s==null?"":s; model=modelName==null?"":modelName; replyQuote=reply==null?"":reply;
+            startedAt = System.currentTimeMillis();
             if (imageBase64.length() > 0) images.add(new AttachedImage(imageBase64, imageMime));
         }
         void ensureImagesFromLegacy() {
@@ -8953,11 +9026,12 @@ public class MainActivity extends Activity {
                 if (img == null || img.base64 == null || img.base64.length() == 0) continue;
                 imgs.put(new JSONObject().put("data", img.base64).put("mime", img.mime == null || img.mime.length() == 0 ? "image/jpeg" : img.mime));
             }
-            return new JSONObject().put("role",role).put("text",text).put("image",imageBase64).put("mime",imageMime).put("images",imgs).put("skipImagesInRequest",skipImagesInRequest).put("stats",stats).put("model",model).put("replyQuote",replyQuote).put("reasoning",reasoning).put("thoughtMs",thoughtMs).put("memorySaved",memorySaved).put("memorySavedText",memorySavedText).put("searchSources",src).put("toolSteps",steps).put("promptTokens",promptTokens).put("toolTokens",toolTokens);
+            return new JSONObject().put("role",role).put("text",text).put("image",imageBase64).put("mime",imageMime).put("images",imgs).put("skipImagesInRequest",skipImagesInRequest).put("stats",stats).put("model",model).put("replyQuote",replyQuote).put("reasoning",reasoning).put("startedAt",startedAt).put("thoughtMs",thoughtMs).put("memorySaved",memorySaved).put("memorySavedText",memorySavedText).put("searchSources",src).put("toolSteps",steps).put("promptTokens",promptTokens).put("toolTokens",toolTokens);
         }
         static Msg fromJson(JSONObject o) {
             Msg m = new Msg(o.optString("role"),o.optString("text"),o.optString("image"),o.optString("mime"),o.optString("stats"),o.optString("model"),o.optString("replyQuote"));
             m.reasoning = o.optString("reasoning", "");
+            m.startedAt = o.optLong("startedAt", 0);
             m.thoughtMs = o.optLong("thoughtMs", 0);
             m.memorySaved = o.optBoolean("memorySaved", false);
             m.memorySavedText = o.optString("memorySavedText", "");
