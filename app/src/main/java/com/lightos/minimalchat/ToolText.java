@@ -1339,6 +1339,45 @@ public final class ToolText {
         urls.add(u);
     }
 
+    public static String updateApkFileName(String version) {
+        String v = sanitizeVersion(version);
+        if (v.length() == 0) return "lightui-update.apk";
+        return "lightui-update-" + v + ".apk";
+    }
+
+    public static int versionCodeFromName(String version) {
+        String v = sanitizeVersion(version);
+        if (v.length() == 0) return 0;
+        String[] parts = v.split("\\.");
+        int maj = parts.length > 0 ? parseVersionInt(parts[0]) : 0;
+        int min = parts.length > 1 ? parseVersionInt(parts[1]) : 0;
+        int pat = parts.length > 2 ? parseVersionInt(parts[2]) : 0;
+        return maj * 10000 + min * 100 + pat;
+    }
+
+    public static String sanitizeVersion(String version) {
+        if (version == null) return "";
+        String v = version.trim();
+        if (v.startsWith("v") || v.startsWith("V")) v = v.substring(1);
+        StringBuilder b = new StringBuilder();
+        for (int i = 0; i < v.length(); i++) {
+            char c = v.charAt(i);
+            if ((c >= '0' && c <= '9') || c == '.') b.append(c);
+        }
+        return b.toString();
+    }
+
+    static int parseVersionInt(String s) {
+        if (s == null || s.length() == 0) return 0;
+        int n = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c < '0' || c > '9') break;
+            n = n * 10 + (c - '0');
+        }
+        return n;
+    }
+
     /**
      * SpeechRecognizer onRmsChanged is typically -2..10 dB. Conversational
      * speech sits around 0..4, so a /12 linear map barely moves the bars.
