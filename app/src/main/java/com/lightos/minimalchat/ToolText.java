@@ -1338,4 +1338,37 @@ public final class ToolText {
         for (int i = 0; i < urls.size(); i++) if (u.equals(urls.get(i))) return;
         urls.add(u);
     }
+
+    /**
+     * SpeechRecognizer onRmsChanged is typically -2..10 dB. Conversational
+     * speech sits around 0..4, so a /12 linear map barely moves the bars.
+     * Visual only — do not use this for silence/speech gates.
+     */
+    public static float voiceVisualFromRmsDb(float rmsdB) {
+        return voiceVisualGain((rmsdB + 2f) / 8f);
+    }
+
+    /** Visual 0..1 from a PCM peak (0..32767). Visual only. */
+    public static float voiceVisualFromPeak(int peak) {
+        return voiceVisualGain(peak / 8000f);
+    }
+
+    /** Recorder VAD scale. Keep this stable so auto-stop does not change. */
+    public static float voiceGateFromPeak(int peak) {
+        if (peak < 0) peak = 0;
+        return Math.max(0.05f, Math.min(1f, peak / 14000f));
+    }
+
+    public static float followVoiceShown(float shown, float level) {
+        float k = level > shown ? 0.72f : 0.20f;
+        return shown + (level - shown) * k;
+    }
+
+    static float voiceVisualGain(float normalized) {
+        float n = normalized;
+        if (n < 0f) n = 0f;
+        if (n > 1f) n = 1f;
+        n = (float) Math.pow(n, 0.65);
+        return Math.max(0.05f, n);
+    }
 }
