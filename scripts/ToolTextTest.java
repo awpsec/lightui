@@ -353,6 +353,18 @@ public class ToolTextTest {
         assertEq("latest url",
                 "https://github.com/awpsec/lightui/releases/latest/download/lightui-release.apk", apkUrls[1]);
 
+        assertTrue("silence rms stays low", ToolText.voiceVisualFromRmsDb(-2f) <= 0.08f);
+        assertTrue("talking rms is strong", ToolText.voiceVisualFromRmsDb(2f) >= 0.55f);
+        assertTrue("talking rms beats old /12 map", ToolText.voiceVisualFromRmsDb(2f) > (2f + 2f) / 12f + 0.15f);
+        assertTrue("loud rms hits top", ToolText.voiceVisualFromRmsDb(10f) >= 0.99f);
+        assertTrue("gate quiet unchanged", Math.abs(ToolText.voiceGateFromPeak(1120) - 1120 / 14000f) < 0.001f);
+        assertTrue("gate speech unchanged", ToolText.voiceGateFromPeak(2000) > 0.13f);
+        assertTrue("visual peak louder than gate", ToolText.voiceVisualFromPeak(4000) > ToolText.voiceGateFromPeak(4000) + 0.2f);
+        float rise = ToolText.followVoiceShown(0.1f, 0.8f);
+        float fall = ToolText.followVoiceShown(0.8f, 0.1f);
+        assertTrue("attack is fast", rise >= 0.55f);
+        assertTrue("decay is slower than attack", (0.8f - fall) < (rise - 0.1f));
+
         if (failed > 0) { System.err.println(failed + " failed"); System.exit(1); }
         System.out.println("all passed");
     }

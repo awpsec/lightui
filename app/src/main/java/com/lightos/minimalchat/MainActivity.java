@@ -114,7 +114,7 @@ public class MainActivity extends Activity {
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
     private static final String SEARCHING = "__searching__";
-    private static final String APP_VERSION = "1.0.37";
+    private static final String APP_VERSION = "1.0.38";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 120;
@@ -5687,7 +5687,7 @@ public class MainActivity extends Activity {
         speechRecognizer.setRecognitionListener(new RecognitionListener() {
             @Override public void onReadyForSpeech(Bundle params) { updateVoiceStatus("listening"); setVoiceLevel(0.15f); }
             @Override public void onBeginningOfSpeech() { updateVoiceStatus("listening"); }
-            @Override public void onRmsChanged(float rmsdB) { setVoiceLevel(Math.max(0.05f, Math.min(1f, (rmsdB + 2f) / 12f))); }
+            @Override public void onRmsChanged(float rmsdB) { setVoiceLevel(ToolText.voiceVisualFromRmsDb(rmsdB)); }
             @Override public void onBufferReceived(byte[] buffer) { }
             @Override public void onEndOfSpeech() { vibrateInputEnded(); updateVoiceStatus("thinking..."); setVoiceLevel(0.05f); fadeVoiceWaves(); }
             @Override public void onError(int error) { handleVoiceMiss(); }
@@ -6128,13 +6128,14 @@ public class MainActivity extends Activity {
     private void animateRecorderLevel() {
         if (!recordingFallback || mediaRecorder == null) return;
         try {
-            float level = Math.max(0.05f, Math.min(1f, mediaRecorder.getMaxAmplitude() / 14000f));
-            setVoiceLevel(level);
-            if (level > 0.13f) recorderSpeechFrames++;
+            int amp = mediaRecorder.getMaxAmplitude();
+            float gate = ToolText.voiceGateFromPeak(amp);
+            setVoiceLevel(ToolText.voiceVisualFromPeak(amp));
+            if (gate > 0.13f) recorderSpeechFrames++;
             long now = System.currentTimeMillis();
             if (now - recordingStartedAt > 12000) { stopRecorder(true); return; }
             if (now - recordingStartedAt > 1400) {
-                if (level < 0.08f) {
+                if (gate < 0.08f) {
                     if (quietSince == 0) quietSince = now;
                     if (now - quietSince > 1500) { stopRecorder(true); return; }
                 } else quietSince = 0;
@@ -6189,17 +6190,18 @@ public class MainActivity extends Activity {
                     int sample = (short) ((buf[i] & 0xff) | (buf[i + 1] << 8));
                     max = Math.max(max, Math.abs(sample));
                 }
-                final float level = Math.max(0.05f, Math.min(1f, max / 14000f));
-                if (level > 0.13f) recorderSpeechFrames++;
+                final float gate = ToolText.voiceGateFromPeak(max);
+                final float visual = ToolText.voiceVisualFromPeak(max);
+                if (gate > 0.13f) recorderSpeechFrames++;
                 long now = System.currentTimeMillis();
                 if (now - recordingStartedAt > 12000) ui.post(new Runnable() { @Override public void run() { stopRecorder(true); } });
                 if (now - recordingStartedAt > 1400) {
-                    if (level < 0.08f) {
+                    if (gate < 0.08f) {
                         if (quietSince == 0) quietSince = now;
                         if (now - quietSince > 1500) ui.post(new Runnable() { @Override public void run() { stopRecorder(true); } });
                     } else quietSince = 0;
                 }
-                ui.post(new Runnable() { @Override public void run() { setVoiceLevel(level); } });
+                ui.post(new Runnable() { @Override public void run() { setVoiceLevel(visual); } });
             }
             writeWavHeader(out, sampleRate, pcmBytes);
             out.close();
@@ -8775,9 +8777,9 @@ public class MainActivity extends Activity {
         float shown = 0.05f;
         final Runnable tick = new Runnable() {
             @Override public void run() {
-                shown += (level - shown) * (level < shown ? 0.5f : 0.35f);
+                shown = ToolText.followVoiceShown(shown, level);
                 invalidate();
-                postDelayed(this, 50);
+                postDelayed(this, 40);
             }
         };
         public WaveView(Context c) { super(c); setBackgroundColor(Color.TRANSPARENT); }
@@ -8788,8 +8790,8 @@ public class MainActivity extends Activity {
             p.setColor(Color.WHITE); p.setStyle(Paint.Style.FILL);
             for (int i = 0; i < bars; i++) {
                 float distance = Math.abs(i - (bars - 1) / 2f);
-                float scale = Math.max(0.15f, 1f - distance * 0.14f);
-                int h = Math.max(dp(8), Math.round(getHeight() * 0.92f * shown * scale));
+                float scale = Math.max(0.18f, 1f - distance * 0.12f);
+                int h = Math.max(dp(4), Math.round(getHeight() * 0.94f * shown * scale));
                 int x = start + i * (barW + gap);
                 c.drawRect(x, mid - h / 2f, x + barW, mid + h / 2f, p);
             }
@@ -8802,9 +8804,9 @@ public class MainActivity extends Activity {
         long born = android.os.SystemClock.uptimeMillis();
         final Runnable tick = new Runnable() {
             @Override public void run() {
-                shown += (level - shown) * (level < shown ? 0.5f : 0.35f);
+                shown = ToolText.followVoiceShown(shown, level);
                 invalidate();
-                postDelayed(this, 50);
+                postDelayed(this, 40);
             }
         };
         public BorderWaveView(Context c) {
@@ -8826,9 +8828,9 @@ public class MainActivity extends Activity {
             p.setColor(Color.argb(Math.round(138 + breath * 22), 255, 255, 255));
             float m = dp(1);
             c.drawRect(m, m, w - m, h - m, p);
-            if (shown > 0.12f) {
+            if (shown > 0.08f) {
                 p.setStrokeWidth(1);
-                p.setColor(Color.argb(Math.min(210, 90 + Math.round(shown * 120)), 255, 255, 255));
+                p.setColor(Color.argb(Math.min(220, 70 + Math.round(shown * 150)), 255, 255, 255));
                 float in = dp(7);
                 c.drawRect(in, in, w - in, h - in, p);
             }
