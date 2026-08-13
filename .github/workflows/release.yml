@@ -105,6 +105,6 @@ jobs:
           body: |
             Install `lightui-release.apk` on your Light Phone III / Android device.
 
-            In-app updates: open lightui → settings → tap the version line → **update**.
+            In-app updates: open lightui → settings → tap the version line → **update**. Downloads stay in the app (HTTP/1.1 + resume). No browser sideload.
 
             All GitHub Release APKs are signed with the shared lightui release keystore so updates install over previous release builds.
