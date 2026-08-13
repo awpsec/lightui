@@ -118,7 +118,7 @@ public class MainActivity extends Activity {
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
     private static final String SEARCHING = "__searching__";
-    private static final String APP_VERSION = "1.0.41";
+    private static final String APP_VERSION = "1.0.42";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 48;
@@ -137,6 +137,8 @@ public class MainActivity extends Activity {
     private Runnable pendingChatFilter;
     private ValueAnimator chatSearchAnim;
     private boolean chatSearchOpen = false;
+    private int chatPinGen;
+    private Runnable pendingChatPin;
     private long lastStreamRenderAt = 0;
     private boolean chatsDirty = false;
     private boolean modelsRefreshing = false;
@@ -2502,7 +2504,9 @@ public class MainActivity extends Activity {
             if (chatSearchRow == null || !chatSearchOpen) return;
             setSearchRowPivotFromIcon();
             animateSearchRow(0, target, 0f, 1f, 0, dp(4), 0, dp(6), 160, new DecelerateInterpolator(), new Runnable() {
-                @Override public void run() { showKeyboardFrom(chatSearch); }
+                @Override public void run() {
+                    if (chatSearchOpen && chatSearch != null) showKeyboardFrom(chatSearch);
+                }
             });
             chatSearchRow.animate().scaleX(1f).scaleY(1f).translationY(0).setDuration(160).setInterpolator(new DecelerateInterpolator()).start();
         } });
@@ -2602,8 +2606,11 @@ public class MainActivity extends Activity {
             }
         });
         chatSearchAnim.addListener(new AnimatorListenerAdapter() {
+            boolean cancelled = false;
+            @Override public void onAnimationCancel(Animator a) { cancelled = true; }
             @Override public void onAnimationEnd(Animator a) {
-                chatSearchAnim = null;
+                if (chatSearchAnim == a) chatSearchAnim = null;
+                if (cancelled) return;
                 applySearchRowHeight(toH, toTop, toBot, toA);
                 if (end != null) end.run();
             }
@@ -2612,7 +2619,7 @@ public class MainActivity extends Activity {
     }
 
     private void showKeyboardFrom(final View v) {
-        if (v == null) return;
+        if (v == null || !chatSearchOpen) return;
         v.requestFocus();
         v.post(new Runnable() { @Override public void run() {
             try {
@@ -4259,33 +4266,46 @@ public class MainActivity extends Activity {
         pinChatScrollBottom(scroller, 0, 1);
     }
 
-    private void pinChatToLatest(ScrollView scroller) {
-        pinChatScrollBottom(scroller, 0, 4);
+    private void pinChatToLatest(final ScrollView scroller) {
+        if (scroller == null || messageList == null) return;
+        final int gen = ++chatPinGen;
+        pinChatScrollBottom(scroller, 0, 6);
+        if (pendingChatPin != null) ui.removeCallbacks(pendingChatPin);
+        pendingChatPin = new Runnable() { @Override public void run() {
+            pendingChatPin = null;
+            if (gen != chatPinGen || scroller != scroll || pane != 1) return;
+            scroller.scrollTo(0, chatScrollMax(scroller));
+            userAtChatBottom = true;
+        } };
+        ui.postDelayed(pendingChatPin, 260);
     }
 
     private boolean scrollIsNearBottom(int y) {
         if (scroll == null || messageList == null) return true;
-        int view = scroll.getHeight();
-        int content = chatScrollContentHeight(scroll);
-        int max = Math.max(0, content - view);
-        return max <= dp(8) || y >= max - dp(72);
+        int max = chatScrollMax(scroll);
+        return max <= dp(8) || y >= max - dp(160);
     }
 
     private int chatScrollContentHeight(ScrollView scroller) {
         View child = scroller != null && scroller.getChildCount() > 0 ? scroller.getChildAt(0) : messageList;
         if (child == null) return 0;
-        return Math.max(child.getHeight(), Math.max(child.getMeasuredHeight(), messageList == null ? 0 : messageList.getHeight()));
+        return Math.max(child.getBottom(), Math.max(child.getHeight(), Math.max(child.getMeasuredHeight(), messageList == null ? 0 : messageList.getHeight())));
+    }
+
+    private int chatScrollMax(ScrollView scroller) {
+        if (scroller == null) return 0;
+        int view = scroller.getHeight() - scroller.getPaddingTop() - scroller.getPaddingBottom();
+        return Math.max(0, chatScrollContentHeight(scroller) - view);
     }
 
     private void pinChatScrollBottom(final ScrollView scroller, final int pass, final int passes) {
         if (scroller == null || messageList == null) return;
         int view = scroller.getHeight();
-        int content = chatScrollContentHeight(scroller);
         if (view <= 0 && pass < passes) {
             scroller.post(new Runnable() { @Override public void run() { pinChatScrollBottom(scroller, pass + 1, passes); } });
             return;
         }
-        int max = Math.max(0, content - view);
+        int max = chatScrollMax(scroller);
         if (scroller.getScrollY() != max) scroller.scrollTo(0, max);
         if (pass < passes) {
             scroller.post(new Runnable() { @Override public void run() { pinChatScrollBottom(scroller, pass + 1, passes); } });
