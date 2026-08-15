@@ -118,7 +118,7 @@ public class MainActivity extends Activity {
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
     private static final String SEARCHING = "__searching__";
-    private static final String APP_VERSION = "1.0.42";
+    private static final String APP_VERSION = "1.0.43";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 48;
@@ -1873,8 +1873,8 @@ public class MainActivity extends Activity {
 
     private ArrayList<String> voiceModelChoices(String provider) {
         ArrayList<String> out = new ArrayList<String>();
-        if ("openrouter".equals(provider)) { for (String m : models) if (!"custom".equals(modelSources.get(m))) out.add(m); }
-        else if ("endpoint".equals(provider)) { for (String model : models) if ("custom".equals(modelSources.get(model))) out.add(model); }
+        if ("openrouter".equals(provider)) { for (String m : models) if (!"custom".equals(modelSource(m))) out.add(m); }
+        else if ("endpoint".equals(provider)) { for (String model : models) if ("custom".equals(modelSource(model))) out.add(model); }
         return out;
     }
 
@@ -1902,8 +1902,8 @@ public class MainActivity extends Activity {
             String q = typed.toLowerCase(Locale.US);
             ArrayList<String> shown = new ArrayList<String>();
             addKnownTtsModels(list, d, shown, q);
-            for (String m : models) if (!"custom".equals(modelSources.get(m)) && isTtsModel(m) && (q.length() == 0 || modelMatches(m, q) || isAudioSearch(q))) addTtsChoice(list, d, shown, m);
-            if (q.length() > 0) for (String m : models) if (!"custom".equals(modelSources.get(m)) && isTtsModel(m) && modelMatches(m, q)) addTtsChoice(list, d, shown, m);
+            for (String m : models) if (!"custom".equals(modelSource(m)) && isTtsModel(m) && (q.length() == 0 || modelMatches(m, q) || isAudioSearch(q))) addTtsChoice(list, d, shown, m);
+            if (q.length() > 0) for (String m : models) if (!"custom".equals(modelSource(m)) && isTtsModel(m) && modelMatches(m, q)) addTtsChoice(list, d, shown, m);
             if (typed.length() > 1 && !isAudioSearch(q) && !shown.contains(typed)) addTtsChoice(list, d, shown, typed);
             status.setText(shown.size() + " shown. type to search all openrouter models");
         } };
@@ -1940,8 +1940,8 @@ public class MainActivity extends Activity {
             ArrayList<String> shown = new ArrayList<String>();
             addTranscriptionChoice(list, d, shown, "whisper-1");
             addTranscriptionChoice(list, d, shown, "openai/whisper-1");
-            for (String m : models) if (!"custom".equals(modelSources.get(m)) && isTranscriptionModel(m) && (q.length() == 0 || modelMatches(m, q) || isTranscriptionSearch(q))) addTranscriptionChoice(list, d, shown, m);
-            if (q.length() > 0) for (String m : models) if (!"custom".equals(modelSources.get(m)) && modelMatches(m, q) && (isTranscriptionModel(m) || audioInputModels.contains(m))) addTranscriptionChoice(list, d, shown, m);
+            for (String m : models) if (!"custom".equals(modelSource(m)) && isTranscriptionModel(m) && (q.length() == 0 || modelMatches(m, q) || isTranscriptionSearch(q))) addTranscriptionChoice(list, d, shown, m);
+            if (q.length() > 0) for (String m : models) if (!"custom".equals(modelSource(m)) && modelMatches(m, q) && (isTranscriptionModel(m) || audioInputModels.contains(m))) addTranscriptionChoice(list, d, shown, m);
             if (typed.length() > 1 && !isTranscriptionSearch(q) && !shown.contains(typed)) addTranscriptionChoice(list, d, shown, typed);
             status.setText(shown.size() + " shown. voice-agent input falls back to whisper unless all-in-one");
         } };
@@ -1979,16 +1979,16 @@ public class MainActivity extends Activity {
             String q = search.getText().toString().trim().toLowerCase(Locale.US);
             final ArrayList<String> shownModels = new ArrayList<String>();
             int shown = 0;
-            for (final String m : models) if ("custom".equals(modelSources.get(m)) && (q.length() == 0 || modelMatches(m, q))) { addAnswerChoice(list, d, shownModels, m); shown++; if (shown >= 50) break; }
+            for (final String m : models) if ("custom".equals(modelSource(m)) && (q.length() == 0 || modelMatches(m, q))) { addAnswerChoice(list, d, shownModels, m); shown++; if (shown >= 50) break; }
             for (final String m : myModels) if (shown < 50 && (q.length() == 0 || modelMatches(m, q))) { addAnswerChoice(list, d, shownModels, m); shown = shownModels.size(); }
-            for (final String m : models) if (shown < 50 && !"custom".equals(modelSources.get(m)) && (q.length() == 0 || modelMatches(m, q))) { addAnswerChoice(list, d, shownModels, m); shown = shownModels.size(); }
+            for (final String m : models) if (shown < 50 && !"custom".equals(modelSource(m)) && (q.length() == 0 || modelMatches(m, q))) { addAnswerChoice(list, d, shownModels, m); shown = shownModels.size(); }
             final String typed = search.getText().toString().trim();
-            if (typed.length() > 1 && !models.contains(typed)) {
+            if (typed.length() > 1 && !models.contains(typed) && !models.contains(typedModelKey(typed))) {
                 TextView item = searchResultItem("use " + shortModel(typed), customEndpointBase().length() > 0 ? "endpoint" : "openrouter");
-                item.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { if (!models.contains(typed)) { models.add(0, typed); modelSources.put(typed, customEndpointBase().length() > 0 ? "custom" : "openrouter"); if (customEndpointBase().length() > 0) modelEndpoints.put(typed, customEndpointBase()); saveModels(); saveModelSources(); saveModelEndpoints(); } prefs.edit().putString("voiceAnswerModel", typed).apply(); d.dismiss(); showSettingsPane(); } });
+                item.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { String key = typedModelKey(typed); if (!models.contains(key)) { models.add(0, key); modelSources.put(key, customEndpointBase().length() > 0 ? "custom" : "openrouter"); if (customEndpointBase().length() > 0) modelEndpoints.put(key, customEndpointBase()); saveModels(); saveModelSources(); saveModelEndpoints(); } prefs.edit().putString("voiceAnswerModel", key).apply(); d.dismiss(); showSettingsPane(); } });
                 list.addView(item); shown++;
             }
-            status.setText((shownModels.size() + (typed.length() > 1 && !models.contains(typed) ? 1 : 0)) + " shown. applies only to two-way voice");
+            status.setText((shownModels.size() + (typed.length() > 1 && !models.contains(typed) && !models.contains(typedModelKey(typed)) ? 1 : 0)) + " shown. applies only to two-way voice");
         } };
         search.addTextChangedListener(new TextWatcher() { @Override public void beforeTextChanged(CharSequence s, int st, int c, int a) { } @Override public void onTextChanged(CharSequence s, int st, int b, int c) { render[0].run(); } @Override public void afterTextChanged(Editable e) { } });
         render[0].run();
@@ -2008,7 +2008,10 @@ public class MainActivity extends Activity {
 
     private String answerModelSubtitle(String model) {
         ArrayList<String> tags = new ArrayList<String>();
-        if ("custom".equals(modelSources.get(model))) tags.add("endpoint");
+        if ("custom".equals(modelSource(model))) {
+            String host = ToolText.sourceHost(modelEndpoint(model));
+            tags.add(host.length() > 0 ? "endpoint · " + host : "endpoint");
+        }
         if (audioInputModels.contains(model)) tags.add("audio in");
         if (audioOutputModels.contains(model)) tags.add("audio out");
         if (isReasoningModel(model)) tags.add("reasoning");
@@ -3510,7 +3513,7 @@ public class MainActivity extends Activity {
             for (int round = 0; round < maxRounds; round++) {
                 boolean lastRound = round == maxRounds - 1;
                 rememberPromptTokens(assistant, arr, nativeTools && !lastRound ? tools : null);
-                JSONObject req = AgentTools.completionBody(model, arr, nativeTools ? tools : null, true, lastRound);
+                JSONObject req = AgentTools.completionBody(requestModelId(model), arr, nativeTools ? tools : null, true, lastRound);
                 if (source.equals("openrouter")) req.put("usage", new JSONObject().put("include", true));
                 StreamRound sr;
                 try {
@@ -4490,7 +4493,7 @@ public class MainActivity extends Activity {
 
     private String followupAfterEmptyReply(String key, String source, String model, String userText) throws Exception {
         JSONObject body = new JSONObject();
-        body.put("model", model);
+        body.put("model", requestModelId(model));
         body.put("stream", false);
         JSONArray arr = new JSONArray();
         arr.put(new JSONObject().put("role", "system").put("content", ToolText.emptyReplyFollowupSystem() + buildCurrentTimeContext()));
@@ -4828,7 +4831,7 @@ public class MainActivity extends Activity {
         // Keep sources short — long system dumps kill small/local models.
         if (result.length() > 4000) result = result.substring(0, 4000);
         JSONObject body = new JSONObject();
-        body.put("model", model);
+        body.put("model", requestModelId(model));
         JSONArray arr = new JSONArray();
         String system = ToolText.webSearchFollowupSystem(retry, attemptIndex) + buildCurrentTimeContext();
         arr.put(new JSONObject().put("role", "system").put("content", system));
@@ -4927,7 +4930,7 @@ public class MainActivity extends Activity {
     private String followupAfterMemoryTool(String key, String source, String model, String userText) {
         try {
             JSONObject body = new JSONObject();
-            body.put("model", model);
+            body.put("model", requestModelId(model));
             body.put("stream", false);
             JSONArray arr = new JSONArray();
             arr.put(new JSONObject().put("role", "system").put("content", "Your previous response contained only a private memory tool call. Do not output any tool calls. Answer the user's message naturally and briefly."));
@@ -4986,7 +4989,7 @@ public class MainActivity extends Activity {
 
     private String generateChatTitle(String key, String source, String model, ArrayList<Msg> titleMessages) throws Exception {
         JSONObject body = new JSONObject();
-        body.put("model", model);
+        body.put("model", requestModelId(model));
         body.put("stream", false);
         JSONArray arr = new JSONArray();
         arr.put(new JSONObject().put("role", "system").put("content", "Name this chat in 2-5 words. Return only the title. No quotes, punctuation, emoji, or extra text."));
@@ -5865,9 +5868,9 @@ public class MainActivity extends Activity {
                 }
             }
             final String typed = search.getText().toString().trim();
-            if (typed.length() > 1 && !myModels.contains(typed)) {
+            if (typed.length() > 1 && !myModels.contains(typed) && !myModels.contains(typedModelKey(typed))) {
                 TextView item = searchResultItem("use " + shortModel(typed), customEndpointBase().length() > 0 ? "endpoint" : "openrouter");
-                item.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); addMyModel(typed); } });
+                item.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); addMyModel(typedModelKey(typed)); } });
                 list.addView(item);
             }
         } };
@@ -5882,7 +5885,18 @@ public class MainActivity extends Activity {
     private void addMyModel(String m) {
         m = m == null ? "" : m.trim();
         if (m.length() == 0) return;
-        if (!models.contains(m)) { models.add(0, m); modelSources.put(m, customEndpointBase().length() > 0 ? "custom" : "openrouter"); if (customEndpointBase().length() > 0) modelEndpoints.put(m, customEndpointBase()); saveModels(); saveModelSources(); saveModelEndpoints(); }
+        if (!models.contains(m) && !ToolText.isCustomModelKey(m) && customEndpointBase().length() > 0) {
+            m = typedModelKey(m);
+        }
+        if (!models.contains(m)) {
+            models.add(0, m);
+            modelSources.put(m, ToolText.isCustomModelKey(m) || customEndpointBase().length() > 0 ? "custom" : "openrouter");
+            if ("custom".equals(modelSources.get(m))) {
+                String endpoint = ToolText.customModelEndpoint(m);
+                modelEndpoints.put(m, endpoint.length() > 0 ? endpoint : customEndpointBase());
+            }
+            saveModels(); saveModelSources(); saveModelEndpoints();
+        }
         if (!myModels.contains(m)) { myModels.add(m); saveMyModels(); }
         toast("added " + shortModel(m));
         if (pane == 2) showSettingsPane();
@@ -5900,9 +5914,11 @@ public class MainActivity extends Activity {
     private boolean modelMatches(String model, String query) {
         String q = query.toLowerCase(Locale.US).trim();
         String full = model.toLowerCase(Locale.US);
+        String api = ToolText.modelApiId(model).toLowerCase(Locale.US);
         String shortName = shortModel(model).toLowerCase(Locale.US);
+        String host = ToolText.sourceHost(modelEndpoint(model)).toLowerCase(Locale.US);
         String meta = modelSearchText.containsKey(model) ? modelSearchText.get(model).toLowerCase(Locale.US) : "";
-        return full.contains(q) || shortName.contains(q) || meta.contains(q) || normalized(full).contains(normalized(q)) || normalized(meta).contains(normalized(q));
+        return full.contains(q) || api.contains(q) || shortName.contains(q) || (host.length() > 0 && host.contains(q)) || meta.contains(q) || normalized(full).contains(normalized(q)) || normalized(meta).contains(normalized(q));
     }
 
     private String normalized(String s) {
@@ -5959,7 +5975,9 @@ public class MainActivity extends Activity {
                         if (typedEndpoint.equals(endpoint) && typedKey.length() > 0) setEndpointKey(endpoint, typedKey);
                     }
                     models.clear(); models.addAll(found); modelContexts.clear(); modelContexts.putAll(foundContexts); modelSources.clear(); modelSources.putAll(foundSources); modelEndpoints.clear(); modelEndpoints.putAll(foundEndpoints); audioOutputModels.clear(); audioOutputModels.addAll(foundAudioOutput); audioInputModels.clear(); audioInputModels.addAll(foundAudioInput); reasoningModels.clear(); reasoningModels.addAll(foundReasoning); speedModels.clear(); speedModels.addAll(foundSpeed);
+                    migrateLoadedMyModelLists();
                     for (String m : found) if ("custom".equals(foundSources.get(m)) && !myModels.contains(m)) myModels.add(m);
+                    retargetSelectedModelIfNeeded();
                     saveCustomEndpoints(); saveEndpointKeys(); saveModels(); saveModelContexts(); saveModelSources(); saveModelEndpoints(); saveAudioOutputModels(); saveAudioInputModels(); saveReasoningModels(); saveSpeedModels(); saveMyModels(); savePinnedModels();
                     prefs.edit().putLong("modelsRefreshedAt", System.currentTimeMillis()).apply();
                     if (manual) toast("models updated");
@@ -5988,20 +6006,22 @@ public class MainActivity extends Activity {
         for (int i = 0; i < data.length(); i++) {
             JSONObject model = data.getJSONObject(i);
             String id = model.getString("id");
+            String catalogId = ToolText.catalogModelKey(source, endpoint, id);
             String name = model.optString("name", "");
             String description = model.optString("description", "");
-            if (!found.contains(id)) found.add(id);
-            foundSources.put(id, source);
-            modelSearchText.put(id, (name.length() > 0 ? name : shortModel(id)) + "\n" + id + "\n" + description);
-            if ("custom".equals(source)) foundEndpoints.put(id, normalizeEndpoint(endpoint));
-            if (foundAudioOutput != null && hasAudioOutput(model, id, name)) foundAudioOutput.add(id);
-            if (foundAudioInput != null && hasAudioInput(model, id, name, description)) foundAudioInput.add(id);
-            if (foundReasoning != null && hasReasoningCapability(model, id, name, description)) foundReasoning.add(id);
-            if (foundSpeed != null && hasSpeedParameter(model, id, name, description)) foundSpeed.add(id);
+            if (!found.contains(catalogId)) found.add(catalogId);
+            foundSources.put(catalogId, source);
+            String host = "custom".equals(source) ? ToolText.sourceHost(normalizeEndpoint(endpoint)) : "";
+            modelSearchText.put(catalogId, (name.length() > 0 ? name : shortModel(catalogId)) + "\n" + id + "\n" + catalogId + "\n" + description + (host.length() > 0 ? "\n" + host : ""));
+            if ("custom".equals(source)) foundEndpoints.put(catalogId, normalizeEndpoint(endpoint));
+            if (foundAudioOutput != null && hasAudioOutput(model, id, name)) foundAudioOutput.add(catalogId);
+            if (foundAudioInput != null && hasAudioInput(model, id, name, description)) foundAudioInput.add(catalogId);
+            if (foundReasoning != null && hasReasoningCapability(model, id, name, description)) foundReasoning.add(catalogId);
+            if (foundSpeed != null && hasSpeedParameter(model, id, name, description)) foundSpeed.add(catalogId);
             int context = model.optInt("context_length", 0);
             JSONObject top = model.optJSONObject("top_provider");
             if (context <= 0 && top != null) context = top.optInt("context_length", 0);
-            if (context > 0) foundContexts.put(id, context);
+            if (context > 0) foundContexts.put(catalogId, context);
         }
     }
 
@@ -6073,7 +6093,7 @@ public class MainActivity extends Activity {
     }
 
     private String customEndpointBase() { return customEndpoints.size() == 0 ? "" : customEndpoints.get(0); }
-    private String normalizeEndpoint(String endpoint) { String e = endpoint == null ? "" : endpoint.trim(); while (e.endsWith("/")) e = e.substring(0, e.length() - 1); return e; }
+    private String normalizeEndpoint(String endpoint) { return ToolText.normalizeEndpoint(endpoint); }
     private String chatCompletionsUrl(String source) { return chatCompletionsUrl(source, selectedModel()); }
     private String chatCompletionsUrl(String source, String model) { return (source.equals("custom") ? modelEndpoint(model) : OPENROUTER_ENDPOINT) + "/chat/completions"; }
 
@@ -6139,6 +6159,14 @@ public class MainActivity extends Activity {
                 customEndpoints.add(to);
             }
             endpointKeys.remove(from);
+            HashMap<String, String> renamed = new HashMap<String, String>();
+            for (String m : new ArrayList<String>(models)) {
+                boolean match = from.equals(modelEndpoints.get(m)) || from.equals(ToolText.customModelEndpoint(m));
+                if (!match) continue;
+                String nk = ToolText.customModelKey(to, ToolText.modelApiId(m));
+                if (!nk.equals(m)) renamed.put(m, nk);
+            }
+            for (String fromId : renamed.keySet()) remapModelIdentity(fromId, renamed.get(fromId));
             for (String m : new ArrayList<String>(modelEndpoints.keySet())) {
                 if (from.equals(modelEndpoints.get(m))) modelEndpoints.put(m, to);
             }
@@ -6161,7 +6189,10 @@ public class MainActivity extends Activity {
         endpointKeys.remove(endpoint);
         for (int i = models.size() - 1; i >= 0; i--) {
             String m = models.get(i);
-            if (endpoint.equals(modelEndpoints.get(m))) { if (m.equals(selectedModel())) removedSelected = true; models.remove(i); myModels.remove(m); pinnedModels.remove(m); modelContexts.remove(m); modelSources.remove(m); modelEndpoints.remove(m); }
+            if (endpoint.equals(modelEndpoints.get(m)) || endpoint.equals(ToolText.customModelEndpoint(m))) {
+                if (m.equals(selectedModel())) removedSelected = true;
+                models.remove(i); myModels.remove(m); pinnedModels.remove(m); modelContexts.remove(m); modelSources.remove(m); modelEndpoints.remove(m);
+            }
         }
         if (removedSelected) prefs.edit().remove("model").putBoolean("modelSelected", false).apply();
         saveCustomEndpoints(); saveEndpointKeys(); saveModels(); saveMyModels(); savePinnedModels(); saveModelContexts(); saveModelSources(); saveModelEndpoints();
@@ -6895,7 +6926,7 @@ public class MainActivity extends Activity {
         long start = System.nanoTime();
         try {
             JSONObject body = new JSONObject();
-            body.put("model", model);
+            body.put("model", requestModelId(model));
             body.put("modalities", new JSONArray().put("text").put("audio"));
             body.put("audio", new JSONObject().put("voice", ttsVoiceForModel(model)).put("format", "pcm16"));
             JSONArray arr = new JSONArray();
@@ -7091,7 +7122,7 @@ public class MainActivity extends Activity {
         if (key.length() == 0) throw new RuntimeException("add openrouter key");
         String model = openRouterTranscriptionModel(configuredVoiceInputModel());
         JSONObject body = new JSONObject();
-        body.put("model", model);
+        body.put("model", requestModelId(model));
         body.put("temperature", 0);
         body.put("max_tokens", 120);
         JSONArray content = new JSONArray();
@@ -7572,7 +7603,7 @@ public class MainActivity extends Activity {
         JSONObject body = new JSONObject();
         String model = prefs.getString("voiceEndpointTtsModel", "").trim();
         if (model.length() == 0) model = "tts-1";
-        body.put("model", model);
+        body.put("model", requestModelId(model));
         String voice = ttsVoiceForModel(model);
         if (model.toLowerCase(Locale.US).contains("voxtral")) body.put("voice_id", voice);
         else body.put("voice", voice);
@@ -7620,7 +7651,7 @@ public class MainActivity extends Activity {
 
     private File requestOpenRouterChatAudio(String text, String model) throws Exception {
         JSONObject body = new JSONObject();
-        body.put("model", model);
+        body.put("model", requestModelId(model));
         body.put("modalities", new JSONArray().put("text").put("audio"));
         body.put("audio", new JSONObject().put("voice", ttsVoiceForModel(model)).put("format", isOpenRouterChatAudioModel(model) ? "pcm16" : "mp3"));
         JSONArray ttsMessages = new JSONArray();
@@ -7711,7 +7742,7 @@ public class MainActivity extends Activity {
 
     private File requestOpenRouterSpeechEndpoint(String text, String model) throws Exception {
         JSONObject body = new JSONObject();
-        body.put("model", model);
+        body.put("model", requestModelId(model));
         if (model.toLowerCase(Locale.US).contains("voxtral")) body.put("voice_id", ttsVoiceForModel(model));
         else body.put("voice", ttsVoiceForModel(model));
         body.put("input", text);
@@ -8364,7 +8395,9 @@ public class MainActivity extends Activity {
         }
     }
     private String chatModelForSave() { for (int i = messages.size() - 1; i >= 0; i--) if (messages.get(i).role.equals("assistant") && messages.get(i).model.length() > 0) return expandShortModel(messages.get(i).model); return activeAnswerModel(); }
-    private String expandShortModel(String label) { for (String m : models) if (shortModel(m).equals(label) || m.equals(label)) return m; return label; }
+    private String expandShortModel(String label) {
+        return ToolText.resolveModelKey(label, myModels, models, selectedModel(), savedApiKey().length() > 0, customEndpointBase());
+    }
 
     private void attachClipboardImageIfPresent() {
         if (pendingImages.size() > 0) return;
@@ -8719,15 +8752,35 @@ public class MainActivity extends Activity {
                 if (list.size() > 0) discoveredVoices.put(key, list);
             }
         } catch (Exception ignored) { }
-        for (String m : models) if (!modelSources.containsKey(m)) modelSources.put(m, "openrouter");
-        for (String m : models) if ("custom".equals(modelSources.get(m)) && !modelEndpoints.containsKey(m) && customEndpointBase().length() > 0) modelEndpoints.put(m, customEndpointBase());
+        migrateCustomModelIdentities();
+        for (String m : models) {
+            if (modelSources.containsKey(m)) continue;
+            modelSources.put(m, ToolText.isCustomModelKey(m) ? "custom" : "openrouter");
+        }
+        for (String m : models) {
+            if (!"custom".equals(modelSource(m))) continue;
+            String mappedEndpoint = modelEndpoints.get(m);
+            if (mappedEndpoint != null && mappedEndpoint.length() > 0) continue;
+            String fromKey = ToolText.customModelEndpoint(m);
+            modelEndpoints.put(m, fromKey.length() > 0 ? fromKey : customEndpointBase());
+        }
         String savedMyModels = prefs.getString("myModels", ""); if (savedMyModels.length() > 0) for (String m : savedMyModels.split("\\n")) { String clean = m.trim(); if (clean.length() > 0 && !myModels.contains(clean)) myModels.add(clean); }
-        String savedPins = prefs.getString("pinnedModels", ""); if (savedPins.length() > 0) for (String m : savedPins.split("\\n")) { String clean = m.trim(); if (clean.length() > 0 && myModels.contains(clean) && !pinnedModels.contains(clean)) pinnedModels.add(clean); }
+        String savedPins = prefs.getString("pinnedModels", ""); if (savedPins.length() > 0) for (String m : savedPins.split("\\n")) { String clean = m.trim(); if (clean.length() > 0 && !pinnedModels.contains(clean)) pinnedModels.add(clean); }
+        migrateLoadedMyModelLists();
+        for (int i = pinnedModels.size() - 1; i >= 0; i--) if (!myModels.contains(pinnedModels.get(i))) pinnedModels.remove(i);
         String selected = prefs.getString("model", "").trim();
         if (prefs.getBoolean("modelSelected", false) && selected.length() > 0 && !myModels.contains(selected)) myModels.add(selected);
+        retargetSelectedModelIfNeeded();
         saveModels();
         saveMyModels();
         savePinnedModels();
+        saveModelSources();
+        saveModelEndpoints();
+        saveModelContexts();
+        saveAudioInputModels();
+        saveAudioOutputModels();
+        saveReasoningModels();
+        saveSpeedModels();
     }
     private JSONObject folderInstructionsJson() { JSONObject o = new JSONObject(); try { for (String folder : folderInstructions.keySet()) { String instruction = folderInstructions.get(folder); if (instruction != null && instruction.trim().length() > 0 && folders.contains(folder)) o.put(folder, instruction.trim()); } } catch (Exception ignored) { } return o; }
     private String folderInstruction(String folder) { String s = folderInstructions.get(folder == null ? "" : folder); return s == null ? "" : s.trim(); }
@@ -8839,15 +8892,24 @@ public class MainActivity extends Activity {
     private void removeCustomModels() {
         for (int i = models.size() - 1; i >= 0; i--) {
             String m = models.get(i);
-            if ("custom".equals(modelSources.get(m))) { models.remove(i); myModels.remove(m); pinnedModels.remove(m); modelContexts.remove(m); modelSources.remove(m); modelEndpoints.remove(m); }
+            if ("custom".equals(modelSource(m))) { models.remove(i); myModels.remove(m); pinnedModels.remove(m); modelContexts.remove(m); modelSources.remove(m); modelEndpoints.remove(m); }
         }
     }
     private String selectedModel() { return prefs.getBoolean("modelSelected", false) ? prefs.getString("model", "") : ""; }
-    private String selectedModelSource() { return modelSources.containsKey(selectedModel()) ? modelSources.get(selectedModel()) : "openrouter"; }
-    private String selectedModelEndpoint() { String endpoint = modelEndpoints.get(selectedModel()); return endpoint == null ? customEndpointBase() : endpoint; }
+    private String selectedModelSource() { return modelSource(selectedModel()); }
+    private String selectedModelEndpoint() { return modelEndpoint(selectedModel()); }
     private String activeAnswerModel() { return voiceMode && voiceFullMode && voiceAnswerModel().length() > 0 ? voiceAnswerModel() : selectedModel(); }
-    private String modelSource(String model) { return modelSources.containsKey(model) ? modelSources.get(model) : "openrouter"; }
-    private String modelEndpoint(String model) { String endpoint = modelEndpoints.get(model); return endpoint == null ? customEndpointBase() : endpoint; }
+    private String modelSource(String model) {
+        if (ToolText.isCustomModelKey(model)) return "custom";
+        return modelSources.containsKey(model) ? modelSources.get(model) : "openrouter";
+    }
+    private String modelEndpoint(String model) {
+        String fromKey = ToolText.customModelEndpoint(model);
+        if (fromKey.length() > 0) return fromKey;
+        String endpoint = modelEndpoints.get(model);
+        if (endpoint != null && endpoint.length() > 0) return endpoint;
+        return "custom".equals(modelSource(model)) ? customEndpointBase() : "";
+    }
     private String modelSourceLabel(String m) { return ToolText.modelProviderLabel(m, modelSource(m)); }
     private String modelLabel() {
         String m = selectedModel();
@@ -8861,7 +8923,120 @@ public class MainActivity extends Activity {
         return vendor + " · " + name;
     }
     private String messageModelLabel(Msg m) { return m.model.length() == 0 ? "assistant" : m.model; }
-    private String shortModel(String m) { int slash = m.lastIndexOf('/'); return slash >= 0 ? m.substring(slash + 1) : m; }
+    private String shortModel(String m) { return ToolText.shortModel(m); }
+    private String requestModelId(String model) { return ToolText.modelApiId(model); }
+    private String typedModelKey(String typed) {
+        String t = typed == null ? "" : typed.trim();
+        if (t.length() == 0) return t;
+        if (ToolText.isCustomModelKey(t) || models.contains(t) || myModels.contains(t)) return t;
+        if (customEndpointBase().length() > 0) return ToolText.customModelKey(customEndpointBase(), t);
+        return t;
+    }
+    private void migrateCustomModelIdentities() {
+        ArrayList<String> ids = new ArrayList<String>();
+        for (String m : models) if (!ids.contains(m)) ids.add(m);
+        for (String m : modelSources.keySet()) if (!ids.contains(m)) ids.add(m);
+        for (String m : modelEndpoints.keySet()) if (!ids.contains(m)) ids.add(m);
+        HashMap<String, String> renamed = new HashMap<String, String>();
+        for (String m : ids) {
+            if (m == null || m.length() == 0 || ToolText.isCustomModelKey(m)) continue;
+            String source = modelSources.get(m);
+            String endpoint = modelEndpoints.get(m);
+            if (endpoint == null || endpoint.length() == 0) endpoint = customEndpointBase();
+            if (!shouldNamespaceAsCustom(m, source, endpoint)) continue;
+            String nk = ToolText.customModelKey(endpoint, m);
+            if (nk.length() > 0 && !nk.equals(m)) renamed.put(m, nk);
+        }
+        for (String from : renamed.keySet()) remapModelIdentity(from, renamed.get(from));
+    }
+    private void migrateLoadedMyModelLists() {
+        ArrayList<String> extra = new ArrayList<String>(myModels);
+        extra.addAll(pinnedModels);
+        HashMap<String, String> renamed = new HashMap<String, String>();
+        for (String m : extra) {
+            if (m == null || m.length() == 0 || ToolText.isCustomModelKey(m) || renamed.containsKey(m)) continue;
+            String source = modelSources.containsKey(m) ? modelSources.get(m) : modelSource(m);
+            String endpoint = modelEndpoints.get(m);
+            if (endpoint == null || endpoint.length() == 0) endpoint = customEndpointBase();
+            if (!shouldNamespaceAsCustom(m, source, endpoint)) continue;
+            String nk = ToolText.customModelKey(endpoint, m);
+            if (nk.length() > 0 && !nk.equals(m)) renamed.put(m, nk);
+        }
+        for (String from : renamed.keySet()) remapModelIdentity(from, renamed.get(from));
+    }
+    private boolean shouldNamespaceAsCustom(String id, String source, String endpoint) {
+        if (id == null || id.length() == 0 || ToolText.isCustomModelKey(id)) return false;
+        if (endpoint == null || endpoint.length() == 0) return false;
+        if ("custom".equals(source)) return true;
+        if (id.indexOf('/') >= 0) return false;
+        String mapped = modelEndpoints.get(id);
+        return savedApiKey().length() == 0 || (mapped != null && mapped.length() > 0);
+    }
+    private void retargetSelectedModelIfNeeded() {
+        SharedPreferences.Editor e = prefs.edit();
+        boolean dirty = false;
+        String selected = prefs.getString("model", "").trim();
+        if (selected.length() > 0 && "openrouter".equals(modelSource(selected)) && savedApiKey().length() == 0) {
+            String alt = customModelWithSlug(shortModel(selected));
+            if (alt.length() > 0) {
+                e.putString("model", alt);
+                if (!myModels.contains(alt)) myModels.add(alt);
+                dirty = true;
+            }
+        }
+        String voiceAns = prefs.getString("voiceAnswerModel", "").trim();
+        if (voiceAns.length() > 0 && "openrouter".equals(modelSource(voiceAns)) && savedApiKey().length() == 0) {
+            String alt = customModelWithSlug(shortModel(voiceAns));
+            if (alt.length() > 0) {
+                e.putString("voiceAnswerModel", alt);
+                dirty = true;
+            }
+        }
+        if (dirty) e.apply();
+    }
+    private String customModelWithSlug(String slug) {
+        String want = slug == null ? "" : slug.trim();
+        if (want.length() == 0) return "";
+        for (String m : myModels) if ("custom".equals(modelSource(m)) && shortModel(m).equals(want)) return m;
+        for (String m : models) if ("custom".equals(modelSource(m)) && shortModel(m).equals(want)) return m;
+        return "";
+    }
+    private void remapModelIdentity(String from, String to) {
+        if (from == null || to == null || from.equals(to) || to.length() == 0) return;
+        replaceInModelList(models, from, to);
+        replaceInModelList(myModels, from, to);
+        replaceInModelList(pinnedModels, from, to);
+        remapModelMap(modelContexts, from, to);
+        remapModelMap(modelSources, from, to);
+        remapModelMap(modelEndpoints, from, to);
+        remapModelMap(modelSearchText, from, to);
+        if (audioInputModels.remove(from)) audioInputModels.add(to);
+        if (audioOutputModels.remove(from)) audioOutputModels.add(to);
+        if (reasoningModels.remove(from)) reasoningModels.add(to);
+        if (speedModels.remove(from)) speedModels.add(to);
+        if (ToolText.isCustomModelKey(to)) {
+            modelSources.put(to, "custom");
+            String ep = ToolText.customModelEndpoint(to);
+            if (ep.length() > 0 && !modelEndpoints.containsKey(to)) modelEndpoints.put(to, ep);
+        }
+        if (from.equals(prefs.getString("model", ""))) prefs.edit().putString("model", to).apply();
+        if (from.equals(prefs.getString("voiceAnswerModel", ""))) prefs.edit().putString("voiceAnswerModel", to).apply();
+        if (from.equals(prefs.getString("voiceTranscribeModel", ""))) prefs.edit().putString("voiceTranscribeModel", to).apply();
+        if (from.equals(prefs.getString("voiceTtsModel", ""))) prefs.edit().putString("voiceTtsModel", to).apply();
+        if (from.equals(prefs.getString("voiceEndpointTtsModel", ""))) prefs.edit().putString("voiceEndpointTtsModel", to).apply();
+    }
+    private void replaceInModelList(ArrayList<String> list, String from, String to) {
+        for (int i = 0; i < list.size(); i++) {
+            if (!from.equals(list.get(i))) continue;
+            if (list.contains(to)) list.remove(i--);
+            else list.set(i, to);
+        }
+    }
+    private <T> void remapModelMap(HashMap<String, T> map, String from, String to) {
+        if (!map.containsKey(from)) return;
+        T v = map.remove(from);
+        if (!map.containsKey(to)) map.put(to, v);
+    }
     private String thoughtDuration(long ms) { long s = Math.max(1, Math.round(ms / 1000f)); long m = s / 60; long r = s % 60; return m > 0 ? m + " minutes and " + r + " seconds" : s + " seconds"; }
     private int estimateTokens(String s) { return ToolText.estimateTokens(s); }
     private String requestText(Msg m) {
