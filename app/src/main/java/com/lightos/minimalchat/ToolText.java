@@ -957,6 +957,26 @@ public final class ToolText {
         return u.trim();
     }
 
+    /**
+     * Host[:port] for endpoint model cards. Keeps the port so two local servers on the
+     * same hostname (tts vs gen) stay distinct. Search favicons still use sourceHost.
+     */
+    public static String endpointCardHost(String url) {
+        if (url == null) return "";
+        String u = url.trim();
+        int scheme = u.indexOf("://");
+        if (scheme >= 0) u = u.substring(scheme + 3);
+        int slash = u.indexOf('/');
+        if (slash >= 0) u = u.substring(0, slash);
+        int at = u.lastIndexOf('@');
+        if (at >= 0) u = u.substring(at + 1);
+        int colon = u.indexOf(':');
+        String host = colon >= 0 ? u.substring(0, colon) : u;
+        String port = colon >= 0 ? u.substring(colon) : "";
+        if (host.toLowerCase(Locale.US).startsWith("www.")) host = host.substring(4);
+        return (host + port).trim();
+    }
+
     public static String sourceLetter(String host) {
         if (host == null) return "?";
         String h = host.trim();
@@ -1168,6 +1188,74 @@ public final class ToolText {
         if (!isCustomModelKey(key)) return "";
         String[] parts = key.split("\\|", 3);
         return parts.length >= 2 ? normalizeEndpoint(parts[1]) : "";
+    }
+
+    public static boolean isKnownEndpoint(String endpoint, ArrayList<String> known) {
+        String n = normalizeEndpoint(endpoint);
+        if (n.length() == 0 || known == null) return false;
+        for (int i = 0; i < known.size(); i++) {
+            if (n.equals(normalizeEndpoint(known.get(i)))) return true;
+        }
+        return false;
+    }
+
+    /**
+     * If SharedPreferences still has the real URL for a model that was namespaced
+     * onto the wrong (usually first) endpoint, move it to that URL.
+     * Does not guess customEndpoints[0].
+     */
+    public static String repairCustomIdentity(String stored, String mappedEndpoint, ArrayList<String> knownEndpoints) {
+        String s = stored == null ? "" : stored.trim();
+        if (s.length() == 0) return s;
+        String mapped = normalizeEndpoint(mappedEndpoint);
+        if (mapped.length() == 0 || !isKnownEndpoint(mapped, knownEndpoints)) return s;
+        String api = modelApiId(s);
+        if (api.length() == 0) return s;
+        String keyEp = customModelEndpoint(s);
+        if (keyEp.equals(mapped)) return s;
+        return customModelKey(mapped, api);
+    }
+
+    /**
+     * Map a stored model id onto a freshly fetched catalog.
+     * If the stored key points at an endpoint that does not serve this slug, and
+     * exactly one catalog row does, use that row — never the first saved endpoint.
+     */
+    public static String rebindStoredModel(String stored, ArrayList<String> catalog,
+            String mappedEndpoint, ArrayList<String> knownEndpoints) {
+        String s = stored == null ? "" : stored.trim();
+        if (s.length() == 0) return s;
+        if (listHas(catalog, s)) return s;
+        String api = modelApiId(s);
+        if (api.length() == 0) return s;
+        String keyEp = customModelEndpoint(s);
+        String ep = normalizeEndpoint(mappedEndpoint);
+        if (ep.length() == 0) ep = keyEp;
+        if (ep.length() > 0) {
+            String keyed = customModelKey(ep, api);
+            if (listHas(catalog, keyed)) return keyed;
+        }
+        ArrayList<String> same = catalogMatchesForApi(catalog, api);
+        if (same.size() == 1) return same.get(0);
+        if (keyEp.length() > 0) {
+            String keyed = customModelKey(keyEp, api);
+            if (listHas(catalog, keyed)) return keyed;
+            if (same.size() > 0 && !listHas(catalog, keyed)) return same.get(0);
+        }
+        if (same.size() == 1) return same.get(0);
+        return s;
+    }
+
+    public static ArrayList<String> catalogMatchesForApi(ArrayList<String> catalog, String apiId) {
+        ArrayList<String> same = new ArrayList<String>();
+        String api = apiId == null ? "" : apiId.trim();
+        if (api.length() == 0 || catalog == null) return same;
+        for (int i = 0; i < catalog.size(); i++) {
+            String c = catalog.get(i);
+            if (c == null || c.length() == 0) continue;
+            if (isCustomModelKey(c) && api.equals(modelApiId(c)) && !same.contains(c)) same.add(c);
+        }
+        return same;
     }
 
     /** Display slug. Does not take the last `/` of a `custom|https://host/v1|id` key. */
