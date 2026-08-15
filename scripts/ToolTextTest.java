@@ -369,6 +369,45 @@ public class ToolTextTest {
         assertTrue("version code from tag", ToolText.versionCodeFromName("v1.0.38") == 10038);
         assertTrue("empty version code", ToolText.versionCodeFromName("") == 0);
 
+        String customKey = ToolText.customModelKey("https://api.example.com/v1/", "kimi-k2.5-lightning");
+        assertEq("custom key", "custom|https://api.example.com/v1|kimi-k2.5-lightning", customKey);
+        assertTrue("is custom key", ToolText.isCustomModelKey(customKey));
+        assertTrue("openrouter is not custom", !ToolText.isCustomModelKey("moonshotai/kimi-k2.5-lightning"));
+        assertEq("api id from custom", "kimi-k2.5-lightning", ToolText.modelApiId(customKey));
+        assertEq("api id from openrouter", "moonshotai/kimi-k2.5-lightning",
+                ToolText.modelApiId("moonshotai/kimi-k2.5-lightning"));
+        assertEq("custom endpoint", "https://api.example.com/v1", ToolText.customModelEndpoint(customKey));
+        assertEq("short custom ignores url slashes", "kimi-k2.5-lightning", ToolText.shortModel(customKey));
+        assertEq("short openrouter", "kimi-k2.5-lightning", ToolText.shortModel("moonshotai/kimi-k2.5-lightning"));
+        assertEq("catalog custom", customKey,
+                ToolText.catalogModelKey("custom", "https://api.example.com/v1", "kimi-k2.5-lightning"));
+        assertEq("catalog openrouter", "moonshotai/kimi-k2.5-lightning",
+                ToolText.catalogModelKey("openrouter", "", "moonshotai/kimi-k2.5-lightning"));
+        assertTrue("same slug different keys",
+                !customKey.equals("moonshotai/kimi-k2.5-lightning")
+                        && ToolText.shortModel(customKey).equals(ToolText.shortModel("moonshotai/kimi-k2.5-lightning")));
+        assertEq("provider custom", "endpoint", ToolText.modelProviderLabel(customKey, "custom"));
+        assertEq("provider openrouter vendor", "moonshotai",
+                ToolText.modelProviderLabel("moonshotai/kimi-k2.5-lightning", "openrouter"));
+        assertEq("idempotent custom key", customKey, ToolText.customModelKey("https://api.example.com/v1", customKey));
+
+        ArrayList<String> catalog = new ArrayList<String>();
+        catalog.add("moonshotai/kimi-k2.5-lightning");
+        catalog.add(customKey);
+        ArrayList<String> mine = new ArrayList<String>();
+        mine.add(customKey);
+        mine.add("moonshotai/kimi-k2.5-lightning");
+        assertEq("resolve exact custom", customKey,
+                ToolText.resolveModelKey(customKey, mine, catalog, customKey, false, "https://api.example.com/v1"));
+        assertEq("resolve slug prefers custom without or key", customKey,
+                ToolText.resolveModelKey("kimi-k2.5-lightning", mine, catalog, "", false, "https://api.example.com/v1"));
+        assertEq("resolve slug follows selected openrouter", "moonshotai/kimi-k2.5-lightning",
+                ToolText.resolveModelKey("kimi-k2.5-lightning", mine, catalog,
+                        "moonshotai/kimi-k2.5-lightning", true, "https://api.example.com/v1"));
+        assertEq("resolve missing slug namespaces", customKey,
+                ToolText.resolveModelKey("kimi-k2.5-lightning", new ArrayList<String>(), new ArrayList<String>(),
+                        "", false, "https://api.example.com/v1"));
+
         if (failed > 0) { System.err.println(failed + " failed"); System.exit(1); }
         System.out.println("all passed");
     }

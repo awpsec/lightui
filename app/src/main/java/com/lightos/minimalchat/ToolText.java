@@ -1126,10 +1126,112 @@ public final class ToolText {
         return n;
     }
 
+    /** Catalog prefix so a custom endpoint can share an API slug with OpenRouter. */
+    public static final String CUSTOM_MODEL_PREFIX = "custom|";
+
+    public static String normalizeEndpoint(String endpoint) {
+        String e = endpoint == null ? "" : endpoint.trim();
+        while (e.endsWith("/")) e = e.substring(0, e.length() - 1);
+        return e;
+    }
+
+    /** Stable local id: `custom|<endpoint>|<apiId>`. OpenRouter ids stay unchanged. */
+    public static String customModelKey(String endpoint, String apiId) {
+        String id = modelApiId(apiId);
+        if (id.length() == 0) return "";
+        String e = normalizeEndpoint(endpoint);
+        if (e.length() == 0) return id;
+        return CUSTOM_MODEL_PREFIX + e + "|" + id;
+    }
+
+    public static String catalogModelKey(String source, String endpoint, String apiId) {
+        String id = apiId == null ? "" : apiId.trim();
+        if (id.length() == 0) return "";
+        if ("custom".equals(source)) return customModelKey(endpoint, id);
+        return isCustomModelKey(id) ? modelApiId(id) : id;
+    }
+
+    public static boolean isCustomModelKey(String key) {
+        return key != null && key.startsWith(CUSTOM_MODEL_PREFIX);
+    }
+
+    /** Id sent to `/chat/completions` — strips the local custom prefix. */
+    public static String modelApiId(String key) {
+        if (key == null) return "";
+        String s = key.trim();
+        if (!isCustomModelKey(s)) return s;
+        String[] parts = s.split("\\|", 3);
+        return parts.length >= 3 ? parts[2].trim() : s.substring(CUSTOM_MODEL_PREFIX.length()).trim();
+    }
+
+    public static String customModelEndpoint(String key) {
+        if (!isCustomModelKey(key)) return "";
+        String[] parts = key.split("\\|", 3);
+        return parts.length >= 2 ? normalizeEndpoint(parts[1]) : "";
+    }
+
+    /** Display slug. Does not take the last `/` of a `custom|https://host/v1|id` key. */
+    public static String shortModel(String key) {
+        String id = modelApiId(key);
+        if (id.length() == 0) return "";
+        int slash = id.lastIndexOf('/');
+        return slash >= 0 ? id.substring(slash + 1) : id;
+    }
+
+    public static boolean modelLabelMatches(String key, String label) {
+        if (key == null || label == null) return false;
+        String t = label.trim();
+        if (t.length() == 0) return false;
+        return key.equals(t) || shortModel(key).equals(t) || modelApiId(key).equals(t);
+    }
+
+    /**
+     * Map a displayed slug or stored id onto a catalog key.
+     * Exact keys win, then the currently selected model, then custom when OpenRouter
+     * is not configured, then OpenRouter.
+     */
+    public static String resolveModelKey(String label, ArrayList<String> myModels, ArrayList<String> models,
+            String selected, boolean hasOpenRouterKey, String customEndpoint) {
+        String t = label == null ? "" : label.trim();
+        if (t.length() == 0) return t;
+        if (listHas(myModels, t) || listHas(models, t)) return t;
+        if (isCustomModelKey(t)) return t;
+        String sel = selected == null ? "" : selected.trim();
+        if (sel.length() > 0 && modelLabelMatches(sel, t)) return sel;
+        String customHit = firstLabelMatch(myModels, t, true);
+        if (customHit.length() == 0) customHit = firstLabelMatch(models, t, true);
+        String orHit = firstLabelMatch(myModels, t, false);
+        if (orHit.length() == 0) orHit = firstLabelMatch(models, t, false);
+        if (isCustomModelKey(sel) && customHit.length() > 0) return customHit;
+        if (customHit.length() > 0 && (orHit.length() == 0 || !hasOpenRouterKey)) return customHit;
+        if (orHit.length() > 0) return orHit;
+        if (customHit.length() > 0) return customHit;
+        if (!hasOpenRouterKey && customEndpoint != null && customEndpoint.trim().length() > 0
+                && t.indexOf('|') < 0) {
+            return customModelKey(customEndpoint, t);
+        }
+        return t;
+    }
+
+    private static boolean listHas(ArrayList<String> list, String t) {
+        return list != null && list.contains(t);
+    }
+
+    private static String firstLabelMatch(ArrayList<String> list, String t, boolean custom) {
+        if (list == null) return "";
+        for (int i = 0; i < list.size(); i++) {
+            String m = list.get(i);
+            if (m == null || m.length() == 0) continue;
+            if (isCustomModelKey(m) != custom) continue;
+            if (modelLabelMatches(m, t)) return m;
+        }
+        return "";
+    }
+
     /** OpenRouter-style `vendor/model` prefix, or empty. */
     public static String modelVendor(String id) {
-        if (id == null) return "";
-        String s = id.trim();
+        String s = modelApiId(id);
+        if (s.length() == 0) return "";
         int slash = s.indexOf('/');
         if (slash <= 0) return "";
         String v = s.substring(0, slash).trim();
@@ -1143,7 +1245,7 @@ public final class ToolText {
      * `endpoint` for custom servers.
      */
     public static String modelProviderLabel(String id, String source) {
-        if ("custom".equals(source)) return "endpoint";
+        if ("custom".equals(source) || isCustomModelKey(id)) return "endpoint";
         String vendor = modelVendor(id);
         if (vendor.length() > 0) return vendor;
         return "openrouter";

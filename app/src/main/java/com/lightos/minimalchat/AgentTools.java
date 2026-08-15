@@ -191,7 +191,7 @@ public final class AgentTools {
 
     public static JSONObject completionBody(String model, JSONArray messages, JSONArray tools, boolean stream, boolean lastRound) throws Exception {
         JSONObject body = new JSONObject();
-        body.put("model", model == null ? "" : model);
+        body.put("model", ToolText.modelApiId(model));
         body.put("messages", messages);
         body.put("stream", stream);
         if (tools != null && tools.length() > 0 && !lastRound) {

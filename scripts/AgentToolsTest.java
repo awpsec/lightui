@@ -47,6 +47,9 @@ public class AgentToolsTest {
         assertEq("tool_choice auto", "auto", body.getString("tool_choice"));
         JSONObject last = AgentTools.completionBody("m", new JSONArray(), tools, true, true);
         assertTrue("last round omits tools", !last.has("tools"));
+        JSONObject customBody = AgentTools.completionBody(
+                "custom|https://api.example.com/v1|kimi-k2.5-lightning", new JSONArray(), null, true, true);
+        assertEq("completion strips custom prefix", "kimi-k2.5-lightning", customBody.getString("model"));
 
         AgentTools.RoundState st = new AgentTools.RoundState();
         AgentTools.absorbSseData(st, "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_abc\",\"type\":\"function\",\"function\":{\"name\":\"web_search\",\"arguments\":\"\"}}]}}]}");
