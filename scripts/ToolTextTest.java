@@ -408,6 +408,40 @@ public class ToolTextTest {
                 ToolText.resolveModelKey("kimi-k2.5-lightning", new ArrayList<String>(), new ArrayList<String>(),
                         "", false, "https://api.example.com/v1"));
 
+        assertEq("card host keeps port", "zeddserver:8001",
+                ToolText.endpointCardHost("http://zeddserver:8001/v1"));
+        assertEq("card host keeps other port", "zeddserver:8002",
+                ToolText.endpointCardHost("http://zeddserver:8002/v1"));
+        assertEq("search host still strips port", "zeddserver",
+                ToolText.sourceHost("http://zeddserver:8001/v1"));
+        assertEq("card host crof", "api.crof.ai",
+                ToolText.endpointCardHost("https://api.crof.ai/v1"));
+
+        ArrayList<String> eps = new ArrayList<String>();
+        eps.add("http://zeddserver:8001/v1");
+        eps.add("https://api.crof.ai/v1");
+        String zeddKey = ToolText.customModelKey("http://zeddserver:8001/v1", "kimi-k2.5-lightning");
+        String crofKey = ToolText.customModelKey("https://api.crof.ai/v1", "kimi-k2.5-lightning");
+        assertEq("repair map wins over first endpoint key", crofKey,
+                ToolText.repairCustomIdentity(zeddKey, "https://api.crof.ai/v1", eps));
+        assertEq("repair leaves matching key", crofKey,
+                ToolText.repairCustomIdentity(crofKey, "https://api.crof.ai/v1", eps));
+        assertEq("repair ignores unknown map", zeddKey,
+                ToolText.repairCustomIdentity(zeddKey, "https://other.example/v1", eps));
+
+        ArrayList<String> cat = new ArrayList<String>();
+        cat.add(ToolText.customModelKey("http://zeddserver:8001/v1", "local-tts"));
+        cat.add(crofKey);
+        assertEq("rebind unique crof slug off first endpoint", crofKey,
+                ToolText.rebindStoredModel(zeddKey, cat, "http://zeddserver:8001/v1", eps));
+        assertEq("rebind keeps exact catalog key", crofKey,
+                ToolText.rebindStoredModel(crofKey, cat, "", eps));
+        assertEq("rebind bare id to unique catalog row", crofKey,
+                ToolText.rebindStoredModel("kimi-k2.5-lightning", cat, "", eps));
+        String tts = ToolText.customModelKey("http://zeddserver:8001/v1", "local-tts");
+        assertEq("rebind local model stays on zedd", tts,
+                ToolText.rebindStoredModel(tts, cat, "http://zeddserver:8001/v1", eps));
+
         if (failed > 0) { System.err.println(failed + " failed"); System.exit(1); }
         System.out.println("all passed");
     }

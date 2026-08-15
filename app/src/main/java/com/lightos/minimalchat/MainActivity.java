@@ -118,7 +118,7 @@ public class MainActivity extends Activity {
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
     private static final String SEARCHING = "__searching__";
-    private static final String APP_VERSION = "1.0.43";
+    private static final String APP_VERSION = "1.0.44";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 48;
@@ -1984,8 +1984,8 @@ public class MainActivity extends Activity {
             for (final String m : models) if (shown < 50 && !"custom".equals(modelSource(m)) && (q.length() == 0 || modelMatches(m, q))) { addAnswerChoice(list, d, shownModels, m); shown = shownModels.size(); }
             final String typed = search.getText().toString().trim();
             if (typed.length() > 1 && !models.contains(typed) && !models.contains(typedModelKey(typed))) {
-                TextView item = searchResultItem("use " + shortModel(typed), customEndpointBase().length() > 0 ? "endpoint" : "openrouter");
-                item.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { String key = typedModelKey(typed); if (!models.contains(key)) { models.add(0, key); modelSources.put(key, customEndpointBase().length() > 0 ? "custom" : "openrouter"); if (customEndpointBase().length() > 0) modelEndpoints.put(key, customEndpointBase()); saveModels(); saveModelSources(); saveModelEndpoints(); } prefs.edit().putString("voiceAnswerModel", key).apply(); d.dismiss(); showSettingsPane(); } });
+                TextView item = searchResultItem("use " + shortModel(typed), soleCustomEndpoint().length() > 0 ? "endpoint" : (customEndpoints.size() > 0 ? "pick from list" : "openrouter"));
+                item.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { String key = typedModelKey(typed); if (!models.contains(key)) { models.add(0, key); modelSources.put(key, ToolText.isCustomModelKey(key) || soleCustomEndpoint().length() > 0 ? "custom" : "openrouter"); String ep = ToolText.customModelEndpoint(key); if (ep.length() == 0) ep = soleCustomEndpoint(); if (ep.length() > 0) modelEndpoints.put(key, ep); saveModels(); saveModelSources(); saveModelEndpoints(); } prefs.edit().putString("voiceAnswerModel", key).apply(); d.dismiss(); showSettingsPane(); } });
                 list.addView(item); shown++;
             }
             status.setText((shownModels.size() + (typed.length() > 1 && !models.contains(typed) && !models.contains(typedModelKey(typed)) ? 1 : 0)) + " shown. applies only to two-way voice");
@@ -2009,7 +2009,7 @@ public class MainActivity extends Activity {
     private String answerModelSubtitle(String model) {
         ArrayList<String> tags = new ArrayList<String>();
         if ("custom".equals(modelSource(model))) {
-            String host = ToolText.sourceHost(modelEndpoint(model));
+            String host = ToolText.endpointCardHost(modelEndpoint(model));
             tags.add(host.length() > 0 ? "endpoint · " + host : "endpoint");
         }
         if (audioInputModels.contains(model)) tags.add("audio in");
@@ -5799,7 +5799,7 @@ public class MainActivity extends Activity {
         String src = modelSource(model);
         String label = ToolText.modelProviderLabel(model, src);
         if ("custom".equals(src)) {
-            String host = ToolText.sourceHost(modelEndpoint(model));
+            String host = ToolText.endpointCardHost(modelEndpoint(model));
             return host.length() > 0 ? "endpoint · " + host : "endpoint";
         }
         Integer ctx = modelContexts.get(model);
@@ -5869,7 +5869,7 @@ public class MainActivity extends Activity {
             }
             final String typed = search.getText().toString().trim();
             if (typed.length() > 1 && !myModels.contains(typed) && !myModels.contains(typedModelKey(typed))) {
-                TextView item = searchResultItem("use " + shortModel(typed), customEndpointBase().length() > 0 ? "endpoint" : "openrouter");
+                TextView item = searchResultItem("use " + shortModel(typed), soleCustomEndpoint().length() > 0 ? "endpoint" : (customEndpoints.size() > 0 ? "pick from list" : "openrouter"));
                 item.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); addMyModel(typedModelKey(typed)); } });
                 list.addView(item);
             }
@@ -5885,15 +5885,15 @@ public class MainActivity extends Activity {
     private void addMyModel(String m) {
         m = m == null ? "" : m.trim();
         if (m.length() == 0) return;
-        if (!models.contains(m) && !ToolText.isCustomModelKey(m) && customEndpointBase().length() > 0) {
+        if (!models.contains(m) && !ToolText.isCustomModelKey(m) && soleCustomEndpoint().length() > 0) {
             m = typedModelKey(m);
         }
         if (!models.contains(m)) {
             models.add(0, m);
-            modelSources.put(m, ToolText.isCustomModelKey(m) || customEndpointBase().length() > 0 ? "custom" : "openrouter");
+            modelSources.put(m, ToolText.isCustomModelKey(m) || soleCustomEndpoint().length() > 0 ? "custom" : "openrouter");
             if ("custom".equals(modelSources.get(m))) {
                 String endpoint = ToolText.customModelEndpoint(m);
-                modelEndpoints.put(m, endpoint.length() > 0 ? endpoint : customEndpointBase());
+                modelEndpoints.put(m, endpoint.length() > 0 ? endpoint : soleCustomEndpoint());
             }
             saveModels(); saveModelSources(); saveModelEndpoints();
         }
@@ -5963,11 +5963,22 @@ public class MainActivity extends Activity {
                 final HashSet<String> foundAudioInput = new HashSet<String>();
                 final HashSet<String> foundReasoning = new HashSet<String>();
                 final HashSet<String> foundSpeed = new HashSet<String>();
-                if (key.length() > 0) fetchModelsInto(OPENROUTER_ENDPOINT, key, "openrouter", found, foundContexts, foundSources, foundEndpoints, foundAudioOutput, foundAudioInput, foundReasoning, foundSpeed);
+                Exception lastFetch = null;
+                int fetchedOk = 0;
+                if (key.length() > 0) {
+                    try {
+                        fetchModelsInto(OPENROUTER_ENDPOINT, key, "openrouter", found, foundContexts, foundSources, foundEndpoints, foundAudioOutput, foundAudioInput, foundReasoning, foundSpeed);
+                        fetchedOk++;
+                    } catch (Exception e) { lastFetch = e; }
+                }
                 for (String endpoint : endpoints) {
                     String endpointKey = typedEndpoint.equals(endpoint) && typedKey.length() > 0 ? typedKey : endpointKey(endpoint);
-                    fetchModelsInto(endpoint, endpointKey, "custom", found, foundContexts, foundSources, foundEndpoints, foundAudioOutput, foundAudioInput, foundReasoning, foundSpeed);
+                    try {
+                        fetchModelsInto(endpoint, endpointKey, "custom", found, foundContexts, foundSources, foundEndpoints, foundAudioOutput, foundAudioInput, foundReasoning, foundSpeed);
+                        fetchedOk++;
+                    } catch (Exception e) { lastFetch = e; }
                 }
+                if (fetchedOk == 0) throw lastFetch == null ? new RuntimeException("no endpoints") : lastFetch;
                 runOnUiThread(new Runnable() { @Override public void run() {
                     modelsRefreshing = false;
                     for (String endpoint : endpoints) {
@@ -5975,7 +5986,7 @@ public class MainActivity extends Activity {
                         if (typedEndpoint.equals(endpoint) && typedKey.length() > 0) setEndpointKey(endpoint, typedKey);
                     }
                     models.clear(); models.addAll(found); modelContexts.clear(); modelContexts.putAll(foundContexts); modelSources.clear(); modelSources.putAll(foundSources); modelEndpoints.clear(); modelEndpoints.putAll(foundEndpoints); audioOutputModels.clear(); audioOutputModels.addAll(foundAudioOutput); audioInputModels.clear(); audioInputModels.addAll(foundAudioInput); reasoningModels.clear(); reasoningModels.addAll(foundReasoning); speedModels.clear(); speedModels.addAll(foundSpeed);
-                    migrateLoadedMyModelLists();
+                    rebindModelsToCatalog();
                     for (String m : found) if ("custom".equals(foundSources.get(m)) && !myModels.contains(m)) myModels.add(m);
                     retargetSelectedModelIfNeeded();
                     saveCustomEndpoints(); saveEndpointKeys(); saveModels(); saveModelContexts(); saveModelSources(); saveModelEndpoints(); saveAudioOutputModels(); saveAudioInputModels(); saveReasoningModels(); saveSpeedModels(); saveMyModels(); savePinnedModels();
@@ -6093,6 +6104,7 @@ public class MainActivity extends Activity {
     }
 
     private String customEndpointBase() { return customEndpoints.size() == 0 ? "" : customEndpoints.get(0); }
+    private String soleCustomEndpoint() { return customEndpoints.size() == 1 ? customEndpoints.get(0) : ""; }
     private String normalizeEndpoint(String endpoint) { return ToolText.normalizeEndpoint(endpoint); }
     private String chatCompletionsUrl(String source) { return chatCompletionsUrl(source, selectedModel()); }
     private String chatCompletionsUrl(String source, String model) { return (source.equals("custom") ? modelEndpoint(model) : OPENROUTER_ENDPOINT) + "/chat/completions"; }
@@ -8396,7 +8408,7 @@ public class MainActivity extends Activity {
     }
     private String chatModelForSave() { for (int i = messages.size() - 1; i >= 0; i--) if (messages.get(i).role.equals("assistant") && messages.get(i).model.length() > 0) return expandShortModel(messages.get(i).model); return activeAnswerModel(); }
     private String expandShortModel(String label) {
-        return ToolText.resolveModelKey(label, myModels, models, selectedModel(), savedApiKey().length() > 0, customEndpointBase());
+        return ToolText.resolveModelKey(label, myModels, models, selectedModel(), savedApiKey().length() > 0, soleCustomEndpoint());
     }
 
     private void attachClipboardImageIfPresent() {
@@ -8762,15 +8774,20 @@ public class MainActivity extends Activity {
             String mappedEndpoint = modelEndpoints.get(m);
             if (mappedEndpoint != null && mappedEndpoint.length() > 0) continue;
             String fromKey = ToolText.customModelEndpoint(m);
-            modelEndpoints.put(m, fromKey.length() > 0 ? fromKey : customEndpointBase());
+            if (fromKey.length() > 0) { modelEndpoints.put(m, fromKey); continue; }
+            if (soleCustomEndpoint().length() > 0) modelEndpoints.put(m, soleCustomEndpoint());
         }
         String savedMyModels = prefs.getString("myModels", ""); if (savedMyModels.length() > 0) for (String m : savedMyModels.split("\\n")) { String clean = m.trim(); if (clean.length() > 0 && !myModels.contains(clean)) myModels.add(clean); }
         String savedPins = prefs.getString("pinnedModels", ""); if (savedPins.length() > 0) for (String m : savedPins.split("\\n")) { String clean = m.trim(); if (clean.length() > 0 && !pinnedModels.contains(clean)) pinnedModels.add(clean); }
         migrateLoadedMyModelLists();
+        rebindModelsToCatalog();
         for (int i = pinnedModels.size() - 1; i >= 0; i--) if (!myModels.contains(pinnedModels.get(i))) pinnedModels.remove(i);
         String selected = prefs.getString("model", "").trim();
         if (prefs.getBoolean("modelSelected", false) && selected.length() > 0 && !myModels.contains(selected)) myModels.add(selected);
         retargetSelectedModelIfNeeded();
+        if (!prefs.getBoolean("modelIdentityV2", false)) {
+            prefs.edit().putBoolean("modelIdentityV2", true).remove("modelsRefreshedAt").apply();
+        }
         saveModels();
         saveMyModels();
         savePinnedModels();
@@ -8907,8 +8924,9 @@ public class MainActivity extends Activity {
         String fromKey = ToolText.customModelEndpoint(model);
         if (fromKey.length() > 0) return fromKey;
         String endpoint = modelEndpoints.get(model);
+        if (endpoint == null || endpoint.length() == 0) endpoint = modelEndpoints.get(ToolText.modelApiId(model));
         if (endpoint != null && endpoint.length() > 0) return endpoint;
-        return "custom".equals(modelSource(model)) ? customEndpointBase() : "";
+        return "custom".equals(modelSource(model)) ? soleCustomEndpoint() : "";
     }
     private String modelSourceLabel(String m) { return ToolText.modelProviderLabel(m, modelSource(m)); }
     private String modelLabel() {
@@ -8929,37 +8947,69 @@ public class MainActivity extends Activity {
         String t = typed == null ? "" : typed.trim();
         if (t.length() == 0) return t;
         if (ToolText.isCustomModelKey(t) || models.contains(t) || myModels.contains(t)) return t;
-        if (customEndpointBase().length() > 0) return ToolText.customModelKey(customEndpointBase(), t);
+        if (soleCustomEndpoint().length() > 0) return ToolText.customModelKey(soleCustomEndpoint(), t);
         return t;
     }
     private void migrateCustomModelIdentities() {
+        repairCustomIdentities();
+        namespaceBareCustomModels(allModelIds());
+    }
+    private void migrateLoadedMyModelLists() {
+        repairCustomIdentities();
+        ArrayList<String> extra = new ArrayList<String>(myModels);
+        extra.addAll(pinnedModels);
+        namespaceBareCustomModels(extra);
+    }
+    private ArrayList<String> allModelIds() {
         ArrayList<String> ids = new ArrayList<String>();
         for (String m : models) if (!ids.contains(m)) ids.add(m);
+        for (String m : myModels) if (!ids.contains(m)) ids.add(m);
+        for (String m : pinnedModels) if (!ids.contains(m)) ids.add(m);
         for (String m : modelSources.keySet()) if (!ids.contains(m)) ids.add(m);
         for (String m : modelEndpoints.keySet()) if (!ids.contains(m)) ids.add(m);
+        return ids;
+    }
+    private String mappedEndpointFor(String id) {
+        if (id == null || id.length() == 0) return "";
+        String mapped = modelEndpoints.get(id);
+        if (mapped == null || mapped.length() == 0) mapped = modelEndpoints.get(ToolText.modelApiId(id));
+        if (mapped == null) mapped = "";
+        if (mapped.length() == 0) mapped = ToolText.customModelEndpoint(id);
+        if (mapped.length() == 0 && soleCustomEndpoint().length() > 0) mapped = soleCustomEndpoint();
+        return mapped;
+    }
+    private void repairCustomIdentities() {
+        HashMap<String, String> renamed = new HashMap<String, String>();
+        ArrayList<String> ids = allModelIds();
+        for (String m : ids) {
+            if (m == null || m.length() == 0 || renamed.containsKey(m)) continue;
+            String nk = ToolText.repairCustomIdentity(m, mappedEndpointFor(m), customEndpoints);
+            if (nk.length() > 0 && !nk.equals(m)) renamed.put(m, nk);
+        }
+        for (String from : renamed.keySet()) remapModelIdentity(from, renamed.get(from));
+    }
+    private void namespaceBareCustomModels(ArrayList<String> ids) {
         HashMap<String, String> renamed = new HashMap<String, String>();
         for (String m : ids) {
-            if (m == null || m.length() == 0 || ToolText.isCustomModelKey(m)) continue;
-            String source = modelSources.get(m);
-            String endpoint = modelEndpoints.get(m);
-            if (endpoint == null || endpoint.length() == 0) endpoint = customEndpointBase();
+            if (m == null || m.length() == 0 || ToolText.isCustomModelKey(m) || renamed.containsKey(m)) continue;
+            String source = modelSources.containsKey(m) ? modelSources.get(m) : modelSource(m);
+            String endpoint = mappedEndpointFor(m);
             if (!shouldNamespaceAsCustom(m, source, endpoint)) continue;
             String nk = ToolText.customModelKey(endpoint, m);
             if (nk.length() > 0 && !nk.equals(m)) renamed.put(m, nk);
         }
         for (String from : renamed.keySet()) remapModelIdentity(from, renamed.get(from));
     }
-    private void migrateLoadedMyModelLists() {
-        ArrayList<String> extra = new ArrayList<String>(myModels);
-        extra.addAll(pinnedModels);
+    private void rebindModelsToCatalog() {
         HashMap<String, String> renamed = new HashMap<String, String>();
-        for (String m : extra) {
-            if (m == null || m.length() == 0 || ToolText.isCustomModelKey(m) || renamed.containsKey(m)) continue;
-            String source = modelSources.containsKey(m) ? modelSources.get(m) : modelSource(m);
-            String endpoint = modelEndpoints.get(m);
-            if (endpoint == null || endpoint.length() == 0) endpoint = customEndpointBase();
-            if (!shouldNamespaceAsCustom(m, source, endpoint)) continue;
-            String nk = ToolText.customModelKey(endpoint, m);
+        ArrayList<String> ids = allModelIds();
+        String selected = prefs.getString("model", "").trim();
+        if (selected.length() > 0 && !ids.contains(selected)) ids.add(selected);
+        String voiceAns = prefs.getString("voiceAnswerModel", "").trim();
+        if (voiceAns.length() > 0 && !ids.contains(voiceAns)) ids.add(voiceAns);
+        for (String m : ids) {
+            if (m == null || m.length() == 0 || renamed.containsKey(m)) continue;
+            String nk = ToolText.rebindStoredModel(m, models, mappedEndpointFor(m), customEndpoints);
             if (nk.length() > 0 && !nk.equals(m)) renamed.put(m, nk);
         }
         for (String from : renamed.keySet()) remapModelIdentity(from, renamed.get(from));
@@ -8967,10 +9017,10 @@ public class MainActivity extends Activity {
     private boolean shouldNamespaceAsCustom(String id, String source, String endpoint) {
         if (id == null || id.length() == 0 || ToolText.isCustomModelKey(id)) return false;
         if (endpoint == null || endpoint.length() == 0) return false;
+        if (!ToolText.isKnownEndpoint(endpoint, customEndpoints)) return false;
         if ("custom".equals(source)) return true;
-        if (id.indexOf('/') >= 0) return false;
         String mapped = modelEndpoints.get(id);
-        return savedApiKey().length() == 0 || (mapped != null && mapped.length() > 0);
+        return mapped != null && mapped.length() > 0;
     }
     private void retargetSelectedModelIfNeeded() {
         SharedPreferences.Editor e = prefs.edit();
