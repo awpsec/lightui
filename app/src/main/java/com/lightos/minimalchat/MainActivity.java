@@ -118,7 +118,7 @@ public class MainActivity extends Activity {
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
     private static final String SEARCHING = "__searching__";
-    private static final String APP_VERSION = "1.0.44";
+    private static final String APP_VERSION = "1.0.45";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 48;
@@ -5965,17 +5965,19 @@ public class MainActivity extends Activity {
                 final HashSet<String> foundSpeed = new HashSet<String>();
                 Exception lastFetch = null;
                 int fetchedOk = 0;
+                final ArrayList<String> listedEndpoints = new ArrayList<String>();
                 if (key.length() > 0) {
                     try {
-                        fetchModelsInto(OPENROUTER_ENDPOINT, key, "openrouter", found, foundContexts, foundSources, foundEndpoints, foundAudioOutput, foundAudioInput, foundReasoning, foundSpeed);
-                        fetchedOk++;
+                        if (fetchModelsInto(OPENROUTER_ENDPOINT, key, "openrouter", found, foundContexts, foundSources, foundEndpoints, foundAudioOutput, foundAudioInput, foundReasoning, foundSpeed)) fetchedOk++;
                     } catch (Exception e) { lastFetch = e; }
                 }
                 for (String endpoint : endpoints) {
                     String endpointKey = typedEndpoint.equals(endpoint) && typedKey.length() > 0 ? typedKey : endpointKey(endpoint);
                     try {
-                        fetchModelsInto(endpoint, endpointKey, "custom", found, foundContexts, foundSources, foundEndpoints, foundAudioOutput, foundAudioInput, foundReasoning, foundSpeed);
-                        fetchedOk++;
+                        if (fetchModelsInto(endpoint, endpointKey, "custom", found, foundContexts, foundSources, foundEndpoints, foundAudioOutput, foundAudioInput, foundReasoning, foundSpeed)) {
+                            listedEndpoints.add(normalizeEndpoint(endpoint));
+                            fetchedOk++;
+                        }
                     } catch (Exception e) { lastFetch = e; }
                 }
                 if (fetchedOk == 0) throw lastFetch == null ? new RuntimeException("no endpoints") : lastFetch;
@@ -5986,8 +5988,7 @@ public class MainActivity extends Activity {
                         if (typedEndpoint.equals(endpoint) && typedKey.length() > 0) setEndpointKey(endpoint, typedKey);
                     }
                     models.clear(); models.addAll(found); modelContexts.clear(); modelContexts.putAll(foundContexts); modelSources.clear(); modelSources.putAll(foundSources); modelEndpoints.clear(); modelEndpoints.putAll(foundEndpoints); audioOutputModels.clear(); audioOutputModels.addAll(foundAudioOutput); audioInputModels.clear(); audioInputModels.addAll(foundAudioInput); reasoningModels.clear(); reasoningModels.addAll(foundReasoning); speedModels.clear(); speedModels.addAll(foundSpeed);
-                    rebindModelsToCatalog();
-                    for (String m : found) if ("custom".equals(foundSources.get(m)) && !myModels.contains(m)) myModels.add(m);
+                    applyCatalogToMyModels(listedEndpoints);
                     retargetSelectedModelIfNeeded();
                     saveCustomEndpoints(); saveEndpointKeys(); saveModels(); saveModelContexts(); saveModelSources(); saveModelEndpoints(); saveAudioOutputModels(); saveAudioInputModels(); saveReasoningModels(); saveSpeedModels(); saveMyModels(); savePinnedModels();
                     prefs.edit().putLong("modelsRefreshedAt", System.currentTimeMillis()).apply();
@@ -6004,25 +6005,34 @@ public class MainActivity extends Activity {
         } }).start();
     }
 
-    private void fetchModelsInto(String endpoint, String key, String source, ArrayList<String> found, HashMap<String, Integer> foundContexts, HashMap<String, String> foundSources, HashMap<String, String> foundEndpoints, HashSet<String> foundAudioOutput, HashSet<String> foundAudioInput, HashSet<String> foundReasoning, HashSet<String> foundSpeed) throws Exception {
+    private boolean fetchModelsInto(String endpoint, String key, String source, ArrayList<String> found, HashMap<String, Integer> foundContexts, HashMap<String, String> foundSources, HashMap<String, String> foundEndpoints, HashSet<String> foundAudioOutput, HashSet<String> foundAudioInput, HashSet<String> foundReasoning, HashSet<String> foundSpeed) throws Exception {
         HttpURLConnection c = (HttpURLConnection) new URL(normalizeEndpoint(endpoint) + "/models").openConnection();
         c.setConnectTimeout(8000);
         c.setReadTimeout(15000);
         if (key.length() > 0) c.setRequestProperty("Authorization", "Bearer " + key);
         int code = c.getResponseCode();
         String raw = readAll(code >= 400 ? c.getErrorStream() : c.getInputStream());
-        if ("custom".equals(source) && (code == 404 || code == 405)) return;
+        if ("custom".equals(source) && (code == 404 || code == 405)) return false;
         if (code >= 400) throw new RuntimeException(raw);
-        JSONArray data = new JSONObject(raw).getJSONArray("data");
+        JSONObject root = new JSONObject(raw);
+        JSONArray data = root.optJSONArray("data");
+        if (data == null) data = root.optJSONArray("models");
+        if (data == null) {
+            if ("custom".equals(source)) return false;
+            throw new RuntimeException(raw);
+        }
         for (int i = 0; i < data.length(); i++) {
-            JSONObject model = data.getJSONObject(i);
-            String id = model.getString("id");
+            JSONObject model = data.optJSONObject(i);
+            if (model == null) continue;
+            String id = model.optString("id", "").trim();
+            if (id.length() == 0) id = model.optString("name", "").trim();
+            if (id.length() == 0) continue;
             String catalogId = ToolText.catalogModelKey(source, endpoint, id);
             String name = model.optString("name", "");
             String description = model.optString("description", "");
             if (!found.contains(catalogId)) found.add(catalogId);
             foundSources.put(catalogId, source);
-            String host = "custom".equals(source) ? ToolText.sourceHost(normalizeEndpoint(endpoint)) : "";
+            String host = "custom".equals(source) ? ToolText.endpointCardHost(normalizeEndpoint(endpoint)) : "";
             modelSearchText.put(catalogId, (name.length() > 0 ? name : shortModel(catalogId)) + "\n" + id + "\n" + catalogId + "\n" + description + (host.length() > 0 ? "\n" + host : ""));
             if ("custom".equals(source)) foundEndpoints.put(catalogId, normalizeEndpoint(endpoint));
             if (foundAudioOutput != null && hasAudioOutput(model, id, name)) foundAudioOutput.add(catalogId);
@@ -6034,6 +6044,46 @@ public class MainActivity extends Activity {
             if (context <= 0 && top != null) context = top.optInt("context_length", 0);
             if (context > 0) foundContexts.put(catalogId, context);
         }
+        return true;
+    }
+
+    /**
+     * After a live catalog fetch (or a previously saved good catalog), pin stored
+     * custom models to the endpoint that actually listed them. Drops leftover
+     * first-endpoint keys. Never rewrites the catalog itself.
+     */
+    private void applyCatalogToMyModels(ArrayList<String> listedEndpoints) {
+        ArrayList<String> nextMine = ToolText.reconcileMyModels(myModels, models, listedEndpoints);
+        myModels.clear();
+        myModels.addAll(nextMine);
+        ArrayList<String> nextPins = new ArrayList<String>();
+        for (String id : pinnedModels) {
+            String mapped = ToolText.retargetStoredModel(id, models, myModels);
+            if (myModels.contains(mapped) && !nextPins.contains(mapped)) nextPins.add(mapped);
+        }
+        pinnedModels.clear();
+        pinnedModels.addAll(nextPins);
+        retargetPrefModel("model");
+        retargetPrefModel("voiceAnswerModel");
+        retargetPrefModel("voiceTranscribeModel");
+        retargetPrefModel("voiceTtsModel");
+        retargetPrefModel("voiceEndpointTtsModel");
+        String selected = prefs.getString("model", "").trim();
+        if (selected.length() > 0 && !myModels.contains(selected)) {
+            String mapped = ToolText.retargetStoredModel(selected, models, myModels);
+            if (!myModels.contains(mapped)) mapped = myModels.size() == 0 ? "" : myModels.get(0);
+            SharedPreferences.Editor e = prefs.edit();
+            if (mapped.length() == 0) e.remove("model").putBoolean("modelSelected", false);
+            else e.putString("model", mapped);
+            e.apply();
+        }
+    }
+
+    private void retargetPrefModel(String pref) {
+        String cur = prefs.getString(pref, "").trim();
+        if (cur.length() == 0) return;
+        String mapped = ToolText.retargetStoredModel(cur, models, myModels);
+        if (mapped.length() > 0 && !mapped.equals(cur)) prefs.edit().putString(pref, mapped).apply();
     }
 
     private boolean hasAudioOutput(JSONObject model, String id, String name) {
@@ -8780,13 +8830,13 @@ public class MainActivity extends Activity {
         String savedMyModels = prefs.getString("myModels", ""); if (savedMyModels.length() > 0) for (String m : savedMyModels.split("\\n")) { String clean = m.trim(); if (clean.length() > 0 && !myModels.contains(clean)) myModels.add(clean); }
         String savedPins = prefs.getString("pinnedModels", ""); if (savedPins.length() > 0) for (String m : savedPins.split("\\n")) { String clean = m.trim(); if (clean.length() > 0 && !pinnedModels.contains(clean)) pinnedModels.add(clean); }
         migrateLoadedMyModelLists();
-        rebindModelsToCatalog();
-        for (int i = pinnedModels.size() - 1; i >= 0; i--) if (!myModels.contains(pinnedModels.get(i))) pinnedModels.remove(i);
         String selected = prefs.getString("model", "").trim();
         if (prefs.getBoolean("modelSelected", false) && selected.length() > 0 && !myModels.contains(selected)) myModels.add(selected);
+        applyCatalogToMyModels(null);
+        for (int i = pinnedModels.size() - 1; i >= 0; i--) if (!myModels.contains(pinnedModels.get(i))) pinnedModels.remove(i);
         retargetSelectedModelIfNeeded();
-        if (!prefs.getBoolean("modelIdentityV2", false)) {
-            prefs.edit().putBoolean("modelIdentityV2", true).remove("modelsRefreshedAt").apply();
+        if (!prefs.getBoolean("modelIdentityV3", false)) {
+            prefs.edit().putBoolean("modelIdentityV3", true).remove("modelsRefreshedAt").apply();
         }
         saveModels();
         saveMyModels();
@@ -8996,20 +9046,6 @@ public class MainActivity extends Activity {
             String endpoint = mappedEndpointFor(m);
             if (!shouldNamespaceAsCustom(m, source, endpoint)) continue;
             String nk = ToolText.customModelKey(endpoint, m);
-            if (nk.length() > 0 && !nk.equals(m)) renamed.put(m, nk);
-        }
-        for (String from : renamed.keySet()) remapModelIdentity(from, renamed.get(from));
-    }
-    private void rebindModelsToCatalog() {
-        HashMap<String, String> renamed = new HashMap<String, String>();
-        ArrayList<String> ids = allModelIds();
-        String selected = prefs.getString("model", "").trim();
-        if (selected.length() > 0 && !ids.contains(selected)) ids.add(selected);
-        String voiceAns = prefs.getString("voiceAnswerModel", "").trim();
-        if (voiceAns.length() > 0 && !ids.contains(voiceAns)) ids.add(voiceAns);
-        for (String m : ids) {
-            if (m == null || m.length() == 0 || renamed.containsKey(m)) continue;
-            String nk = ToolText.rebindStoredModel(m, models, mappedEndpointFor(m), customEndpoints);
             if (nk.length() > 0 && !nk.equals(m)) renamed.put(m, nk);
         }
         for (String from : renamed.keySet()) remapModelIdentity(from, renamed.get(from));
