@@ -1213,7 +1213,78 @@ public final class ToolText {
         if (api.length() == 0) return s;
         String keyEp = customModelEndpoint(s);
         if (keyEp.equals(mapped)) return s;
-        return customModelKey(mapped, api);
+        if (keyEp.length() == 0) return customModelKey(mapped, api);
+        // Only move a key off the first saved endpoint when prefs still have the real URL.
+        if (knownEndpoints.size() > 0 && keyEp.equals(normalizeEndpoint(knownEndpoints.get(0)))) {
+            return customModelKey(mapped, api);
+        }
+        return s;
+    }
+
+    public static boolean sameCustomIdentity(String a, String b) {
+        if (a == null || b == null) return false;
+        String left = a.trim();
+        String right = b.trim();
+        if (left.length() == 0 || right.length() == 0) return false;
+        if (left.equals(right)) return true;
+        String apiA = modelApiId(left);
+        String apiB = modelApiId(right);
+        if (apiA.length() == 0 || apiB.length() == 0) return false;
+        if (apiA.equals(apiB)) return true;
+        if (apiA.equalsIgnoreCase(apiB)) return true;
+        if (apiA.endsWith("/" + apiB) || apiB.endsWith("/" + apiA)) return true;
+        String shortA = shortModel(left);
+        String shortB = shortModel(right);
+        if (shortA.length() == 0 || shortB.length() == 0) return false;
+        return shortA.equalsIgnoreCase(shortB);
+    }
+
+    public static ArrayList<String> endpointsInCatalog(ArrayList<String> catalog) {
+        ArrayList<String> out = new ArrayList<String>();
+        if (catalog == null) return out;
+        for (int i = 0; i < catalog.size(); i++) {
+            String ep = customModelEndpoint(catalog.get(i));
+            if (ep.length() > 0 && !out.contains(ep)) out.add(ep);
+        }
+        return out;
+    }
+
+    public static String pickIdentityMatch(String stored, ArrayList<String> matches) {
+        if (matches == null || matches.size() == 0) return "";
+        String s = stored == null ? "" : stored.trim();
+        for (int i = 0; i < matches.size(); i++) {
+            if (s.equals(matches.get(i))) return matches.get(i);
+        }
+        String api = modelApiId(s);
+        String ep = customModelEndpoint(s);
+        if (ep.length() > 0) {
+            for (int i = 0; i < matches.size(); i++) {
+                String m = matches.get(i);
+                if (ep.equals(customModelEndpoint(m)) && api.equals(modelApiId(m))) return m;
+            }
+            for (int i = 0; i < matches.size(); i++) {
+                String m = matches.get(i);
+                if (ep.equals(customModelEndpoint(m))) return m;
+            }
+        }
+        if (api.length() > 0) {
+            for (int i = 0; i < matches.size(); i++) {
+                if (api.equals(modelApiId(matches.get(i)))) return matches.get(i);
+            }
+        }
+        return matches.get(0);
+    }
+
+    public static ArrayList<String> catalogMatchesForStored(ArrayList<String> catalog, String stored) {
+        ArrayList<String> same = new ArrayList<String>();
+        String s = stored == null ? "" : stored.trim();
+        if (s.length() == 0 || catalog == null) return same;
+        for (int i = 0; i < catalog.size(); i++) {
+            String c = catalog.get(i);
+            if (c == null || c.length() == 0 || !isCustomModelKey(c)) continue;
+            if (sameCustomIdentity(s, c) && !same.contains(c)) same.add(c);
+        }
+        return same;
     }
 
     /**
@@ -1235,14 +1306,70 @@ public final class ToolText {
             String keyed = customModelKey(ep, api);
             if (listHas(catalog, keyed)) return keyed;
         }
-        ArrayList<String> same = catalogMatchesForApi(catalog, api);
-        if (same.size() == 1) return same.get(0);
-        if (keyEp.length() > 0) {
-            String keyed = customModelKey(keyEp, api);
-            if (listHas(catalog, keyed)) return keyed;
-            if (same.size() > 0 && !listHas(catalog, keyed)) return same.get(0);
+        ArrayList<String> same = catalogMatchesForStored(catalog, s);
+        if (same.size() == 0) return s;
+        String picked = pickIdentityMatch(s, same);
+        if (picked.length() > 0) return picked;
+        return s;
+    }
+
+    /**
+     * After a live /models fetch: catalog custom keys are ground truth.
+     * Drop first-endpoint orphans that that endpoint did not actually list.
+     * Keep extra models on endpoints that were not listed this round (404 TTS).
+     * Never rewrite the catalog itself.
+     */
+    public static ArrayList<String> reconcileMyModels(ArrayList<String> mine, ArrayList<String> catalog,
+            ArrayList<String> listedEndpoints) {
+        ArrayList<String> listed = new ArrayList<String>();
+        if (listedEndpoints != null) {
+            for (int i = 0; i < listedEndpoints.size(); i++) {
+                String ep = normalizeEndpoint(listedEndpoints.get(i));
+                if (ep.length() > 0 && !listed.contains(ep)) listed.add(ep);
+            }
         }
-        if (same.size() == 1) return same.get(0);
+        if (listed.size() == 0) listed.addAll(endpointsInCatalog(catalog));
+        ArrayList<String> out = new ArrayList<String>();
+        if (mine != null) {
+            for (int i = 0; i < mine.size(); i++) {
+                String m = mine.get(i);
+                if (m == null) continue;
+                m = m.trim();
+                if (m.length() == 0 || out.contains(m)) continue;
+                if (!isCustomModelKey(m)) out.add(m);
+            }
+        }
+        if (catalog != null) {
+            for (int i = 0; i < catalog.size(); i++) {
+                String c = catalog.get(i);
+                if (c == null) continue;
+                c = c.trim();
+                if (c.length() == 0 || !isCustomModelKey(c) || out.contains(c)) continue;
+                out.add(c);
+            }
+        }
+        if (mine != null) {
+            for (int i = 0; i < mine.size(); i++) {
+                String m = mine.get(i);
+                if (m == null) continue;
+                m = m.trim();
+                if (m.length() == 0 || !isCustomModelKey(m) || out.contains(m)) continue;
+                if (catalogMatchesForStored(catalog, m).size() > 0) continue;
+                String ep = customModelEndpoint(m);
+                if (!isKnownEndpoint(ep, listed)) out.add(m);
+            }
+        }
+        return out;
+    }
+
+    public static String retargetStoredModel(String stored, ArrayList<String> catalog, ArrayList<String> myModels) {
+        String s = stored == null ? "" : stored.trim();
+        if (s.length() == 0) return s;
+        if (listHas(myModels, s) || listHas(catalog, s)) return s;
+        String mineHit = pickIdentityMatch(s, catalogMatchesForStored(myModels, s));
+        if (mineHit.length() > 0) return mineHit;
+        String catHit = pickIdentityMatch(s, catalogMatchesForStored(catalog, s));
+        if (catHit.length() > 0) return catHit;
         return s;
     }
 

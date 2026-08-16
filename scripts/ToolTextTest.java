@@ -428,6 +428,8 @@ public class ToolTextTest {
                 ToolText.repairCustomIdentity(crofKey, "https://api.crof.ai/v1", eps));
         assertEq("repair ignores unknown map", zeddKey,
                 ToolText.repairCustomIdentity(zeddKey, "https://other.example/v1", eps));
+        assertEq("repair does not move crof key onto first endpoint", crofKey,
+                ToolText.repairCustomIdentity(crofKey, "http://zeddserver:8001/v1", eps));
 
         ArrayList<String> cat = new ArrayList<String>();
         cat.add(ToolText.customModelKey("http://zeddserver:8001/v1", "local-tts"));
@@ -441,6 +443,168 @@ public class ToolTextTest {
         String tts = ToolText.customModelKey("http://zeddserver:8001/v1", "local-tts");
         assertEq("rebind local model stays on zedd", tts,
                 ToolText.rebindStoredModel(tts, cat, "http://zeddserver:8001/v1", eps));
+
+        String crofVendor = ToolText.customModelKey("https://api.crof.ai/v1", "moonshotai/kimi-k2.5-lightning");
+        assertTrue("slug matches vendor-prefixed crof id",
+                ToolText.sameCustomIdentity(zeddKey, crofVendor));
+        ArrayList<String> live = new ArrayList<String>();
+        live.add(tts);
+        live.add(ToolText.customModelKey("http://zeddserver:8001/v1", "local-stt"));
+        live.add(crofVendor);
+        live.add(ToolText.customModelKey("https://api.crof.ai/v1", "anthropic/claude-sonnet-4"));
+        live.add(ToolText.customModelKey("https://api.crof.ai/v1", "kimi-k2.5"));
+        ArrayList<String> mineLive = new ArrayList<String>();
+        mineLive.add(tts);
+        mineLive.add(ToolText.customModelKey("http://zeddserver:8001/v1", "kimi-k2.5-lightning"));
+        mineLive.add(ToolText.customModelKey("http://zeddserver:8001/v1", "claude-sonnet-4"));
+        mineLive.add(ToolText.customModelKey("http://zeddserver:8001/v1", "kimi-k2.5"));
+        mineLive.add("openai/gpt-4o-mini");
+        ArrayList<String> listed = new ArrayList<String>();
+        listed.add("http://zeddserver:8001/v1");
+        listed.add("https://api.crof.ai/v1");
+        ArrayList<String> reconciled = ToolText.reconcileMyModels(mineLive, live, listed);
+        assertTrue("keeps real zedd tts", reconciled.contains(tts));
+        assertTrue("keeps real zedd stt from catalog",
+                reconciled.contains(ToolText.customModelKey("http://zeddserver:8001/v1", "local-stt")));
+        assertTrue("pins kimi to crof vendor id", reconciled.contains(crofVendor));
+        assertTrue("drops zedd-keyed kimi orphan",
+                !reconciled.contains(ToolText.customModelKey("http://zeddserver:8001/v1", "kimi-k2.5-lightning")));
+        assertTrue("drops zedd-keyed claude orphan",
+                !reconciled.contains(ToolText.customModelKey("http://zeddserver:8001/v1", "claude-sonnet-4")));
+        assertTrue("pins claude to crof",
+                reconciled.contains(ToolText.customModelKey("https://api.crof.ai/v1", "anthropic/claude-sonnet-4")));
+        assertTrue("pins bare crof id",
+                reconciled.contains(ToolText.customModelKey("https://api.crof.ai/v1", "kimi-k2.5")));
+        assertTrue("keeps openrouter", reconciled.contains("openai/gpt-4o-mini"));
+        assertTrue("no leftover zedd crof slugs",
+                ToolText.endpointCardHost(ToolText.customModelEndpoint(crofVendor)).equals("api.crof.ai"));
+        int zeddRows = 0, crofRows = 0;
+        for (int i = 0; i < reconciled.size(); i++) {
+            String ep = ToolText.customModelEndpoint(reconciled.get(i));
+            if (ep.contains("zeddserver")) zeddRows++;
+            if (ep.contains("crof.ai")) crofRows++;
+        }
+        assertTrue("only real zedd rows remain", zeddRows == 2);
+        assertTrue("all crof catalog rows present", crofRows == 3);
+
+        String bothZedd = ToolText.customModelKey("http://zeddserver:8001/v1", "shared-slug");
+        String bothCrof = ToolText.customModelKey("https://api.crof.ai/v1", "shared-slug");
+        ArrayList<String> bothCat = new ArrayList<String>();
+        bothCat.add(bothZedd);
+        bothCat.add(bothCrof);
+        ArrayList<String> bothMine = new ArrayList<String>();
+        bothMine.add(bothZedd);
+        ArrayList<String> bothOut = ToolText.reconcileMyModels(bothMine, bothCat, listed);
+        assertTrue("shared slug keeps zedd row", bothOut.contains(bothZedd));
+        assertTrue("shared slug adds crof row", bothOut.contains(bothCrof));
+
+        String ttsEp = "http://zeddserver:8002/v1";
+        String ttsOnly = ToolText.customModelKey(ttsEp, "tts-1");
+        ArrayList<String> listedNoTts = new ArrayList<String>();
+        listedNoTts.add("http://zeddserver:8001/v1");
+        listedNoTts.add("https://api.crof.ai/v1");
+        ArrayList<String> mineTts = new ArrayList<String>();
+        mineTts.add(ttsOnly);
+        mineTts.add(ToolText.customModelKey(ttsEp, "kimi-k2.5-lightning"));
+        ArrayList<String> outTts = ToolText.reconcileMyModels(mineTts, live, listedNoTts);
+        assertTrue("keeps unlisted tts-1", outTts.contains(ttsOnly));
+        assertTrue("unlisted tts kimi orphan replaced by crof", !outTts.contains(ToolText.customModelKey(ttsEp, "kimi-k2.5-lightning")));
+        assertTrue("crof kimi still added", outTts.contains(crofVendor));
+
+        ArrayList<String> catalogCopy = new ArrayList<String>(live);
+        ToolText.reconcileMyModels(mineLive, live, listed);
+        assertTrue("catalog size unchanged", catalogCopy.size() == live.size());
+        for (int i = 0; i < live.size(); i++) assertTrue("catalog row unchanged", catalogCopy.get(i).equals(live.get(i)));
+
+        assertEq("retarget orphan to crof", crofVendor,
+                ToolText.retargetStoredModel(
+                        ToolText.customModelKey("http://zeddserver:8001/v1", "kimi-k2.5-lightning"),
+                        live, reconciled));
+
+        String[] crofIds = new String[] {
+            "moonshotai/kimi-k2.5-lightning", "anthropic/claude-sonnet-4", "anthropic/claude-opus-4",
+            "openai/gpt-4o", "openai/gpt-4o-mini", "google/gemini-2.5-pro", "qwen/qwen3-32b",
+            "deepseek/deepseek-chat", "meta-llama/llama-3.3-70b", "mistralai/mistral-large",
+            "x-ai/grok-3", "cohere/command-r-plus", "moonshotai/kimi-k2.5", "anthropic/claude-haiku-4",
+            "openai/o3-mini", "google/gemini-2.5-flash", "qwen/qwen3-8b", "deepseek/deepseek-r1",
+            "meta-llama/llama-4-maverick", "mistralai/codestral", "x-ai/grok-3-mini",
+            "cohere/command-r", "nvidia/llama-3.1-nemotron", "01-ai/yi-large", "inflection/inflection-3",
+            "perplexity/sonar-pro", "ai21/jamba-1.5-large", "databricks/dbrx-instruct",
+            "microsoft/phi-4", "amazon/nova-pro", "snowflake/arctic", "together/llama-3.1-405b",
+            "fireworks/llama-v3p3-70b", "groq/llama-3.3-70b", "openrouter/auto",
+            "sao10k/l3-lunaris-8b", "nousresearch/hermes-3", "liquid/lfm-7b",
+            "minimax/minimax-m1", "internlm/internlm2.5"
+        };
+        String gen = "http://zeddserver:8001/v1";
+        String ttsEp2 = "http://zeddserver:8002/v1";
+        String voiceEp = "http://zeddserver:8003/v1";
+        String crof = "https://api.crof.ai/v1";
+        ArrayList<String> liveFour = new ArrayList<String>();
+        liveFour.add(ToolText.customModelKey(gen, "local-tts"));
+        liveFour.add(ToolText.customModelKey(gen, "local-stt"));
+        for (int i = 0; i < crofIds.length; i++) liveFour.add(ToolText.customModelKey(crof, crofIds[i]));
+        ArrayList<String> mineFour = new ArrayList<String>();
+        mineFour.add(ToolText.customModelKey(gen, "local-tts"));
+        for (int i = 0; i < crofIds.length; i++) {
+            String api = crofIds[i];
+            String bare = api.substring(api.lastIndexOf('/') + 1);
+            mineFour.add(ToolText.customModelKey(gen, i % 2 == 0 ? api : bare));
+        }
+        mineFour.add(ToolText.customModelKey(ttsEp2, "tts-1"));
+        mineFour.add(ToolText.customModelKey(ttsEp2, "kimi-k2.5-lightning"));
+        mineFour.add(ToolText.customModelKey(voiceEp, "whisper-1"));
+        ArrayList<String> listedFour = new ArrayList<String>();
+        listedFour.add(gen);
+        listedFour.add(crof);
+        ArrayList<String> outFour = ToolText.reconcileMyModels(mineFour, liveFour, listedFour);
+        int zeddGen = 0, crofN = 0, wrongCrofHost = 0;
+        for (int i = 0; i < outFour.size(); i++) {
+            String k = outFour.get(i);
+            String host = ToolText.endpointCardHost(ToolText.customModelEndpoint(k));
+            if (host.equals("zeddserver:8001")) zeddGen++;
+            if (host.equals("api.crof.ai")) crofN++;
+            if (host.equals("zeddserver:8001") || host.equals("zeddserver:8002") || host.equals("zeddserver:8003")) {
+                String slug = ToolText.shortModel(k);
+                for (int j = 0; j < crofIds.length; j++) {
+                    if (slug.equalsIgnoreCase(ToolText.shortModel(crofIds[j])) && !slug.equals("local-tts") && !slug.equals("local-stt")) {
+                        wrongCrofHost++;
+                    }
+                }
+            }
+        }
+        assertTrue("four-endpoint: real zedd gen rows only", zeddGen == 2);
+        assertTrue("four-endpoint: all crof rows pinned", crofN == crofIds.length);
+        assertTrue("four-endpoint: no crof slug left on zedd", wrongCrofHost == 0);
+        assertTrue("four-endpoint: keeps unlisted tts-1", outFour.contains(ToolText.customModelKey(ttsEp2, "tts-1")));
+        assertTrue("four-endpoint: drops tts-endpoint crof orphan",
+                !outFour.contains(ToolText.customModelKey(ttsEp2, "kimi-k2.5-lightning")));
+        assertTrue("four-endpoint: keeps unlisted whisper",
+                outFour.contains(ToolText.customModelKey(voiceEp, "whisper-1")));
+        for (int i = 0; i < crofIds.length; i++) {
+            String want = ToolText.customModelKey(crof, crofIds[i]);
+            assertTrue("four-endpoint host " + crofIds[i],
+                    ToolText.endpointCardHost(ToolText.customModelEndpoint(want)).equals("api.crof.ai"));
+            assertTrue("four-endpoint has " + crofIds[i], outFour.contains(want));
+            String zeddBare = ToolText.customModelKey(gen, ToolText.shortModel(crofIds[i]));
+            String zeddVendor = ToolText.customModelKey(gen, crofIds[i]);
+            assertTrue("four-endpoint dropped zedd bare " + crofIds[i], !outFour.contains(zeddBare));
+            assertTrue("four-endpoint dropped zedd vendor " + crofIds[i], !outFour.contains(zeddVendor));
+        }
+        ArrayList<String> inferred = ToolText.reconcileMyModels(mineFour, liveFour, null);
+        assertTrue("infer listed still pins crof", inferred.contains(ToolText.customModelKey(crof, crofIds[0])));
+        assertTrue("infer listed drops zedd kimi",
+                !inferred.contains(ToolText.customModelKey(gen, "kimi-k2.5-lightning")));
+        assertTrue("infer listed keeps tts-1", inferred.contains(ToolText.customModelKey(ttsEp2, "tts-1")));
+        String selectedOrphan = ToolText.customModelKey(gen, "claude-sonnet-4");
+        assertEq("retarget selected orphan to crof vendor",
+                ToolText.customModelKey(crof, "anthropic/claude-sonnet-4"),
+                ToolText.retargetStoredModel(selectedOrphan, liveFour, outFour));
+        ArrayList<String> liveCopy = new ArrayList<String>(liveFour);
+        ToolText.reconcileMyModels(mineFour, liveFour, listedFour);
+        assertTrue("four-endpoint catalog size unchanged", liveCopy.size() == liveFour.size());
+        for (int i = 0; i < liveFour.size(); i++) {
+            assertTrue("four-endpoint catalog row unchanged", liveCopy.get(i).equals(liveFour.get(i)));
+        }
 
         if (failed > 0) { System.err.println(failed + " failed"); System.exit(1); }
         System.out.println("all passed");
