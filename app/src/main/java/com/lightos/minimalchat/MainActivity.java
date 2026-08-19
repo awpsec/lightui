@@ -118,7 +118,7 @@ public class MainActivity extends Activity {
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
     private static final String SEARCHING = "__searching__";
-    private static final String APP_VERSION = "1.0.45";
+    private static final String APP_VERSION = "1.0.46";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 48;
@@ -3517,7 +3517,7 @@ public class MainActivity extends Activity {
                 if (source.equals("openrouter")) req.put("usage", new JSONObject().put("include", true));
                 StreamRound sr;
                 try {
-                    sr = streamChatCompletion(req, key, source, assistant);
+                    sr = streamChatCompletion(req, key, source, model, assistant);
                 } catch (RuntimeException e) {
                     if (nativeTools && AgentTools.looksLikeToolsUnsupported(e.getMessage())) {
                         nativeTools = false;
@@ -4008,9 +4008,11 @@ public class MainActivity extends Activity {
         }
     }
 
-    private StreamRound streamChatCompletion(JSONObject body, String key, String source, final Msg assistant) throws Exception {
+    private StreamRound streamChatCompletion(JSONObject body, String key, String source, String model, final Msg assistant) throws Exception {
         StreamRound round = new StreamRound();
-        HttpURLConnection c = (HttpURLConnection) new URL(chatCompletionsUrl(source, body.optString("model", ""))).openConnection();
+        String url = chatCompletionsUrl(source, model);
+        if (url.length() == 0) throw new RuntimeException("add endpoint");
+        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
         c.setRequestMethod("POST"); c.setConnectTimeout(30000); c.setReadTimeout(120000); c.setDoOutput(true);
         if (key.length() > 0) c.setRequestProperty("Authorization", "Bearer " + key);
         c.setRequestProperty("Content-Type", "application/json");
@@ -6157,7 +6159,9 @@ public class MainActivity extends Activity {
     private String soleCustomEndpoint() { return customEndpoints.size() == 1 ? customEndpoints.get(0) : ""; }
     private String normalizeEndpoint(String endpoint) { return ToolText.normalizeEndpoint(endpoint); }
     private String chatCompletionsUrl(String source) { return chatCompletionsUrl(source, selectedModel()); }
-    private String chatCompletionsUrl(String source, String model) { return (source.equals("custom") ? modelEndpoint(model) : OPENROUTER_ENDPOINT) + "/chat/completions"; }
+    private String chatCompletionsUrl(String source, String model) {
+        return ToolText.chatCompletionsUrl(source, model, OPENROUTER_ENDPOINT, modelEndpoint(model));
+    }
 
     private String endpointKey(String endpoint) {
         String e = normalizeEndpoint(endpoint);
