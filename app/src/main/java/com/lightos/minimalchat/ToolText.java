@@ -1190,6 +1190,24 @@ public final class ToolText {
         return parts.length >= 2 ? normalizeEndpoint(parts[1]) : "";
     }
 
+    /**
+     * POST URL for chat completions. Custom models must pass the catalog key
+     * (`custom|&lt;endpoint&gt;|&lt;id&gt;`), not the stripped API id from the JSON body.
+     * Never returns a protocol-less path like `/chat/completions`.
+     */
+    public static String chatCompletionsUrl(String source, String model, String openrouterEndpoint,
+            String mappedEndpoint) {
+        String base;
+        if ("custom".equals(source) || isCustomModelKey(model)) {
+            base = customModelEndpoint(model);
+            if (base.length() == 0) base = normalizeEndpoint(mappedEndpoint);
+        } else {
+            base = normalizeEndpoint(openrouterEndpoint);
+        }
+        if (base.length() == 0) return "";
+        return base + "/chat/completions";
+    }
+
     public static boolean isKnownEndpoint(String endpoint, ArrayList<String> known) {
         String n = normalizeEndpoint(endpoint);
         if (n.length() == 0 || known == null) return false;

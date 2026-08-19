@@ -390,6 +390,21 @@ public class ToolTextTest {
         assertEq("provider openrouter vendor", "moonshotai",
                 ToolText.modelProviderLabel("moonshotai/kimi-k2.5-lightning", "openrouter"));
         assertEq("idempotent custom key", customKey, ToolText.customModelKey("https://api.example.com/v1", customKey));
+        String orBase = "https://openrouter.ai/api/v1";
+        assertEq("completions from custom catalog key", "https://api.example.com/v1/chat/completions",
+                ToolText.chatCompletionsUrl("custom", customKey, orBase, ""));
+        assertEq("stripped api id is not a completions url", "",
+                ToolText.chatCompletionsUrl("custom", "kimi-k2.5-lightning", orBase, ""));
+        assertTrue("never protocol-less path",
+                !"/chat/completions".equals(ToolText.chatCompletionsUrl("custom", "kimi-k2.5-lightning", orBase, "")));
+        assertEq("completions mapped fallback for api id", "https://api.example.com/v1/chat/completions",
+                ToolText.chatCompletionsUrl("custom", "kimi-k2.5-lightning", orBase, "https://api.example.com/v1"));
+        assertEq("openrouter completions", orBase + "/chat/completions",
+                ToolText.chatCompletionsUrl("openrouter", "openai/gpt-4o-mini", orBase, ""));
+        String crofVendorKey = ToolText.customModelKey("https://api.crof.ai/v1", "moonshotai/kimi-k2.5-lightning");
+        assertEq("crof completions ignores stripped body model", "https://api.crof.ai/v1/chat/completions",
+                ToolText.chatCompletionsUrl("custom", crofVendorKey, orBase,
+                        ToolText.customModelEndpoint("moonshotai/kimi-k2.5-lightning")));
 
         ArrayList<String> catalog = new ArrayList<String>();
         catalog.add("moonshotai/kimi-k2.5-lightning");

@@ -50,6 +50,12 @@ public class AgentToolsTest {
         JSONObject customBody = AgentTools.completionBody(
                 "custom|https://api.example.com/v1|kimi-k2.5-lightning", new JSONArray(), null, true, true);
         assertEq("completion strips custom prefix", "kimi-k2.5-lightning", customBody.getString("model"));
+        String catalogKey = "custom|https://api.example.com/v1|kimi-k2.5-lightning";
+        assertEq("stream url uses catalog key not body model",
+                "https://api.example.com/v1/chat/completions",
+                ToolText.chatCompletionsUrl("custom", catalogKey, "https://openrouter.ai/api/v1", ""));
+        assertEq("body model alone is not a url", "",
+                ToolText.chatCompletionsUrl("custom", customBody.getString("model"), "https://openrouter.ai/api/v1", ""));
 
         AgentTools.RoundState st = new AgentTools.RoundState();
         AgentTools.absorbSseData(st, "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_abc\",\"type\":\"function\",\"function\":{\"name\":\"web_search\",\"arguments\":\"\"}}]}}]}");
