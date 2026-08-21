@@ -673,6 +673,41 @@ public class ToolTextTest {
         assertTrue("dedicated speech not chat-audio",
                 ToolText.dedicatedSpeechNotChatAudio("fish-audio/s1", "", true));
 
+        JSONObject grokJson = new JSONObject();
+        grokJson.put("id", "x-ai/grok-voice-tts-1.0");
+        grokJson.put("supported_voices", new JSONArray().put("eve").put("ara").put("rex").put("sal").put("leo"));
+        ArrayList<String> grokVoices = ToolText.parseSupportedVoices(grokJson);
+        assertTrue("grok catalog has 5 voices", grokVoices.size() == 5);
+        assertEq("grok first voice is eve", "eve", grokVoices.get(0));
+        assertTrue("grok fallback includes eve",
+                java.util.Arrays.asList(ToolText.fallbackVoicesForModel("x-ai/grok-voice-tts-1.0")).contains("eve"));
+        assertTrue("unknown tts has no openai fallback",
+                ToolText.fallbackVoicesForModel("fish-audio/s1").length == 0);
+        assertTrue("openai fallback still alloy",
+                java.util.Arrays.asList(ToolText.fallbackVoicesForModel("openai/gpt-4o-mini-tts")).contains("alloy"));
+        ArrayList<String> grokShown = ToolText.voiceNamesForModel("x-ai/grok-voice-tts-1.0", grokVoices, "eve");
+        assertTrue("picker shows eve", grokShown.contains("eve"));
+        assertTrue("picker shows ara", grokShown.contains("ara"));
+        assertTrue("picker does not inject alloy onto grok", !grokShown.contains("alloy"));
+        ArrayList<String> grokFallbackShown = ToolText.voiceNamesForModel("x-ai/grok-voice-tts-1.0", new ArrayList<String>(), "");
+        assertEq("fallback default is eve not alloy", "eve", grokFallbackShown.get(0));
+        assertEq("typed eve is kept", "eve",
+                ToolText.resolveSelectedVoice("eve", grokVoices));
+        assertEq("EVE matches catalog casing", "eve",
+                ToolText.resolveSelectedVoice("EVE", grokVoices));
+        assertEq("leftover alloy dropped for grok", "eve",
+                ToolText.resolveSelectedVoice("alloy", grokVoices));
+        assertEq("custom clone id kept", "my-voice-id",
+                ToolText.resolveSelectedVoice("my-voice-id", grokVoices));
+        assertEq("alloy leftover on fish is blank", "",
+                ToolText.resolveSelectedVoice("alloy", new ArrayList<String>()));
+        assertEq("custom kept when catalog empty", "ref_abc",
+                ToolText.resolveSelectedVoice("ref_abc", new ArrayList<String>()));
+        ArrayList<String> withCustom = ToolText.voiceNamesForModel("fish-audio/s1", new ArrayList<String>(), "ref_abc");
+        assertTrue("custom appears in empty catalog list", withCustom.size() == 1 && "ref_abc".equals(withCustom.get(0)));
+        assertEq("discovery key for grok", "model:x-ai/grok-voice-tts-1.0",
+                ToolText.voiceDiscoveryKey(false, "", "x-ai/grok-voice-tts-1.0"));
+
         if (failed > 0) { System.err.println(failed + " failed"); System.exit(1); }
         System.out.println("all passed");
     }

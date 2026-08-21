@@ -1310,6 +1310,114 @@ public final class ToolText {
         return architectureHasModality(model, "output", "speech");
     }
 
+    /** Voices advertised on an OpenRouter (or compatible) model object. */
+    public static ArrayList<String> parseSupportedVoices(JSONObject model) {
+        ArrayList<String> out = new ArrayList<String>();
+        if (model == null) return out;
+        JSONArray arr = model.optJSONArray("supported_voices");
+        if (arr == null) arr = model.optJSONArray("voices");
+        if (arr == null) return out;
+        for (int i = 0; i < arr.length(); i++) {
+            JSONObject o = arr.optJSONObject(i);
+            String v = o == null ? arr.optString(i, "") : o.optString("id", o.optString("name", o.optString("voice", "")));
+            v = v == null ? "" : v.trim();
+            if (v.length() > 0 && !out.contains(v)) out.add(v);
+        }
+        return out;
+    }
+
+    public static String voiceDiscoveryKey(boolean endpointMode, String endpoint, String model) {
+        if (endpointMode) return "endpoint:" + (endpoint == null ? "" : endpoint.trim());
+        String id = model == null ? "" : model.trim();
+        return id.length() == 0 ? "model:" : "model:" + id;
+    }
+
+    public static boolean isGenericOpenAiVoice(String voice) {
+        String v = voice == null ? "" : voice.trim().toLowerCase(Locale.US);
+        return v.equals("alloy") || v.equals("ash") || v.equals("ballad") || v.equals("coral") || v.equals("echo")
+                || v.equals("fable") || v.equals("nova") || v.equals("onyx") || v.equals("sage") || v.equals("shimmer")
+                || v.equals("verse");
+    }
+
+    public static String[] fallbackVoicesForModel(String model) {
+        String m = model == null ? "" : model.toLowerCase(Locale.US);
+        if (m.contains("grok") && (m.contains("voice") || m.contains("tts"))) {
+            return new String[] { "eve", "ara", "rex", "sal", "leo" };
+        }
+        if (m.contains("kokoro")) {
+            return new String[] { "af_heart", "af_alloy", "af_aoede", "af_bella", "af_jessica", "af_kore", "af_nicole",
+                    "af_nova", "af_river", "af_sarah", "af_sky", "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam",
+                    "am_michael", "am_onyx", "am_puck", "am_santa", "bf_alice", "bf_emma", "bf_isabella", "bf_lily",
+                    "bm_daniel", "bm_fable", "bm_george", "bm_lewis" };
+        }
+        if (m.contains("orpheus")) return new String[] { "tara", "leah", "jess", "leo", "dan", "mia", "zac" };
+        if (m.contains("csm-1b") || m.contains("sesame")) {
+            return new String[] { "conversational_a", "conversational_b", "read_speech_a", "read_speech_b",
+                    "read_speech_c", "read_speech_d" };
+        }
+        if (m.contains("mai-voice")) {
+            return new String[] { "en-US-Harper:MAI-Voice-2", "es-MX-Valeria:MAI-Voice-2", "fr-FR-Soleil:MAI-Voice-2",
+                    "de-DE-Klaus:MAI-Voice-2" };
+        }
+        if (m.contains("voxtral")) {
+            return new String[] { "en_paul_neutral", "en_paul_cheerful", "gb_oliver_neutral", "gb_jane_neutral",
+                    "fr_marie_neutral" };
+        }
+        if (m.contains("gemini") && (m.contains("tts") || m.contains("lyria") || m.contains("audio"))) {
+            return new String[] { "Zephyr", "Puck", "Charon", "Kore", "Fenrir", "Leda", "Orus", "Aoede", "Callirrhoe",
+                    "Autonoe", "Enceladus", "Iapetus", "Umbriel", "Algieba", "Despina", "Erinome", "Algenib",
+                    "Rasalgethi", "Laomedeia", "Achernar", "Alnilam", "Schedar", "Gacrux", "Pulcherrima", "Achird",
+                    "Zubenelgenubi", "Vindemiatrix", "Sadachbia", "Sadaltager", "Sulafat" };
+        }
+        if (m.contains("openai") || m.contains("gpt-4o") || m.contains("gpt-audio") || m.contains("tts-1")) {
+            return new String[] { "alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer",
+                    "verse" };
+        }
+        return new String[0];
+    }
+
+    /** Catalog voices first; fallback only when the catalog has none. Custom saved names stay visible. */
+    public static ArrayList<String> voiceNamesForModel(String model, ArrayList<String> discovered, String saved) {
+        ArrayList<String> out = new ArrayList<String>();
+        if (discovered != null) {
+            for (int i = 0; i < discovered.size(); i++) {
+                String v = discovered.get(i);
+                if (v != null && v.trim().length() > 0 && !out.contains(v.trim())) out.add(v.trim());
+            }
+        }
+        if (out.size() == 0) {
+            String[] fb = fallbackVoicesForModel(model);
+            for (int i = 0; i < fb.length; i++) if (!out.contains(fb[i])) out.add(fb[i]);
+        }
+        String s = saved == null ? "" : saved.trim();
+        if (s.length() > 0) {
+            boolean present = false;
+            for (int i = 0; i < out.size(); i++) {
+                if (out.get(i).equalsIgnoreCase(s)) { present = true; break; }
+            }
+            if (!present) out.add(0, s);
+        }
+        return out;
+    }
+
+    /**
+     * Keep a typed/custom voice. Only replace leftover OpenAI defaults when this model
+     * has its own list that does not include them.
+     */
+    public static String resolveSelectedVoice(String saved, ArrayList<String> names) {
+        String v = saved == null ? "" : saved.trim();
+        if (names == null || names.size() == 0) {
+            if (isGenericOpenAiVoice(v)) return "";
+            return v;
+        }
+        if (v.length() == 0) return names.get(0);
+        for (int i = 0; i < names.size(); i++) {
+            if (names.get(i).equalsIgnoreCase(v)) return names.get(i);
+        }
+        if (isGenericOpenAiVoice(v)) return names.get(0);
+        return v;
+    }
+
     private static boolean containsWord(String haystack, String word) {
         if (haystack == null || word == null || word.length() == 0) return false;
         int from = 0;
