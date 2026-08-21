@@ -44,6 +44,11 @@ public class ApkProvider extends ContentProvider {
         if (cache.exists()) return cache;
         File files = new File(getContext().getFilesDir(), name);
         if (files.exists()) return files;
+        File extDir = getContext().getExternalFilesDir(null);
+        if (extDir != null) {
+            File ext = new File(extDir, name);
+            if (ext.exists()) return ext;
+        }
         return cache;
     }
 
