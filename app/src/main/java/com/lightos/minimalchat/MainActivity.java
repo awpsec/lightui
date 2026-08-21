@@ -118,7 +118,7 @@ public class MainActivity extends Activity {
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
     private static final String SEARCHING = "__searching__";
-    private static final String APP_VERSION = "1.0.51";
+    private static final String APP_VERSION = "1.0.52";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 48;
@@ -192,8 +192,9 @@ public class MainActivity extends Activity {
     private JumpTextView voiceThinkJump;
     private BorderWaveView voiceBorder;
     private ValueAnimator voiceChromeHeightAnim;
-    private int voiceChromeMode = 0, voiceRevealRun = 0, voiceRevealAt = 0, voiceSpeechFollowRun = 0;
+    private int voiceChromeMode = 0, voiceRevealRun = 0, voiceRevealAt = 0, voiceSpeechFollowRun = 0, voiceWaitPulseRun = 0, voiceWaitPulseStep = 0;
     private String voiceRevealTarget = "", voicePlain = "";
+    private boolean voiceWaitPulseOn = false;
     private final ArrayList<String> models = new ArrayList<String>();
     private final ArrayList<String> myModels = new ArrayList<String>();
     private final ArrayList<String> pinnedModels = new ArrayList<String>();
@@ -6639,6 +6640,8 @@ public class MainActivity extends Activity {
 
     private void idleVoiceAfterMiss() {
         voiceAwaitingSpeechResult = false;
+        voiceThinking = false;
+        haltVoiceWaitPulse();
         if (speechRecognizer != null) {
             try { speechRecognizer.stopListening(); } catch (Exception ignored) { }
         }
@@ -6686,6 +6689,10 @@ public class MainActivity extends Activity {
         startVoiceThinking();
         closeCompactVoiceOverlay();
         if (!send()) stopVoiceThinking();
+        else {
+            startVoiceThinking();
+            renderVoiceConversation();
+        }
     }
 
     private boolean isBogusVoiceTranscript(String text) {
@@ -7598,6 +7605,7 @@ public class MainActivity extends Activity {
             setTextPx(voiceThinkJump, 16);
             voiceThinkJump.waveBase = 210;
             voiceThinkJump.setAlpha(0f);
+            voiceThinkJump.setMinHeight(dp(40));
             voiceChrome.addView(voiceThinkJump, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
             voiceChrome.addView(voiceWaves, new FrameLayout.LayoutParams(-1, -1));
         }
@@ -7652,6 +7660,7 @@ public class MainActivity extends Activity {
         abandonVoiceAudioFocus();
         applyVoiceWindowBlur(false);
         if (!prefs.getBoolean("keepScreenAwake", false)) getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        haltVoiceWaitPulse();
         stopVoiceThinking();
         if (speechRecognizer != null) speechRecognizer.stopListening();
         stopRecorder(false);
@@ -7880,9 +7889,10 @@ public class MainActivity extends Activity {
             voiceThinkJump.word = ToolText.ensureEllipsis("thinking");
             voiceThinkJump.jumpStartMs = android.os.SystemClock.uptimeMillis();
             voiceThinkJump.bind(null);
+            voiceThinkJump.setAlpha(1f);
             voiceThinkJump.invalidate();
         }
-        fadeVoiceChild(voiceThinkJump, think, animate);
+        fadeVoiceChild(voiceThinkJump, think, think ? false : animate);
         animateViewHeight(slot, target, true);
         if (listen) setVoiceLevel(0.03f);
         if (think) setVoiceLevel(0.02f);
@@ -7936,6 +7946,12 @@ public class MainActivity extends Activity {
     private void renderVoiceConversation() {
         if (voiceText == null) return;
         if (voiceRevealTarget.length() > 0 && voiceRevealAt < voiceRevealTarget.length()) return;
+        setVoiceText(voiceConversationText(true));
+        if (voiceText != null) voiceText.setAlpha(1f);
+        if (voiceWaitingForReply()) kickVoiceWaitPulse();
+    }
+
+    private String voiceConversationText(boolean includeWait) {
         StringBuilder b = new StringBuilder();
         int start = Math.max(0, messages.size() - 12);
         for (int i = start; i < messages.size(); i++) {
@@ -7947,8 +7963,56 @@ public class MainActivity extends Activity {
             if (m.role.equals("assistant") && m.streamDone && m.memorySaved) b.append("\nmemory saved");
             b.append("\n").append(body);
         }
-        setVoiceText(b.toString());
-        if (voiceText != null) voiceText.setAlpha(1f);
+        if (includeWait && voiceWaitingForReply()) {
+            if (b.length() > 0) b.append("\n\n");
+            b.append("assistant\n").append(ToolText.voiceWaitPulse(voiceWaitPulseStep));
+        }
+        return b.toString();
+    }
+
+    private boolean voiceHoldPendingReply() {
+        if (!voiceMode || !voiceFullMode) return false;
+        if (voiceAwaitingSpeechResult) return false;
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            Msg m = messages.get(i);
+            if (!"assistant".equals(m.role)) continue;
+            if (m.voiceSessionId != 0 && m.voiceSessionId != voiceSession) return false;
+            if (!m.slowVoice) return false;
+            if (m.ttsStarted || m.ttsHeardChars > 0) return false;
+            if (m.streamDone && !isBusyStats(m.stats) && (m.text == null || m.text.trim().length() == 0)) return false;
+            return true;
+        }
+        return false;
+    }
+
+    private boolean voiceWaitingForReply() {
+        if (!voiceMode || !voiceFullMode) return false;
+        if (voiceAwaitingSpeechResult) return false;
+        return voiceThinking || voiceHoldPendingReply();
+    }
+
+    private void kickVoiceWaitPulse() {
+        if (!voiceWaitingForReply() || voiceWaitPulseOn) return;
+        voiceWaitPulseOn = true;
+        final int run = ++voiceWaitPulseRun;
+        ui.post(new Runnable() { @Override public void run() { tickVoiceWaitPulse(run); } });
+    }
+
+    private void tickVoiceWaitPulse(final int run) {
+        if (run != voiceWaitPulseRun) return;
+        if (!voiceWaitingForReply()) {
+            voiceWaitPulseOn = false;
+            return;
+        }
+        renderVoiceConversation();
+        voiceWaitPulseStep++;
+        ui.postDelayed(new Runnable() { @Override public void run() { tickVoiceWaitPulse(run); } }, 420);
+    }
+
+    private void haltVoiceWaitPulse() {
+        voiceWaitPulseRun++;
+        voiceWaitPulseOn = false;
+        voiceWaitPulseStep = 0;
     }
 
     private String voiceAssistantVisible(Msg m) {
@@ -7961,18 +8025,7 @@ public class MainActivity extends Activity {
     }
 
     private String voiceHistoryText() {
-        StringBuilder b = new StringBuilder();
-        int start = Math.max(0, messages.size() - 12);
-        for (int i = start; i < messages.size(); i++) {
-            Msg m = messages.get(i);
-            String body = m.role.equals("assistant") ? voiceAssistantVisible(m) : m.text;
-            if (body.length() == 0 || isBusyStats(m.stats) && ".".equals(body)) continue;
-            if (b.length() > 0) b.append("\n\n");
-            b.append(m.role.equals("user") ? "you" : "assistant");
-            if (m.role.equals("assistant") && m.streamDone && m.memorySaved) b.append("\nmemory saved");
-            b.append("\n").append(body);
-        }
-        return b.toString();
+        return voiceConversationText(false);
     }
 
     private void revealVoiceTranscript(String spoken) {
@@ -8005,6 +8058,7 @@ public class MainActivity extends Activity {
         if (voiceRevealAt >= voiceRevealTarget.length()) {
             voiceRevealTarget = "";
             if (voiceText != null) voiceText.setAlpha(1f);
+            if (voiceWaitingForReply()) renderVoiceConversation();
             return;
         }
         int step = voiceRevealTarget.length() - voiceRevealAt > 90 ? 4 : 2;
@@ -8017,6 +8071,7 @@ public class MainActivity extends Activity {
         } else {
             voiceRevealTarget = "";
             voiceText.setAlpha(1f);
+            if (voiceWaitingForReply()) renderVoiceConversation();
         }
     }
 
@@ -8024,7 +8079,6 @@ public class MainActivity extends Activity {
         if (owner == null) return;
         voiceRevealRun++;
         voiceRevealTarget = "";
-        stopVoiceThinking();
         String full = owner.text == null ? "" : owner.text;
         String piece = chunk == null ? "" : chunk.trim();
         if (piece.length() > 0 && full.length() > 0) {
@@ -8035,6 +8089,7 @@ public class MainActivity extends Activity {
             owner.ttsHeardChars = Math.max(owner.ttsHeardChars, 1);
         }
         owner.ttsStarted = true;
+        stopVoiceThinking();
         renderVoiceConversation();
         followVoiceChunk(owner, chunk);
     }
@@ -8045,9 +8100,9 @@ public class MainActivity extends Activity {
         if (full.length() == 0) return;
         int n = Math.max(1, Math.min(full.length(), chars));
         if (n <= owner.ttsHeardChars) return;
-        stopVoiceThinking();
         owner.ttsStarted = true;
         owner.ttsHeardChars = n;
+        stopVoiceThinking();
         voiceRevealRun++;
         voiceRevealTarget = "";
         renderVoiceConversation();
@@ -8079,14 +8134,23 @@ public class MainActivity extends Activity {
         voiceThinkingRun++;
         if (voiceFullMode) {
             setVoiceChrome(2, true);
+            kickVoiceWaitPulse();
+            renderVoiceConversation();
             return;
         }
         if (voiceStatus != null) voiceStatus.setText(voiceThinkingWord);
     }
 
     private void stopVoiceThinking() {
+        if (voiceFullMode && voiceHoldPendingReply()) {
+            voiceThinking = true;
+            if (voiceChromeMode != 2) setVoiceChrome(2, true);
+            kickVoiceWaitPulse();
+            return;
+        }
         voiceThinking = false;
         voiceThinkingRun++;
+        haltVoiceWaitPulse();
         if (voiceFullMode && voiceChromeMode != 0) setVoiceChrome(0, true);
         if (voiceStatus != null && !voiceFullMode) {
             voiceStatus.animate().cancel();
@@ -10321,7 +10385,7 @@ public class MainActivity extends Activity {
             postDelayed(tick, 32);
         }
         @Override protected void onDraw(Canvas c) {
-            if (getWidth() <= 0 || getHeight() <= 2) return;
+            if (getWidth() <= 0 || getHeight() <= 0) return;
             String w = word == null || word.length() == 0 ? "thinking..." : word;
             long start;
             if (bound != null && bound.jumpAnimStartMs > 0L) start = bound.jumpAnimStartMs;

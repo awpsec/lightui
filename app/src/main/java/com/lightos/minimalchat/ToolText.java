@@ -1957,6 +1957,14 @@ public final class ToolText {
         return t.equals("thinking") || t.startsWith("thinking");
     }
 
+    /** In-transcript wait mark while the assistant reply has not started speaking. */
+    public static String voiceWaitPulse(int step) {
+        int n = 1 + Math.abs(step % 3);
+        if (n == 1) return "thinking.";
+        if (n == 2) return "thinking..";
+        return "thinking...";
+    }
+
     /**
      * SpeechRecognizer onRmsChanged is typically -2..10 dB. Device silence is
      * often 0 dB, not -2, so keep 0 dB idle. Speech starts around 2..4.
