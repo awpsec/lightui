@@ -118,7 +118,7 @@ public class MainActivity extends Activity {
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
     private static final String SEARCHING = "__searching__";
-    private static final String APP_VERSION = "1.0.46";
+    private static final String APP_VERSION = "1.0.47";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 48;
@@ -203,6 +203,8 @@ public class MainActivity extends Activity {
     private final HashMap<String, ArrayList<String>> discoveredVoices = new HashMap<String, ArrayList<String>>();
     private final HashSet<String> audioInputModels = new HashSet<String>();
     private final HashSet<String> audioOutputModels = new HashSet<String>();
+    private final HashSet<String> sttModels = new HashSet<String>();
+    private final HashSet<String> speechTtsModels = new HashSet<String>();
     private final HashSet<String> reasoningModels = new HashSet<String>();
     private final HashSet<String> speedModels = new HashSet<String>();
     private final HashSet<String> discoveringVoiceEndpoints = new HashSet<String>();
@@ -1902,10 +1904,17 @@ public class MainActivity extends Activity {
             String q = typed.toLowerCase(Locale.US);
             ArrayList<String> shown = new ArrayList<String>();
             addKnownTtsModels(list, d, shown, q);
-            for (String m : models) if (!"custom".equals(modelSource(m)) && isTtsModel(m) && (q.length() == 0 || modelMatches(m, q) || isAudioSearch(q))) addTtsChoice(list, d, shown, m);
-            if (q.length() > 0) for (String m : models) if (!"custom".equals(modelSource(m)) && isTtsModel(m) && modelMatches(m, q)) addTtsChoice(list, d, shown, m);
-            if (typed.length() > 1 && !isAudioSearch(q) && !shown.contains(typed)) addTtsChoice(list, d, shown, typed);
-            status.setText(shown.size() + " shown. type to search all openrouter models");
+            for (String m : models) addTtsIfMatch(list, d, shown, m, q);
+            for (String m : new ArrayList<String>(speechTtsModels)) addTtsIfMatch(list, d, shown, m, q);
+            if (q.length() > 0) {
+                for (String m : models) {
+                    if ("custom".equals(modelSource(m))) continue;
+                    if (!modelMatches(m, q)) continue;
+                    if (isTtsModel(m) || speechTtsModels.contains(m) || audioOutputModels.contains(m)) addTtsChoice(list, d, shown, m);
+                }
+            }
+            if (typed.length() > 1 && (typed.indexOf('/') >= 0 || !ToolText.isTtsSearch(q)) && !shown.contains(typed) && !shown.contains(typedModelKey(typed))) addTtsChoice(list, d, shown, typed);
+            status.setText(shown.size() + " shown. type to search openrouter speech models");
         } };
         search.addTextChangedListener(new TextWatcher() { @Override public void beforeTextChanged(CharSequence s, int st, int c, int a) { } @Override public void onTextChanged(CharSequence s, int st, int b, int c) { render[0].run(); } @Override public void afterTextChanged(Editable e) { } });
         render[0].run();
@@ -1938,12 +1947,18 @@ public class MainActivity extends Activity {
             final String typed = search.getText().toString().trim();
             String q = typed.toLowerCase(Locale.US);
             ArrayList<String> shown = new ArrayList<String>();
-            addTranscriptionChoice(list, d, shown, "whisper-1");
-            addTranscriptionChoice(list, d, shown, "openai/whisper-1");
-            for (String m : models) if (!"custom".equals(modelSource(m)) && isTranscriptionModel(m) && (q.length() == 0 || modelMatches(m, q) || isTranscriptionSearch(q))) addTranscriptionChoice(list, d, shown, m);
-            if (q.length() > 0) for (String m : models) if (!"custom".equals(modelSource(m)) && modelMatches(m, q) && (isTranscriptionModel(m) || audioInputModels.contains(m))) addTranscriptionChoice(list, d, shown, m);
-            if (typed.length() > 1 && !isTranscriptionSearch(q) && !shown.contains(typed)) addTranscriptionChoice(list, d, shown, typed);
-            status.setText(shown.size() + " shown. voice-agent input falls back to whisper unless all-in-one");
+            addKnownAsrModels(list, d, shown, q);
+            for (String m : models) addSttIfMatch(list, d, shown, m, q);
+            for (String m : new ArrayList<String>(sttModels)) addSttIfMatch(list, d, shown, m, q);
+            if (q.length() > 0) {
+                for (String m : models) {
+                    if ("custom".equals(modelSource(m))) continue;
+                    if (!modelMatches(m, q)) continue;
+                    if (isTranscriptionModel(m) || sttModels.contains(m) || audioInputModels.contains(m)) addTranscriptionChoice(list, d, shown, m);
+                }
+            }
+            if (typed.length() > 1 && (typed.indexOf('/') >= 0 || !ToolText.isSttSearch(q)) && !shown.contains(typed) && !shown.contains(typedModelKey(typed))) addTranscriptionChoice(list, d, shown, typed);
+            status.setText(shown.size() + " shown. type asr, whisper, or a model slug");
         } };
         search.addTextChangedListener(new TextWatcher() { @Override public void beforeTextChanged(CharSequence s, int st, int c, int a) { } @Override public void onTextChanged(CharSequence s, int st, int b, int c) { render[0].run(); } @Override public void afterTextChanged(Editable e) { } });
         render[0].run();
@@ -2036,14 +2051,9 @@ public class MainActivity extends Activity {
     }
 
     private boolean isTranscriptionModel(String model) {
-        String m = model.toLowerCase(Locale.US);
-        String meta = modelSearchText.containsKey(model) ? modelSearchText.get(model).toLowerCase(Locale.US) : "";
-        return m.contains("whisper") || m.contains("transcrib") || m.contains("speech-to-text") || m.contains("stt") || meta.contains("transcrib") || meta.contains("speech-to-text") || meta.contains("stt") || meta.contains("audio input") || meta.contains("audio-input");
-    }
-
-    private boolean isTranscriptionSearch(String q) {
-        String clean = q == null ? "" : q.toLowerCase(Locale.US).trim();
-        return clean.equals("stt") || clean.equals("asr") || clean.equals("whisper") || clean.equals("transcribe") || clean.equals("transcription") || clean.equals("speech") || clean.equals("audio");
+        if (sttModels.contains(model)) return true;
+        String meta = modelSearchText.containsKey(model) ? modelSearchText.get(model) : "";
+        return ToolText.isSttModel(model, meta, false);
     }
 
     private void loadOpenRouterTtsModels(final Runnable render, final TextView status) { loadOpenRouterVoiceModels(render, status, "tts"); }
@@ -2052,6 +2062,7 @@ public class MainActivity extends Activity {
         final String key = savedApiKey();
         if (key.length() == 0) { status.setText("openrouter key missing; showing cached/common models"); return; }
         status.setText("loading openrouter models...");
+        final String modality = "tts".equals(label) ? "speech" : (("input".equals(label) || "transcription".equals(label)) ? "transcription" : "");
         new Thread(new Runnable() { @Override public void run() {
             try {
                 final ArrayList<String> found = new ArrayList<String>();
@@ -2062,17 +2073,21 @@ public class MainActivity extends Activity {
                 final HashSet<String> audioIn = new HashSet<String>();
                 final HashSet<String> reasoning = new HashSet<String>();
                 final HashSet<String> speed = new HashSet<String>();
-                fetchModelsInto(OPENROUTER_ENDPOINT, key, "openrouter", found, contexts, sources, endpoints, audio, audioIn, reasoning, speed);
+                final HashSet<String> foundStt = new HashSet<String>();
+                final HashSet<String> foundSpeech = new HashSet<String>();
+                fetchModelsInto(OPENROUTER_ENDPOINT, key, "openrouter", found, contexts, sources, endpoints, audio, audioIn, reasoning, speed, modality, foundStt, foundSpeech);
                 runOnUiThread(new Runnable() { @Override public void run() {
                     for (String m : found) if (!models.contains(m)) models.add(m);
                     modelContexts.putAll(contexts);
                     modelSources.putAll(sources);
                     audioOutputModels.addAll(audio);
                     audioInputModels.addAll(audioIn);
+                    sttModels.addAll(foundStt);
+                    speechTtsModels.addAll(foundSpeech);
                     reasoningModels.addAll(reasoning);
                     speedModels.addAll(speed);
-                    saveModels(); saveModelContexts(); saveModelSources(); saveAudioOutputModels(); saveAudioInputModels(); saveReasoningModels(); saveSpeedModels();
-                    status.setText("loaded " + found.size() + " openrouter models for " + label);
+                    saveModels(); saveModelContexts(); saveModelSources(); saveAudioOutputModels(); saveAudioInputModels(); saveSttModels(); saveSpeechTtsModels(); saveReasoningModels(); saveSpeedModels();
+                    status.setText("loaded " + found.size() + " openrouter " + (modality.length() > 0 ? modality : label) + " models");
                     render.run();
                 } });
             } catch (Exception e) { final String msg = friendlyError(e); runOnUiThread(new Runnable() { @Override public void run() { status.setText("openrouter load failed: " + msg); toast(label + " search failed: " + msg); } }); }
@@ -2090,8 +2105,12 @@ public class MainActivity extends Activity {
     private void addKnownTtsModels(LinearLayout list, Dialog d, ArrayList<String> shown, String q) {
         addKnownTtsModel(list, d, shown, q, "canopylabs/orpheus-3b-0.1-ft", "canopy labs: orpheus 3b", "english text-to-speech natural prosody voice assistant narration");
         addKnownTtsModel(list, d, shown, q, "openai/gpt-4o-mini-tts", "openai: gpt-4o mini tts", "text-to-speech voice tts");
-        addKnownTtsModel(list, d, shown, q, "voxtral-mini-tts-2603", "mistral: voxtral mini tts", "mistral endpoint text-to-speech voice_id tts");
+        addKnownTtsModel(list, d, shown, q, "mistralai/voxtral-mini-tts-2603", "mistral: voxtral mini tts", "mistral endpoint text-to-speech voice_id tts");
         addKnownTtsModel(list, d, shown, q, "google/gemini-3.1-flash-tts-preview", "google: gemini 3.1 flash tts preview", "text-to-speech voice tts");
+        addKnownTtsModel(list, d, shown, q, "hexgrad/kokoro-82m", "hexgrad: kokoro 82m", "fast text-to-speech tts");
+        addKnownTtsModel(list, d, shown, q, "deepgram/flux-tts:free", "deepgram: flux tts", "fast free text-to-speech tts");
+        addKnownTtsModel(list, d, shown, q, "minimax/speech-2.8-turbo", "minimax: speech 2.8 turbo", "fast text-to-speech tts");
+        addKnownTtsModel(list, d, shown, q, "microsoft/mai-voice-2-flash", "microsoft: mai voice 2 flash", "fast text-to-speech tts");
         addKnownTtsModel(list, d, shown, q, "openai/gpt-audio", "openai: gpt audio", "chat completions audio output voice tts");
         addKnownTtsModel(list, d, shown, q, "openai/gpt-audio-mini", "openai: gpt audio mini", "chat completions audio output voice tts");
         addKnownTtsModel(list, d, shown, q, "openai/gpt-4o-audio-preview", "openai: gpt-4o audio", "chat completions audio output voice tts");
@@ -2100,15 +2119,50 @@ public class MainActivity extends Activity {
     private void addKnownTtsModel(LinearLayout list, Dialog d, ArrayList<String> shown, String q, String id, String title, String desc) {
         modelSearchText.put(id, title + "\n" + id + "\n" + desc);
         audioOutputModels.add(id);
+        if (id.toLowerCase(Locale.US).indexOf("gpt-audio") < 0 && id.toLowerCase(Locale.US).indexOf("audio-preview") < 0) speechTtsModels.add(id);
         modelSources.put(id, "openrouter");
         if (!models.contains(id)) models.add(id);
-        if (q.length() == 0 || modelMatches(id, q) || isAudioSearch(q)) addTtsChoice(list, d, shown, id);
+        if (q.length() == 0 || modelMatches(id, q) || ToolText.isTtsSearch(q)) addTtsChoice(list, d, shown, id);
+    }
+
+    private void addKnownAsrModels(LinearLayout list, Dialog d, ArrayList<String> shown, String q) {
+        addKnownAsrModel(list, d, shown, q, "openai/whisper-1", "openai: whisper 1", "speech-to-text asr transcription whisper");
+        addKnownAsrModel(list, d, shown, q, "openai/whisper-large-v3-turbo", "openai: whisper large v3 turbo", "fast speech-to-text asr transcription whisper");
+        addKnownAsrModel(list, d, shown, q, "nvidia/nemotron-3.5-asr-streaming-multilingual-0.6b", "nvidia: nemotron 3.5 asr multilingual", "fast multilingual speech-to-text asr streaming transcription");
+        addKnownAsrModel(list, d, shown, q, "nvidia/parakeet-tdt-0.6b-v3", "nvidia: parakeet tdt 0.6b", "fast speech-to-text asr transcription");
+        addKnownAsrModel(list, d, shown, q, "qwen/qwen3-asr-0.6b", "qwen: qwen3 asr 0.6b", "fast speech-to-text asr transcription");
+        addKnownAsrModel(list, d, shown, q, "qwen/qwen3-asr-flash-2026-02-10", "qwen: qwen3 asr flash", "fast speech-to-text asr transcription");
+        addKnownAsrModel(list, d, shown, q, "x-ai/grok-stt-1.0", "x-ai: grok stt 1.0", "fast speech-to-text asr transcription");
+        addKnownAsrModel(list, d, shown, q, "openai/gpt-4o-mini-transcribe", "openai: gpt-4o mini transcribe", "speech-to-text asr transcription");
+        addKnownAsrModel(list, d, shown, q, "google/chirp-3", "google: chirp 3", "speech-to-text asr transcription");
+        addKnownAsrModel(list, d, shown, q, "deepgram/nova-3", "deepgram: nova 3", "fast speech-to-text asr transcription");
+    }
+
+    private void addKnownAsrModel(LinearLayout list, Dialog d, ArrayList<String> shown, String q, String id, String title, String desc) {
+        modelSearchText.put(id, title + "\n" + id + "\n" + desc);
+        audioInputModels.add(id);
+        sttModels.add(id);
+        modelSources.put(id, "openrouter");
+        if (!models.contains(id)) models.add(id);
+        if (q.length() == 0 || modelMatches(id, q) || ToolText.isSttSearch(q)) addTranscriptionChoice(list, d, shown, id);
     }
 
     private boolean isTtsModel(String model) {
-        String m = model.toLowerCase(Locale.US);
-        String meta = modelSearchText.containsKey(model) ? modelSearchText.get(model).toLowerCase(Locale.US) : "";
-        return audioOutputModels.contains(model) || m.contains("tts") || m.contains("text-to-speech") || m.contains("lyria") || meta.contains("text-to-speech") || meta.contains("tts") || meta.contains("voice assistant");
+        if (speechTtsModels.contains(model)) return true;
+        String meta = modelSearchText.containsKey(model) ? modelSearchText.get(model) : "";
+        return ToolText.looksLikeTts(model, "", meta);
+    }
+
+    private void addSttIfMatch(LinearLayout list, Dialog d, ArrayList<String> shown, String model, String q) {
+        if (model == null || model.length() == 0 || "custom".equals(modelSource(model))) return;
+        if (!isTranscriptionModel(model) && !sttModels.contains(model)) return;
+        if (q.length() == 0 || modelMatches(model, q) || ToolText.isSttSearch(q)) addTranscriptionChoice(list, d, shown, model);
+    }
+
+    private void addTtsIfMatch(LinearLayout list, Dialog d, ArrayList<String> shown, String model, String q) {
+        if (model == null || model.length() == 0 || "custom".equals(modelSource(model))) return;
+        if (!isTtsModel(model) && !speechTtsModels.contains(model)) return;
+        if (q.length() == 0 || modelMatches(model, q) || ToolText.isTtsSearch(q)) addTtsChoice(list, d, shown, model);
     }
 
     private String ttsModelTitle(String model) {
@@ -2120,10 +2174,7 @@ public class MainActivity extends Activity {
         return shortModel(model).toLowerCase(Locale.US);
     }
 
-    private boolean isAudioSearch(String q) {
-        String clean = q == null ? "" : q.toLowerCase(Locale.US).trim();
-        return clean.equals("tts") || clean.equals("speech") || clean.equals("voice") || clean.equals("audio") || clean.equals("speak");
-    }
+    private boolean isAudioSearch(String q) { return ToolText.isTtsSearch(q); }
 
     private String openRouterTtsModel(String model) {
         String m = model == null ? "" : model.trim();
@@ -2132,7 +2183,10 @@ public class MainActivity extends Activity {
         if ("tts-1".equals(n) || "openai/tts-1".equals(n)) return "openai/tts-1";
         if ("tts-1-hd".equals(n) || "openai/tts-1-hd".equals(n)) return "openai/tts-1-hd";
         if ("gpt-4o-mini-tts".equals(n) || "openai/gpt-4o-mini-tts".equals(n)) return "openai/gpt-4o-mini-tts";
-        if ("mistralai/voxtral-mini-tts".equals(n) || "mistralai/voxtral-mini-tts-2603".equals(n)) return "voxtral-mini-tts-2603";
+        if ("voxtral-mini-tts".equals(n) || "voxtral-mini-tts-2603".equals(n)
+                || "mistralai/voxtral-mini-tts".equals(n) || "mistralai/voxtral-mini-tts-2603".equals(n)) {
+            return "mistralai/voxtral-mini-tts-2603";
+        }
         return m;
     }
 
@@ -5862,6 +5916,7 @@ public class MainActivity extends Activity {
             for (int i = 0; i < models.size(); i++) {
                 final String m = models.get(i);
                 if (modelMatches(m, q)) {
+                    if (sttModels.contains(m) || speechTtsModels.contains(m)) continue;
                     TextView item = searchResultItem(shortModel(m), modelRowSubtitle(m));
                     item.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); addMyModel(m); } });
                     list.addView(item);
@@ -5968,10 +6023,21 @@ public class MainActivity extends Activity {
                 Exception lastFetch = null;
                 int fetchedOk = 0;
                 final ArrayList<String> listedEndpoints = new ArrayList<String>();
+                final HashSet<String> foundStt = new HashSet<String>();
+                final HashSet<String> foundSpeech = new HashSet<String>();
+                final boolean[] voiceLists = new boolean[] { false, false };
                 if (key.length() > 0) {
                     try {
-                        if (fetchModelsInto(OPENROUTER_ENDPOINT, key, "openrouter", found, foundContexts, foundSources, foundEndpoints, foundAudioOutput, foundAudioInput, foundReasoning, foundSpeed)) fetchedOk++;
+                        if (fetchModelsInto(OPENROUTER_ENDPOINT, key, "openrouter", found, foundContexts, foundSources, foundEndpoints, foundAudioOutput, foundAudioInput, foundReasoning, foundSpeed, "", foundStt, foundSpeech)) fetchedOk++;
                     } catch (Exception e) { lastFetch = e; }
+                    try {
+                        fetchModelsInto(OPENROUTER_ENDPOINT, key, "openrouter", found, foundContexts, foundSources, foundEndpoints, foundAudioOutput, foundAudioInput, foundReasoning, foundSpeed, "transcription", foundStt, foundSpeech);
+                        voiceLists[0] = true;
+                    } catch (Exception ignored) { }
+                    try {
+                        fetchModelsInto(OPENROUTER_ENDPOINT, key, "openrouter", found, foundContexts, foundSources, foundEndpoints, foundAudioOutput, foundAudioInput, foundReasoning, foundSpeed, "speech", foundStt, foundSpeech);
+                        voiceLists[1] = true;
+                    } catch (Exception ignored) { }
                 }
                 for (String endpoint : endpoints) {
                     String endpointKey = typedEndpoint.equals(endpoint) && typedKey.length() > 0 ? typedKey : endpointKey(endpoint);
@@ -5989,10 +6055,13 @@ public class MainActivity extends Activity {
                         if (!customEndpoints.contains(endpoint)) customEndpoints.add(endpoint);
                         if (typedEndpoint.equals(endpoint) && typedKey.length() > 0) setEndpointKey(endpoint, typedKey);
                     }
-                    models.clear(); models.addAll(found); modelContexts.clear(); modelContexts.putAll(foundContexts); modelSources.clear(); modelSources.putAll(foundSources); modelEndpoints.clear(); modelEndpoints.putAll(foundEndpoints); audioOutputModels.clear(); audioOutputModels.addAll(foundAudioOutput); audioInputModels.clear(); audioInputModels.addAll(foundAudioInput); reasoningModels.clear(); reasoningModels.addAll(foundReasoning); speedModels.clear(); speedModels.addAll(foundSpeed);
+                    models.clear(); models.addAll(found); modelContexts.clear(); modelContexts.putAll(foundContexts); modelSources.clear(); modelSources.putAll(foundSources); modelEndpoints.clear(); modelEndpoints.putAll(foundEndpoints); audioOutputModels.clear(); audioOutputModels.addAll(foundAudioOutput); audioInputModels.clear(); audioInputModels.addAll(foundAudioInput);
+                    if (voiceLists[0]) { sttModels.clear(); sttModels.addAll(foundStt); } else sttModels.addAll(foundStt);
+                    if (voiceLists[1]) { speechTtsModels.clear(); speechTtsModels.addAll(foundSpeech); } else speechTtsModels.addAll(foundSpeech);
+                    reasoningModels.clear(); reasoningModels.addAll(foundReasoning); speedModels.clear(); speedModels.addAll(foundSpeed);
                     applyCatalogToMyModels(listedEndpoints);
                     retargetSelectedModelIfNeeded();
-                    saveCustomEndpoints(); saveEndpointKeys(); saveModels(); saveModelContexts(); saveModelSources(); saveModelEndpoints(); saveAudioOutputModels(); saveAudioInputModels(); saveReasoningModels(); saveSpeedModels(); saveMyModels(); savePinnedModels();
+                    saveCustomEndpoints(); saveEndpointKeys(); saveModels(); saveModelContexts(); saveModelSources(); saveModelEndpoints(); saveAudioOutputModels(); saveAudioInputModels(); saveSttModels(); saveSpeechTtsModels(); saveReasoningModels(); saveSpeedModels(); saveMyModels(); savePinnedModels();
                     prefs.edit().putLong("modelsRefreshedAt", System.currentTimeMillis()).apply();
                     if (manual) toast("models updated");
                     if (manual || pane == 2) renderPane();
@@ -6008,7 +6077,11 @@ public class MainActivity extends Activity {
     }
 
     private boolean fetchModelsInto(String endpoint, String key, String source, ArrayList<String> found, HashMap<String, Integer> foundContexts, HashMap<String, String> foundSources, HashMap<String, String> foundEndpoints, HashSet<String> foundAudioOutput, HashSet<String> foundAudioInput, HashSet<String> foundReasoning, HashSet<String> foundSpeed) throws Exception {
-        HttpURLConnection c = (HttpURLConnection) new URL(normalizeEndpoint(endpoint) + "/models").openConnection();
+        return fetchModelsInto(endpoint, key, source, found, foundContexts, foundSources, foundEndpoints, foundAudioOutput, foundAudioInput, foundReasoning, foundSpeed, "", null, null);
+    }
+
+    private boolean fetchModelsInto(String endpoint, String key, String source, ArrayList<String> found, HashMap<String, Integer> foundContexts, HashMap<String, String> foundSources, HashMap<String, String> foundEndpoints, HashSet<String> foundAudioOutput, HashSet<String> foundAudioInput, HashSet<String> foundReasoning, HashSet<String> foundSpeed, String outputModality, HashSet<String> foundStt, HashSet<String> foundSpeech) throws Exception {
+        HttpURLConnection c = (HttpURLConnection) new URL(ToolText.modelsListUrl(endpoint, "openrouter".equals(source) ? outputModality : "")).openConnection();
         c.setConnectTimeout(8000);
         c.setReadTimeout(15000);
         if (key.length() > 0) c.setRequestProperty("Authorization", "Bearer " + key);
@@ -6035,10 +6108,15 @@ public class MainActivity extends Activity {
             if (!found.contains(catalogId)) found.add(catalogId);
             foundSources.put(catalogId, source);
             String host = "custom".equals(source) ? ToolText.endpointCardHost(normalizeEndpoint(endpoint)) : "";
-            modelSearchText.put(catalogId, (name.length() > 0 ? name : shortModel(catalogId)) + "\n" + id + "\n" + catalogId + "\n" + description + (host.length() > 0 ? "\n" + host : ""));
+            String extra = "";
+            if (ToolText.hasTranscriptionOutput(model) || "transcription".equals(outputModality)) extra = "asr transcription speech-to-text stt";
+            else if (ToolText.hasSpeechOutput(model) || "speech".equals(outputModality)) extra = "text-to-speech tts speech";
+            modelSearchText.put(catalogId, ToolText.voiceSearchHaystack(id, name.length() > 0 ? name : shortModel(catalogId), description + (host.length() > 0 ? "\n" + host : ""), extra));
             if ("custom".equals(source)) foundEndpoints.put(catalogId, normalizeEndpoint(endpoint));
             if (foundAudioOutput != null && hasAudioOutput(model, id, name)) foundAudioOutput.add(catalogId);
             if (foundAudioInput != null && hasAudioInput(model, id, name, description)) foundAudioInput.add(catalogId);
+            if (foundStt != null && (ToolText.hasTranscriptionOutput(model) || "transcription".equals(outputModality) || ToolText.looksLikeStt(id, name, description))) foundStt.add(catalogId);
+            if (foundSpeech != null && (ToolText.hasSpeechOutput(model) || "speech".equals(outputModality) || ToolText.looksLikeTts(id, name, description))) foundSpeech.add(catalogId);
             if (foundReasoning != null && hasReasoningCapability(model, id, name, description)) foundReasoning.add(catalogId);
             if (foundSpeed != null && hasSpeedParameter(model, id, name, description)) foundSpeed.add(catalogId);
             int context = model.optInt("context_length", 0);
@@ -6089,25 +6167,11 @@ public class MainActivity extends Activity {
     }
 
     private boolean hasAudioOutput(JSONObject model, String id, String name) {
-        JSONObject arch = model.optJSONObject("architecture");
-        JSONArray output = arch == null ? null : arch.optJSONArray("output_modalities");
-        if (output != null) {
-            for (int i = 0; i < output.length(); i++) if ("audio".equalsIgnoreCase(output.optString(i))) return true;
-            return false;
-        }
-        String haystack = (id + " " + name + " " + model.optString("description", "")).toLowerCase(Locale.US);
-        return haystack.contains("tts") || haystack.contains("text-to-speech") || haystack.contains("speech") || haystack.contains("audio") || haystack.contains("lyria");
+        return ToolText.hasAudioOutput(model, id, name, model.optString("description", ""));
     }
 
     private boolean hasAudioInput(JSONObject model, String id, String name, String description) {
-        JSONObject arch = model.optJSONObject("architecture");
-        JSONArray input = arch == null ? null : arch.optJSONArray("input_modalities");
-        if (input != null) {
-            for (int i = 0; i < input.length(); i++) if ("audio".equalsIgnoreCase(input.optString(i))) return true;
-            return false;
-        }
-        String haystack = (id + " " + name + " " + description).toLowerCase(Locale.US);
-        return haystack.contains("audio input") || haystack.contains("audio-input") || haystack.contains("speech-to-text") || haystack.contains("transcrib") || haystack.contains("whisper") || haystack.contains("stt") || haystack.contains("asr");
+        return ToolText.hasAudioInput(model, id, name, description);
     }
 
     private boolean hasReasoningCapability(JSONObject model, String id, String name, String description) {
@@ -7711,7 +7775,11 @@ public class MainActivity extends Activity {
     }
 
     private boolean isOpenRouterChatAudioModel(String model) {
-        String lower = model == null ? "" : model.toLowerCase(Locale.US);
+        if (model == null || model.length() == 0) return false;
+        if (speechTtsModels.contains(model)) return false;
+        String meta = modelSearchText.containsKey(model) ? modelSearchText.get(model) : "";
+        if (ToolText.looksLikeTts(model, "", meta)) return false;
+        String lower = model.toLowerCase(Locale.US);
         return audioOutputModels.contains(model) && !lower.contains("tts") && !lower.contains("orpheus");
     }
 
@@ -8777,6 +8845,8 @@ public class MainActivity extends Activity {
         String savedModels = prefs.getString("modelCatalog", prefs.getString("models", "")); if (savedModels.length() > 0) for (String m : savedModels.split("\\n")) { String clean = m.trim(); if (clean.length() > 0 && !models.contains(clean)) models.add(clean); }
         String savedAudioInput = prefs.getString("audioInputModelsV2", ""); if (savedAudioInput.length() > 0) for (String m : savedAudioInput.split("\\n")) { String clean = m.trim(); if (clean.length() > 0) audioInputModels.add(clean); }
         String savedAudio = prefs.getString("audioOutputModelsV2", ""); if (savedAudio.length() > 0) for (String m : savedAudio.split("\\n")) { String clean = m.trim(); if (clean.length() > 0) audioOutputModels.add(clean); }
+        String savedStt = prefs.getString("sttModelsV1", ""); if (savedStt.length() > 0) for (String m : savedStt.split("\\n")) { String clean = m.trim(); if (clean.length() > 0) sttModels.add(clean); }
+        String savedSpeech = prefs.getString("speechTtsModelsV1", ""); if (savedSpeech.length() > 0) for (String m : savedSpeech.split("\\n")) { String clean = m.trim(); if (clean.length() > 0) speechTtsModels.add(clean); }
         String savedReasoning = prefs.getString("reasoningModels", ""); if (savedReasoning.length() > 0) for (String m : savedReasoning.split("\\n")) { String clean = m.trim(); if (clean.length() > 0) reasoningModels.add(clean); }
         String savedSpeed = prefs.getString("speedModels", ""); if (savedSpeed.length() > 0) for (String m : savedSpeed.split("\\n")) { String clean = m.trim(); if (clean.length() > 0) speedModels.add(clean); }
         if (models.size() == 0) { models.add("openai/gpt-4o-mini"); models.add("anthropic/claude-3.5-haiku"); models.add("google/gemini-2.0-flash-001"); }
@@ -8842,6 +8912,9 @@ public class MainActivity extends Activity {
         if (!prefs.getBoolean("modelIdentityV3", false)) {
             prefs.edit().putBoolean("modelIdentityV3", true).remove("modelsRefreshedAt").apply();
         }
+        if (!prefs.getBoolean("voiceCatalogV1", false)) {
+            prefs.edit().putBoolean("voiceCatalogV1", true).remove("modelsRefreshedAt").apply();
+        }
         saveModels();
         saveMyModels();
         savePinnedModels();
@@ -8850,6 +8923,8 @@ public class MainActivity extends Activity {
         saveModelContexts();
         saveAudioInputModels();
         saveAudioOutputModels();
+        saveSttModels();
+        saveSpeechTtsModels();
         saveReasoningModels();
         saveSpeedModels();
     }
@@ -8938,6 +9013,8 @@ public class MainActivity extends Activity {
     private void saveDiscoveredVoices() { JSONObject o = new JSONObject(); try { for (String key : discoveredVoices.keySet()) { JSONArray arr = new JSONArray(); for (String voice : discoveredVoices.get(key)) arr.put(voice); o.put(key, arr); } } catch (Exception ignored) { } prefs.edit().putString("discoveredVoices", o.toString()).apply(); }
     private void saveAudioInputModels() { prefs.edit().putString("audioInputModelsV2", join(new ArrayList<String>(audioInputModels))).remove("audioInputModels").apply(); }
     private void saveAudioOutputModels() { prefs.edit().putString("audioOutputModelsV2", join(new ArrayList<String>(audioOutputModels))).remove("audioOutputModels").apply(); }
+    private void saveSttModels() { prefs.edit().putString("sttModelsV1", join(new ArrayList<String>(sttModels))).apply(); }
+    private void saveSpeechTtsModels() { prefs.edit().putString("speechTtsModelsV1", join(new ArrayList<String>(speechTtsModels))).apply(); }
     private void saveReasoningModels() { prefs.edit().putString("reasoningModels", join(new ArrayList<String>(reasoningModels))).apply(); }
     private void saveSpeedModels() { prefs.edit().putString("speedModels", join(new ArrayList<String>(speedModels))).apply(); }
     private void saveCustomEndpoints() { prefs.edit().putString("customEndpoints", join(customEndpoints)).remove("endpointBase").apply(); }
@@ -9102,6 +9179,8 @@ public class MainActivity extends Activity {
         remapModelMap(modelSearchText, from, to);
         if (audioInputModels.remove(from)) audioInputModels.add(to);
         if (audioOutputModels.remove(from)) audioOutputModels.add(to);
+        if (sttModels.remove(from)) sttModels.add(to);
+        if (speechTtsModels.remove(from)) speechTtsModels.add(to);
         if (reasoningModels.remove(from)) reasoningModels.add(to);
         if (speedModels.remove(from)) speedModels.add(to);
         if (ToolText.isCustomModelKey(to)) {
