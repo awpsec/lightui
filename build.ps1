@@ -25,7 +25,15 @@ Remove-Item $out -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force "$out\compiled", "$out\generated", "$out\classes", "$out\dex" | Out-Null
 
 & $aapt2 compile --dir $resDir -o "$out\compiled\res.zip"
-& $aapt2 link -I $platformJar --manifest $manifest -o "$out\unsigned.apk" --java "$out\generated" --auto-add-overlay -R "$out\compiled\res.zip"
+$appVersion = (Select-String -Path "app\src\main\java\com\lightos\minimalchat\MainActivity.java" -Pattern 'APP_VERSION = "([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
+if (-not $appVersion) { throw "could not read APP_VERSION from MainActivity.java" }
+$parts = $appVersion.Split('.')
+$maj = if ($parts.Length -gt 0) { [int]$parts[0] } else { 0 }
+$min = if ($parts.Length -gt 1) { [int]$parts[1] } else { 0 }
+$pat = if ($parts.Length -gt 2) { [int]$parts[2] } else { 0 }
+$versionCode = $maj * 10000 + $min * 100 + $pat
+Write-Host "stamping AndroidManifest versionName=$appVersion versionCode=$versionCode"
+& $aapt2 link -I $platformJar --manifest $manifest --version-code $versionCode --version-name $appVersion --replace-version -o "$out\unsigned.apk" --java "$out\generated" --auto-add-overlay -R "$out\compiled\res.zip"
 
 $sources = Get-ChildItem $srcDir, "$out\generated" -Recurse -Filter *.java | ForEach-Object { $_.FullName }
 & $javac -g:none -encoding UTF-8 --release 8 -classpath $platformJar -d "$out\classes" $sources
