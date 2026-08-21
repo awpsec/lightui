@@ -1944,6 +1944,20 @@ public final class ToolText {
     }
 
     /**
+     * Progress labels that should not replace the thinking wave in full voice mode.
+     * Real errors/prompts (speech failed, need contacts, transcribe failed) stay visible.
+     */
+    public static boolean isVoiceWaitStatus(String status) {
+        String t = status == null ? "" : status.trim().toLowerCase(Locale.US);
+        if (t.length() == 0) return true;
+        if (t.equals("listening") || t.equals("recording") || t.equals("recording wav")
+                || t.equals("transcribing") || t.equals("speaking") || t.equals("responding")
+                || t.equals("done") || t.equals("paused") || t.equals("continuing")
+                || t.equals("retrying speech")) return true;
+        return t.equals("thinking") || t.startsWith("thinking");
+    }
+
+    /**
      * SpeechRecognizer onRmsChanged is typically -2..10 dB. Conversational
      * speech sits around 0..4, so a /12 linear map barely moves the bars.
      * Visual only — do not use this for silence/speech gates.
