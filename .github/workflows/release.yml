@@ -25,10 +25,13 @@ jobs:
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             tag="${{ github.event.inputs.tag }}"
+            checkout_ref="$tag"
           elif [[ "${{ github.ref_type }}" == "tag" ]]; then
             tag="${{ github.ref_name }}"
+            checkout_ref="$tag"
           else
             # Branch fire trigger: derive tag from branch name cursor/fire-release-1-0-18-*
+            # Checkout this push — the tag does not exist until this job publishes it.
             branch="${GITHUB_REF_NAME}"
             ver="$(echo "$branch" | sed -n 's/^cursor\/fire-release-\([0-9][0-9]*-[0-9][0-9]*-[0-9][0-9]*\)-.*$/\1/p' | tr '-' '.')"
             if [[ -z "$ver" ]]; then
@@ -36,14 +39,16 @@ jobs:
               exit 1
             fi
             tag="v${ver}"
+            checkout_ref="${GITHUB_SHA}"
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "Releasing $tag"
+          echo "checkout_ref=$checkout_ref" >> "$GITHUB_OUTPUT"
+          echo "Releasing $tag from $checkout_ref"
 
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.meta.outputs.tag }}
+          ref: ${{ steps.meta.outputs.checkout_ref }}
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -105,6 +110,6 @@ jobs:
           body: |
             Install `lightui-release.apk` on your Light Phone III / Android device.
 
-            In-app updates: open lightui → settings → tap the version line → **update**.
+            In-app updates: open lightui → settings → tap the version line → **update**. Downloads stay in the app (HTTP/1.1 + resume). No browser sideload.
 
             All GitHub Release APKs are signed with the shared lightui release keystore so updates install over previous release builds.
