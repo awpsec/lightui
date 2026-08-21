@@ -365,12 +365,16 @@ public class ToolTextTest {
         assertTrue("prompt who to call is not wait", !ToolText.isVoiceWaitStatus("who should i call?"));
 
         assertTrue("silence rms stays low", ToolText.voiceVisualFromRmsDb(-2f) <= 0.08f);
-        assertTrue("talking rms is strong", ToolText.voiceVisualFromRmsDb(2f) >= 0.55f);
-        assertTrue("talking rms beats old /12 map", ToolText.voiceVisualFromRmsDb(2f) > (2f + 2f) / 12f + 0.15f);
-        assertTrue("loud rms hits top", ToolText.voiceVisualFromRmsDb(10f) >= 0.99f);
-        assertTrue("gate quiet unchanged", Math.abs(ToolText.voiceGateFromPeak(1120) - 1120 / 14000f) < 0.001f);
-        assertTrue("gate speech unchanged", ToolText.voiceGateFromPeak(2000) > 0.13f);
-        assertTrue("visual peak louder than gate", ToolText.voiceVisualFromPeak(4000) > ToolText.voiceGateFromPeak(4000) + 0.2f);
+        assertTrue("zero db rms is idle", ToolText.voiceVisualFromRmsDb(0f) <= 0.08f);
+        assertTrue("talking rms is strong", ToolText.voiceVisualFromRmsDb(4f) >= 0.40f);
+        assertTrue("talking rms beats silence", ToolText.voiceVisualFromRmsDb(4f) > ToolText.voiceVisualFromRmsDb(0f) + 0.25f);
+        assertTrue("loud rms hits top", ToolText.voiceVisualFromRmsDb(10f) >= 0.90f);
+        assertTrue("gate quiet is zero", ToolText.voiceGateFromPeak(0) == 0f);
+        assertTrue("gate floor peak is quiet", ToolText.voicePeakIsQuiet(1500));
+        assertTrue("gate speech peak", ToolText.voicePeakIsSpeech(8000));
+        assertTrue("gate quiet unchanged ratio", Math.abs(ToolText.voiceGateFromPeak(1120) - 1120 / 14000f) < 0.001f);
+        assertTrue("visual peak idle at floor", ToolText.voiceVisualFromPeak(1200) <= 0.08f);
+        assertTrue("visual peak speech is strong", ToolText.voiceVisualFromPeak(8000) >= 0.45f);
         float rise = ToolText.followVoiceShown(0.1f, 0.8f);
         float fall = ToolText.followVoiceShown(0.8f, 0.1f);
         assertTrue("attack is fast", rise >= 0.55f);

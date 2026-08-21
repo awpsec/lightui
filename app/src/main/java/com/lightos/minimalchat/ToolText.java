@@ -1958,27 +1958,35 @@ public final class ToolText {
     }
 
     /**
-     * SpeechRecognizer onRmsChanged is typically -2..10 dB. Conversational
-     * speech sits around 0..4, so a /12 linear map barely moves the bars.
+     * SpeechRecognizer onRmsChanged is typically -2..10 dB. Device silence is
+     * often 0 dB, not -2, so keep 0 dB idle. Speech starts around 2..4.
      * Visual only — do not use this for silence/speech gates.
      */
     public static float voiceVisualFromRmsDb(float rmsdB) {
-        return voiceVisualGain((rmsdB + 2f) / 8f);
+        return voiceVisualGain((rmsdB - 1.2f) / 7f);
     }
 
-    /** Visual 0..1 from a PCM peak (0..32767). Visual only. */
+    /** Visual 0..1 from a PCM peak (0..32767). Mic floor ~0..2000 is idle. */
     public static float voiceVisualFromPeak(int peak) {
-        return voiceVisualGain(peak / 8000f);
+        return voiceVisualGain((peak - 2000) / 10000f);
     }
 
-    /** Recorder VAD scale. Keep this stable so auto-stop does not change. */
+    /** Recorder VAD scale. True silence is 0 (no floor). */
     public static float voiceGateFromPeak(int peak) {
         if (peak < 0) peak = 0;
-        return Math.max(0.05f, Math.min(1f, peak / 14000f));
+        return Math.max(0f, Math.min(1f, peak / 14000f));
     }
 
+    public static boolean voicePeakIsQuiet(int peak) { return peak < 2400; }
+
+    public static boolean voicePeakIsSpeech(int peak) { return peak > 3500; }
+
+    public static boolean voiceRmsIsQuiet(float rmsdB) { return rmsdB < 1.4f; }
+
+    public static boolean voiceRmsIsSpeech(float rmsdB) { return rmsdB >= 2.2f; }
+
     public static float followVoiceShown(float shown, float level) {
-        float k = level > shown ? 0.72f : 0.20f;
+        float k = level > shown ? 0.72f : 0.38f;
         return shown + (level - shown) * k;
     }
 
@@ -1986,7 +1994,8 @@ public final class ToolText {
         float n = normalized;
         if (n < 0f) n = 0f;
         if (n > 1f) n = 1f;
+        if (n <= 0.02f) return 0.02f;
         n = (float) Math.pow(n, 0.65);
-        return Math.max(0.05f, n);
+        return n;
     }
 }
