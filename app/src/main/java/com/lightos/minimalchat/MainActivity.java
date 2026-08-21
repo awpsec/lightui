@@ -118,7 +118,7 @@ public class MainActivity extends Activity {
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
     private static final String SEARCHING = "__searching__";
-    private static final String APP_VERSION = "1.0.49";
+    private static final String APP_VERSION = "1.0.50";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 48;
@@ -6525,8 +6525,8 @@ public class MainActivity extends Activity {
         if (speechRecognizer != null) { speechRecognizer.destroy(); speechRecognizer = null; }
         speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this);
         speechRecognizer.setRecognitionListener(new RecognitionListener() {
-            @Override public void onReadyForSpeech(Bundle params) { setVoiceListenChrome(true, false); setVoiceLevel(0.15f); }
-            @Override public void onBeginningOfSpeech() { setVoiceListenChrome(true, false); }
+            @Override public void onReadyForSpeech(Bundle params) { setVoiceLevel(0.15f); }
+            @Override public void onBeginningOfSpeech() { setVoiceLevel(Math.max(0.18f, voiceWaves == null ? 0.18f : voiceWaves.level)); }
             @Override public void onRmsChanged(float rmsdB) { setVoiceLevel(ToolText.voiceVisualFromRmsDb(rmsdB)); }
             @Override public void onBufferReceived(byte[] buffer) { }
             @Override public void onEndOfSpeech() { vibrateInputEnded(); startVoiceThinking(); setVoiceLevel(0.05f); }
@@ -6569,11 +6569,10 @@ public class MainActivity extends Activity {
     }
 
     private void handleVoiceResults(Bundle results) {
-        voiceAwaitingSpeechResult = false;
         ArrayList<String> r = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
         if (r == null || r.size() == 0) { handleVoiceMiss(); return; }
-        String text = r.get(0).trim();
-        submitVoiceText(text);
+        voiceAwaitingSpeechResult = false;
+        submitVoiceText(r.get(0).trim());
     }
 
     private void showPartialVoice(Bundle partialResults) {
@@ -6589,7 +6588,13 @@ public class MainActivity extends Activity {
     }
 
     private void handleVoiceMiss() {
+        if (!voiceAwaitingSpeechResult) return;
+        if (voiceTurnWaiting()) return;
         voiceAwaitingSpeechResult = false;
+        idleVoiceAfterMiss();
+    }
+
+    private void idleVoiceAfterMiss() {
         stopVoiceThinking();
         setVoiceLevel(0f);
         setVoiceListenChrome(false, true);
@@ -6599,12 +6604,24 @@ public class MainActivity extends Activity {
         } else if (voiceStatus != null) voiceStatus.setText("didn't catch that");
     }
 
+    private boolean voiceTurnWaiting() {
+        if (!voiceMode || !voiceFullMode) return false;
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            Msg m = messages.get(i);
+            if (!"assistant".equals(m.role)) continue;
+            if (m.voiceSessionId != 0 && m.voiceSessionId != voiceSession) return false;
+            if (!m.slowVoice) return false;
+            return !m.ttsStarted && !m.streamDone;
+        }
+        return false;
+    }
+
     private void submitVoiceText(String text) {
         voiceAwaitingSpeechResult = false;
         String clean = cleanVoiceTranscript(text);
-        if (clean.length() == 0) { handleVoiceMiss(); return; }
+        if (clean.length() == 0) { idleVoiceAfterMiss(); return; }
         if (isModelRefusal(clean)) { pauseVoiceAfterProviderFailure("model refused", "model refused\n" + clean); return; }
-        if (voiceFullMode && isBogusVoiceTranscript(clean)) { handleVoiceMiss(); return; }
+        if (voiceFullMode && isBogusVoiceTranscript(clean)) { idleVoiceAfterMiss(); return; }
         if (voiceFullMode) revealVoiceTranscript(clean);
         else setVoiceText(clean);
         if (voicePhoneCommandsEnabled()) {
@@ -7537,9 +7554,11 @@ public class MainActivity extends Activity {
             voiceThinkJump.bind(null);
             voiceThinkJump.setGravity(Gravity.CENTER);
             voiceThinkJump.setBackgroundColor(Color.TRANSPARENT);
-            setTextPx(voiceThinkJump, 15);
+            setTextPx(voiceThinkJump, 16);
+            voiceThinkJump.waveBase = 210;
             voiceThinkJump.setAlpha(0f);
-            voiceChrome.addView(voiceThinkJump, new FrameLayout.LayoutParams(-1, -1));
+            voiceThinkJump.setVisibility(View.INVISIBLE);
+            voiceChrome.addView(voiceThinkJump, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
             voiceChrome.addView(voiceWaves, new FrameLayout.LayoutParams(-1, -1));
         }
         voiceStatus = text(full ? "" : "listening", full ? 15 : 14, Color.WHITE);
@@ -7715,25 +7734,59 @@ public class MainActivity extends Activity {
         if (voiceChrome != null) voiceChrome.animate().cancel();
     }
 
+    private int voiceChromeCurrentHeight(View view) {
+        if (view == null) return 0;
+        int h = view.getHeight();
+        if (h > 0) return h;
+        ViewGroup.LayoutParams lp = view.getLayoutParams();
+        if (lp != null && lp.height > 0) return lp.height;
+        return 0;
+    }
+
     private void animateViewHeight(final View view, int to, boolean animate) {
         if (view == null || view.getLayoutParams() == null) return;
         final ViewGroup.LayoutParams lp = view.getLayoutParams();
-        int from = lp.height;
-        if (from == to) return;
-        if (voiceChromeHeightAnim != null) { voiceChromeHeightAnim.cancel(); voiceChromeHeightAnim = null; }
-        if (!animate || from < 0) {
+        int from = voiceChromeCurrentHeight(view);
+        if (from == to) {
+            if (lp.height != to) { lp.height = to; view.requestLayout(); }
+            return;
+        }
+        if (voiceChromeHeightAnim != null) {
+            voiceChromeHeightAnim.cancel();
+            voiceChromeHeightAnim = null;
+            from = voiceChromeCurrentHeight(view);
+            if (from == to) {
+                lp.height = to;
+                view.requestLayout();
+                return;
+            }
+        }
+        if (!animate) {
             lp.height = to;
             view.setLayoutParams(lp);
             return;
         }
         ValueAnimator a = ValueAnimator.ofInt(from, to);
-        a.setDuration(260);
-        a.setInterpolator(to > from ? new DecelerateInterpolator() : new AccelerateInterpolator());
+        a.setDuration(Math.max(220, Math.min(420, 180 + Math.abs(to - from) * 3)));
+        a.setInterpolator(new DecelerateInterpolator(1.7f));
         a.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
             @Override public void onAnimationUpdate(ValueAnimator animation) {
                 if (view.getLayoutParams() == null) return;
                 view.getLayoutParams().height = (Integer) animation.getAnimatedValue();
                 view.requestLayout();
+            }
+        });
+        a.addListener(new AnimatorListenerAdapter() {
+            boolean canceled;
+            @Override public void onAnimationEnd(Animator animation) {
+                if (voiceChromeHeightAnim == animation) voiceChromeHeightAnim = null;
+                if (canceled || view.getLayoutParams() == null) return;
+                view.getLayoutParams().height = to;
+                view.requestLayout();
+            }
+            @Override public void onAnimationCancel(Animator animation) {
+                canceled = true;
+                if (voiceChromeHeightAnim == animation) voiceChromeHeightAnim = null;
             }
         });
         voiceChromeHeightAnim = a;
@@ -7752,31 +7805,48 @@ public class MainActivity extends Activity {
         if (show) setVoiceLevel(Math.max(0.12f, voiceWaves.level));
     }
 
+    private void fadeVoiceChild(final View view, final boolean show, boolean animate) {
+        if (view == null) return;
+        view.animate().cancel();
+        if (show) {
+            view.setVisibility(View.VISIBLE);
+            if (!animate) { view.setAlpha(1f); return; }
+            view.animate().alpha(1f).setDuration(240).withEndAction(null).start();
+            return;
+        }
+        if (!animate || view.getVisibility() != View.VISIBLE || view.getAlpha() <= 0.02f) {
+            view.setAlpha(0f);
+            view.setVisibility(View.INVISIBLE);
+            return;
+        }
+        view.animate().alpha(0f).setDuration(220).withEndAction(new Runnable() {
+            @Override public void run() {
+                if (view.getAlpha() > 0.05f) return;
+                view.setVisibility(View.INVISIBLE);
+            }
+        }).start();
+    }
+
     private void setVoiceChrome(int mode, boolean animate) {
         if (!voiceFullMode) return;
         View slot = voiceChrome != null ? voiceChrome : voiceWaves;
         if (slot == null) return;
-        voiceChromeMode = mode;
         boolean listen = mode == 1;
         boolean think = mode == 2;
+        voiceChromeMode = mode;
         int target = mode == 0 ? 0 : voiceListenSlotHeight();
         if (voiceStatus != null && (listen || think)) voiceStatus.setVisibility(View.GONE);
-        if (voiceWaves != null) {
-            voiceWaves.animate().cancel();
-            if (listen) voiceWaves.setVisibility(View.VISIBLE);
-            voiceWaves.animate().alpha(listen ? 1f : 0f).setDuration(animate ? 220 : 0).start();
+        if (voiceChrome != null && think && voiceThinkJump != null) voiceChrome.bringChildToFront(voiceThinkJump);
+        else if (voiceChrome != null && listen && voiceWaves != null) voiceChrome.bringChildToFront(voiceWaves);
+        fadeVoiceChild(voiceWaves, listen, animate);
+        if (think && voiceThinkJump != null) {
+            voiceThinkJump.word = ToolText.ensureEllipsis("thinking");
+            voiceThinkJump.jumpStartMs = android.os.SystemClock.uptimeMillis();
+            voiceThinkJump.bind(null);
+            voiceThinkJump.invalidate();
         }
-        if (voiceThinkJump != null) {
-            voiceThinkJump.animate().cancel();
-            if (think) {
-                voiceThinkJump.setVisibility(View.VISIBLE);
-                voiceThinkJump.word = ToolText.ensureEllipsis("thinking");
-                if (voiceThinkJump.jumpStartMs == 0L) voiceThinkJump.jumpStartMs = android.os.SystemClock.uptimeMillis();
-                voiceThinkJump.bind(null);
-            }
-            voiceThinkJump.animate().alpha(think ? 1f : 0f).setDuration(animate ? 220 : 0).start();
-        }
-        animateViewHeight(slot, target, animate);
+        fadeVoiceChild(voiceThinkJump, think, animate);
+        animateViewHeight(slot, target, true);
         if (listen && voiceWaves != null) setVoiceLevel(Math.max(0.12f, voiceWaves.level));
     }
 
@@ -10175,6 +10245,7 @@ public class MainActivity extends Activity {
         String word = "thinking...";
         Msg bound;
         long jumpStartMs = 0L;
+        int waveBase = 135;
         final Paint wavePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         final Runnable tick = new Runnable() { @Override public void run() { animateJump(); } };
         public JumpTextView(Context c) {
@@ -10208,14 +10279,11 @@ public class MainActivity extends Activity {
         }
         private void animateJump() {
             if (!isAttachedToWindow()) return;
-            if (!isShown()) {
-                postDelayed(tick, 90);
-                return;
-            }
             invalidate();
             postDelayed(tick, 32);
         }
         @Override protected void onDraw(Canvas c) {
+            if (getWidth() <= 0 || getHeight() <= 2) return;
             String w = word == null || word.length() == 0 ? "thinking..." : word;
             long start;
             if (bound != null && bound.jumpAnimStartMs > 0L) start = bound.jumpAnimStartMs;
@@ -10231,7 +10299,7 @@ public class MainActivity extends Activity {
             long elapsed = Math.max(0L, android.os.SystemClock.uptimeMillis() - start);
             double cycle = (elapsed / 1000.0) / periodSec;
             final float ampPx = 2.6f * uiScale();
-            final int baseR = 135, baseG = 135, baseB = 135;
+            final int baseR = waveBase, baseG = waveBase, baseB = waveBase;
             Paint tp = getPaint();
             wavePaint.set(tp);
             wavePaint.setAntiAlias(true);
