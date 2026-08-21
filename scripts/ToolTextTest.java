@@ -357,6 +357,10 @@ public class ToolTextTest {
         assertTrue("wait transcribing", ToolText.isVoiceWaitStatus("transcribing"));
         assertTrue("wait speaking", ToolText.isVoiceWaitStatus("speaking"));
         assertTrue("wait thinking dots", ToolText.isVoiceWaitStatus("thinking..."));
+        assertEq("wait pulse 0", "thinking.", ToolText.voiceWaitPulse(0));
+        assertEq("wait pulse 1", "thinking..", ToolText.voiceWaitPulse(1));
+        assertEq("wait pulse 2", "thinking...", ToolText.voiceWaitPulse(2));
+        assertEq("wait pulse wraps", "thinking.", ToolText.voiceWaitPulse(3));
         assertTrue("wait recording wav", ToolText.isVoiceWaitStatus("recording wav"));
         assertTrue("wait retrying speech", ToolText.isVoiceWaitStatus("retrying speech"));
         assertTrue("error speech failed is not wait", !ToolText.isVoiceWaitStatus("speech failed"));
