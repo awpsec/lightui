@@ -361,6 +361,11 @@ public class ToolTextTest {
         assertEq("wait pulse 1", "thinking..", ToolText.voiceWaitPulse(1));
         assertEq("wait pulse 2", "thinking...", ToolText.voiceWaitPulse(2));
         assertEq("wait pulse wraps", "thinking.", ToolText.voiceWaitPulse(3));
+        assertTrue("skip fill starts at zero", ToolText.voiceSkipHoldProgress(0f, 0, true) == 0f);
+        assertTrue("skip fill halfway", Math.abs(ToolText.voiceSkipHoldProgress(0f, 280, true) - 0.5f) < 0.02f);
+        assertTrue("skip fill completes", ToolText.voiceSkipHoldComplete(ToolText.voiceSkipHoldProgress(0f, 560, true)));
+        assertTrue("skip drain empties", ToolText.voiceSkipHoldProgress(1f, 840, false) == 0f);
+        assertTrue("skip drain slower than fill", ToolText.VOICE_SKIP_DRAIN_MS > ToolText.VOICE_SKIP_FILL_MS);
         assertTrue("wait recording wav", ToolText.isVoiceWaitStatus("recording wav"));
         assertTrue("wait retrying speech", ToolText.isVoiceWaitStatus("retrying speech"));
         assertTrue("error speech failed is not wait", !ToolText.isVoiceWaitStatus("speech failed"));

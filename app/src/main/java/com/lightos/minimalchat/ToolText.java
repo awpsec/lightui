@@ -1965,6 +1965,20 @@ public final class ToolText {
         return "thinking...";
     }
 
+    public static final long VOICE_SKIP_FILL_MS = 560;
+    public static final long VOICE_SKIP_DRAIN_MS = 840;
+
+    public static float voiceSkipHoldProgress(float from, long elapsedMs, boolean filling) {
+        long span = filling ? VOICE_SKIP_FILL_MS : VOICE_SKIP_DRAIN_MS;
+        if (span <= 0L) return filling ? 1f : 0f;
+        float to = filling ? from + elapsedMs / (float) span : from - elapsedMs / (float) span;
+        if (to < 0f) return 0f;
+        if (to > 1f) return 1f;
+        return to;
+    }
+
+    public static boolean voiceSkipHoldComplete(float progress) { return progress >= 0.999f; }
+
     /**
      * SpeechRecognizer onRmsChanged is typically -2..10 dB. Device silence is
      * often 0 dB, not -2, so keep 0 dB idle. Speech starts around 2..4.
