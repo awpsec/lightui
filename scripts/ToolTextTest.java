@@ -353,6 +353,17 @@ public class ToolTextTest {
         assertEq("latest url",
                 "https://github.com/awpsec/lightui/releases/latest/download/lightui-release.apk", apkUrls[1]);
 
+        assertTrue("wait listening", ToolText.isVoiceWaitStatus("listening"));
+        assertTrue("wait transcribing", ToolText.isVoiceWaitStatus("transcribing"));
+        assertTrue("wait speaking", ToolText.isVoiceWaitStatus("speaking"));
+        assertTrue("wait thinking dots", ToolText.isVoiceWaitStatus("thinking..."));
+        assertTrue("wait recording wav", ToolText.isVoiceWaitStatus("recording wav"));
+        assertTrue("wait retrying speech", ToolText.isVoiceWaitStatus("retrying speech"));
+        assertTrue("error speech failed is not wait", !ToolText.isVoiceWaitStatus("speech failed"));
+        assertTrue("error transcribe failed is not wait", !ToolText.isVoiceWaitStatus("transcribe failed"));
+        assertTrue("prompt need contacts is not wait", !ToolText.isVoiceWaitStatus("need contacts access"));
+        assertTrue("prompt who to call is not wait", !ToolText.isVoiceWaitStatus("who should i call?"));
+
         assertTrue("silence rms stays low", ToolText.voiceVisualFromRmsDb(-2f) <= 0.08f);
         assertTrue("talking rms is strong", ToolText.voiceVisualFromRmsDb(2f) >= 0.55f);
         assertTrue("talking rms beats old /12 map", ToolText.voiceVisualFromRmsDb(2f) > (2f + 2f) / 12f + 0.15f);
