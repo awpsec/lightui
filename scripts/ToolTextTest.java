@@ -372,6 +372,15 @@ public class ToolTextTest {
         assertTrue("gate quiet is zero", ToolText.voiceGateFromPeak(0) == 0f);
         assertTrue("gate floor peak is quiet", ToolText.voicePeakIsQuiet(1500));
         assertTrue("gate speech peak", ToolText.voicePeakIsSpeech(8000));
+        assertTrue("mid rms is not speech", !ToolText.voiceRmsIsSpeech(1.8f));
+        assertTrue("mid rms does not hold listen", !ToolText.voiceRmsHoldsListen(1.8f));
+        assertTrue("zero rms does not hold listen", !ToolText.voiceRmsHoldsListen(0f));
+        assertTrue("talking rms holds listen", ToolText.voiceRmsHoldsListen(3f));
+        assertTrue("mid peak does not hold listen", !ToolText.voicePeakHoldsListen(2800));
+        assertTrue("floor peak does not hold listen", !ToolText.voicePeakHoldsListen(1500));
+        assertTrue("talking peak holds listen", ToolText.voicePeakHoldsListen(8000));
+        assertTrue("two frames not enough speech", !ToolText.voiceHeardEnoughSpeech(2));
+        assertTrue("three frames is speech", ToolText.voiceHeardEnoughSpeech(3));
         assertTrue("gate quiet unchanged ratio", Math.abs(ToolText.voiceGateFromPeak(1120) - 1120 / 14000f) < 0.001f);
         assertTrue("visual peak idle at floor", ToolText.voiceVisualFromPeak(1200) <= 0.08f);
         assertTrue("visual peak speech is strong", ToolText.voiceVisualFromPeak(8000) >= 0.45f);

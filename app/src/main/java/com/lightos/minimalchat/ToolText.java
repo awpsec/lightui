@@ -1985,6 +1985,13 @@ public final class ToolText {
 
     public static boolean voiceRmsIsSpeech(float rmsdB) { return rmsdB >= 2.2f; }
 
+    /** Mid-band mic floor is not speech, so it must not keep the listen chrome open. */
+    public static boolean voiceRmsHoldsListen(float rmsdB) { return voiceRmsIsSpeech(rmsdB); }
+
+    public static boolean voicePeakHoldsListen(int peak) { return voicePeakIsSpeech(peak); }
+
+    public static boolean voiceHeardEnoughSpeech(int speechFrames) { return speechFrames >= 3; }
+
     public static float followVoiceShown(float shown, float level) {
         float k = level > shown ? 0.72f : 0.38f;
         return shown + (level - shown) * k;

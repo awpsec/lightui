@@ -6533,15 +6533,10 @@ public class MainActivity extends Activity {
             @Override public void onBeginningOfSpeech() { }
             @Override public void onRmsChanged(float rmsdB) {
                 setVoiceLevel(ToolText.voiceVisualFromRmsDb(rmsdB));
-                long now = System.currentTimeMillis();
-                if (ToolText.voiceRmsIsSpeech(rmsdB)) { recorderSpeechFrames++; quietSince = 0; }
-                else if (now - recordingStartedAt > 900 && ToolText.voiceRmsIsQuiet(rmsdB)) {
-                    if (quietSince == 0) quietSince = now;
-                    if (now - quietSince > 1400 && voiceAwaitingSpeechResult && recorderSpeechFrames < 3 && voiceChromeMode != 2) idleVoiceAfterMiss();
-                } else if (!ToolText.voiceRmsIsQuiet(rmsdB)) quietSince = 0;
+                noteVoiceListenLevel(ToolText.voiceRmsHoldsListen(rmsdB), false);
             }
             @Override public void onBufferReceived(byte[] buffer) { }
-            @Override public void onEndOfSpeech() { vibrateInputEnded(); startVoiceThinking(); setVoiceLevel(0.03f); }
+            @Override public void onEndOfSpeech() { finishListenEndpoint(); }
             @Override public void onError(int error) { handleVoiceMiss(); }
             @Override public void onResults(Bundle results) { handleVoiceResults(results); }
             @Override public void onPartialResults(Bundle partialResults) { showPartialVoice(partialResults); }
@@ -6551,6 +6546,9 @@ public class MainActivity extends Activity {
         i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
         i.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
         i.putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, getPackageName());
+        i.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 1800);
+        i.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1200);
+        i.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 900);
         speechRecognizer.startListening(i);
     }
 
@@ -6590,13 +6588,46 @@ public class MainActivity extends Activity {
     private void showPartialVoice(Bundle partialResults) {
         ArrayList<String> r = partialResults.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
         if (r != null && r.size() > 0) {
+            String partial = r.get(0) == null ? "" : r.get(0).trim();
+            if (partial.length() >= 3) recorderSpeechFrames = Math.max(recorderSpeechFrames, 3);
             if (voiceFullMode) {
                 String hist = voiceHistoryText();
-                String partial = r.get(0).trim();
                 setVoiceText((hist.length() > 0 ? hist + "\n\n" : "") + "you\n" + partial);
                 if (voiceText != null) voiceText.setAlpha(0.82f);
             } else setVoiceText(r.get(0));
         }
+    }
+
+    private void noteVoiceListenLevel(boolean speech, boolean stopRecorderOnQuiet) {
+        long now = System.currentTimeMillis();
+        if (speech) {
+            recorderSpeechFrames++;
+            quietSince = 0;
+            return;
+        }
+        if (now - recordingStartedAt <= 800) return;
+        if (quietSince == 0) quietSince = now;
+        if (now - quietSince <= 1200 || !voiceAwaitingSpeechResult || voiceChromeMode == 2) return;
+        if (ToolText.voiceHeardEnoughSpeech(recorderSpeechFrames)) {
+            if (stopRecorderOnQuiet && recordingFallback) stopRecorder(true);
+            return;
+        }
+        idleVoiceAfterMiss();
+    }
+
+    private void finishListenEndpoint() {
+        setVoiceLevel(0.03f);
+        if (ToolText.voiceHeardEnoughSpeech(recorderSpeechFrames)) {
+            vibrateInputEnded();
+            startVoiceThinking();
+            return;
+        }
+        final int session = voiceSession, run = voiceListenRun;
+        ui.postDelayed(new Runnable() { @Override public void run() {
+            if (!voiceSessionActive(session) || run != voiceListenRun || !voiceAwaitingSpeechResult) return;
+            if (ToolText.voiceHeardEnoughSpeech(recorderSpeechFrames) || voiceChromeMode == 2) return;
+            idleVoiceAfterMiss();
+        } }, 450);
     }
 
     private void handleVoiceMiss() {
@@ -7008,15 +7039,9 @@ public class MainActivity extends Activity {
         try {
             int amp = mediaRecorder.getMaxAmplitude();
             setVoiceLevel(ToolText.voiceVisualFromPeak(amp));
-            if (ToolText.voicePeakIsSpeech(amp)) recorderSpeechFrames++;
+            noteVoiceListenLevel(ToolText.voicePeakHoldsListen(amp), true);
             long now = System.currentTimeMillis();
             if (now - recordingStartedAt > 12000) { stopRecorder(true); return; }
-            if (now - recordingStartedAt > 800) {
-                if (ToolText.voicePeakIsQuiet(amp)) {
-                    if (quietSince == 0) quietSince = now;
-                    if (now - quietSince > 1200) { stopRecorder(true); return; }
-                } else quietSince = 0;
-            }
         } catch (Exception ignored) { }
         ui.postDelayed(new Runnable() { @Override public void run() { animateRecorderLevel(); } }, 80);
     }
@@ -7068,16 +7093,13 @@ public class MainActivity extends Activity {
                     max = Math.max(max, Math.abs(sample));
                 }
                 final float visual = ToolText.voiceVisualFromPeak(max);
-                if (ToolText.voicePeakIsSpeech(max)) recorderSpeechFrames++;
+                final boolean speech = ToolText.voicePeakHoldsListen(max);
                 long now = System.currentTimeMillis();
                 if (now - recordingStartedAt > 12000) ui.post(new Runnable() { @Override public void run() { stopRecorder(true); } });
-                if (now - recordingStartedAt > 800) {
-                    if (ToolText.voicePeakIsQuiet(max)) {
-                        if (quietSince == 0) quietSince = now;
-                        if (now - quietSince > 1200) ui.post(new Runnable() { @Override public void run() { stopRecorder(true); } });
-                    } else quietSince = 0;
-                }
-                ui.post(new Runnable() { @Override public void run() { setVoiceLevel(visual); } });
+                ui.post(new Runnable() { @Override public void run() {
+                    setVoiceLevel(visual);
+                    noteVoiceListenLevel(speech, true);
+                } });
             }
             writeWavHeader(out, sampleRate, pcmBytes);
             out.close();
