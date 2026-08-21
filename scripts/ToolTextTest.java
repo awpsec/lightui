@@ -20,7 +20,7 @@ public class ToolTextTest {
         else System.out.println("ok   " + name);
     }
 
-    public static void main(String[] args) {
+    public static void main(String[] args) throws Exception {
         String tool = "Sure.\n<tool_call><function=web_search><parameter=query>lakers score</parameter></function></tool_call>";
         assertEq("strip tool call", "Sure.", ToolText.stripToolCalls(tool));
         assertEq("query from tool", "lakers score", ToolText.webSearchToolQuery(tool));
@@ -620,6 +620,58 @@ public class ToolTextTest {
         for (int i = 0; i < liveFour.size(); i++) {
             assertTrue("four-endpoint catalog row unchanged", liveCopy.get(i).equals(liveFour.get(i)));
         }
+
+        String orModels = "https://openrouter.ai/api/v1/models";
+        assertEq("models list default is text catalog", orModels,
+                ToolText.modelsListUrl("https://openrouter.ai/api/v1/", ""));
+        assertEq("models list transcription filter", orModels + "?output_modalities=transcription",
+                ToolText.modelsListUrl("https://openrouter.ai/api/v1", "transcription"));
+        assertEq("models list speech filter", orModels + "?output_modalities=speech",
+                ToolText.modelsListUrl("https://openrouter.ai/api/v1", "speech"));
+
+        String nemo = "nvidia/nemotron-3.5-asr-streaming-multilingual-0.6b";
+        String nemoName = "NVIDIA: Nemotron 3.5 ASR Streaming Multilingual 0.6B";
+        assertTrue("asr search is stt keyword", ToolText.isSttSearch("asr"));
+        assertTrue("ASR case-insensitive", ToolText.isSttSearch("ASR"));
+        assertTrue("whisper search is stt keyword", ToolText.isSttSearch("whisper"));
+        assertTrue("nemotron looks like stt", ToolText.looksLikeStt(nemo, nemoName, ""));
+        assertTrue("nemotron is stt without prior tag", ToolText.isSttModel(nemo, nemoName, false));
+        assertTrue("old whisper-only matcher would miss nemotron",
+                !nemo.toLowerCase().contains("whisper") && !nemo.toLowerCase().contains("transcrib")
+                        && !nemo.toLowerCase().contains("stt"));
+        JSONObject nemoJson = new JSONObject();
+        nemoJson.put("architecture", new JSONObject()
+                .put("input_modalities", new JSONArray().put("audio"))
+                .put("output_modalities", new JSONArray().put("transcription")));
+        assertTrue("nemotron has transcription output", ToolText.hasTranscriptionOutput(nemoJson));
+        assertTrue("nemotron has audio input", ToolText.hasAudioInput(nemoJson, nemo, nemoName, ""));
+        assertTrue("nemotron is not speech tts", !ToolText.hasSpeechOutput(nemoJson));
+        assertTrue("asr haystack contains slug",
+                ToolText.voiceSearchHaystack(nemo, nemoName, "", "asr transcription").toLowerCase().contains("asr"));
+
+        JSONObject speechJson = new JSONObject();
+        speechJson.put("architecture", new JSONObject()
+                .put("input_modalities", new JSONArray().put("text"))
+                .put("output_modalities", new JSONArray().put("speech")));
+        assertTrue("speech modality is audio output",
+                ToolText.hasAudioOutput(speechJson, "fish-audio/s1", "Fish Audio: S1", ""));
+        assertTrue("speech modality tagged", ToolText.hasSpeechOutput(speechJson));
+        assertTrue("fish s1 looks like tts", ToolText.looksLikeTts("fish-audio/s1", "Fish Audio: S1", ""));
+        assertTrue("fish transcribe is stt not tts",
+                ToolText.looksLikeStt("fish-audio/transcribe-1", "Fish Audio: Transcribe 1", "")
+                        && !ToolText.looksLikeTts("fish-audio/transcribe-1", "Fish Audio: Transcribe 1", ""));
+        assertTrue("tts search keyword", ToolText.isTtsSearch("tts"));
+        assertTrue("speech search is tts keyword", ToolText.isTtsSearch("speech"));
+        assertTrue("kokoro looks like tts", ToolText.looksLikeTts("hexgrad/kokoro-82m", "Kokoro 82M", ""));
+        JSONObject audioOutOnly = new JSONObject();
+        audioOutOnly.put("architecture", new JSONObject()
+                .put("output_modalities", new JSONArray().put("audio").put("text")));
+        assertTrue("chat audio still counts as audio out",
+                ToolText.hasAudioOutput(audioOutOnly, "openai/gpt-audio", "GPT Audio", ""));
+        assertTrue("chat audio is not dedicated speech",
+                !ToolText.hasSpeechOutput(audioOutOnly));
+        assertTrue("dedicated speech not chat-audio",
+                ToolText.dedicatedSpeechNotChatAudio("fish-audio/s1", "", true));
 
         if (failed > 0) { System.err.println(failed + " failed"); System.exit(1); }
         System.out.println("all passed");

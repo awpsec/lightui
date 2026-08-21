@@ -1208,6 +1208,128 @@ public final class ToolText {
         return base + "/chat/completions";
     }
 
+    /** OpenRouter `/models` defaults to text output, which hides STT/TTS catalogs. */
+    public static String modelsListUrl(String endpoint, String outputModality) {
+        String base = normalizeEndpoint(endpoint) + "/models";
+        String mod = outputModality == null ? "" : outputModality.trim();
+        if (mod.length() == 0) return base;
+        return base + "?output_modalities=" + mod;
+    }
+
+    public static boolean architectureHasModality(JSONObject model, String side, String want) {
+        if (model == null || want == null || want.length() == 0) return false;
+        JSONObject arch = model.optJSONObject("architecture");
+        if (arch == null) return false;
+        JSONArray arr = "output".equals(side) ? arch.optJSONArray("output_modalities") : arch.optJSONArray("input_modalities");
+        if (arr == null) {
+            String modality = arch.optString("modality", "").toLowerCase(Locale.US);
+            return modality.contains(want.toLowerCase(Locale.US));
+        }
+        String need = want.toLowerCase(Locale.US);
+        for (int i = 0; i < arr.length(); i++) {
+            if (need.equalsIgnoreCase(arr.optString(i, ""))) return true;
+        }
+        return false;
+    }
+
+    public static String voiceSearchHaystack(String id, String name, String description, String extra) {
+        StringBuilder b = new StringBuilder();
+        if (name != null && name.length() > 0) b.append(name).append('\n');
+        if (id != null && id.length() > 0) b.append(id).append('\n');
+        if (description != null && description.length() > 0) b.append(description).append('\n');
+        if (extra != null && extra.length() > 0) b.append(extra);
+        return b.toString();
+    }
+
+    public static boolean looksLikeStt(String id, String name, String description) {
+        String h = ((id == null ? "" : id) + "\n" + (name == null ? "" : name) + "\n" + (description == null ? "" : description)).toLowerCase(Locale.US);
+        return h.contains("whisper") || h.contains("transcrib") || h.contains("transcription") || h.contains("speech-to-text")
+                || h.contains("speech to text") || containsWord(h, "asr") || containsWord(h, "stt")
+                || h.contains("parakeet") || h.contains("chirp") || h.contains("speech recognition");
+    }
+
+    public static boolean looksLikeTts(String id, String name, String description) {
+        String h = ((id == null ? "" : id) + "\n" + (name == null ? "" : name) + "\n" + (description == null ? "" : description)).toLowerCase(Locale.US);
+        if (looksLikeStt(id, name, description) && h.indexOf("tts") < 0) return false;
+        return h.contains("tts") || h.contains("text-to-speech") || h.contains("text to speech")
+                || h.contains("speech synthesis") || h.contains("orpheus") || h.contains("kokoro")
+                || h.contains("lyria") || h.contains("voice clone") || h.contains("mai-voice")
+                || h.contains("csm-1b") || h.contains("fish-audio")
+                || (h.contains("speech") && h.contains("aura"));
+    }
+
+    public static boolean isSttModel(String model, String meta, boolean taggedStt) {
+        if (taggedStt) return true;
+        return looksLikeStt(model, "", meta == null ? "" : meta);
+    }
+
+    public static boolean isSpeechTtsModel(String model, String meta, boolean taggedSpeech, boolean taggedAudioOut) {
+        if (taggedSpeech) return true;
+        if (looksLikeTts(model, "", meta == null ? "" : meta)) return true;
+        return taggedAudioOut && looksLikeTts(model, "", meta == null ? "" : meta);
+    }
+
+    public static boolean isSttSearch(String q) {
+        String clean = q == null ? "" : q.toLowerCase(Locale.US).trim();
+        if (clean.length() == 0) return false;
+        if (clean.equals("stt") || clean.equals("asr") || clean.equals("whisper") || clean.equals("transcribe")
+                || clean.equals("transcription") || clean.equals("speech") || clean.equals("audio")) return true;
+        return clean.contains("asr") || clean.contains("stt") || clean.contains("whisper") || clean.contains("transcrib")
+                || clean.contains("speech-to-text") || clean.contains("speech to text");
+    }
+
+    public static boolean isTtsSearch(String q) {
+        String clean = q == null ? "" : q.toLowerCase(Locale.US).trim();
+        if (clean.length() == 0) return false;
+        if (clean.equals("tts") || clean.equals("speech") || clean.equals("voice") || clean.equals("audio") || clean.equals("speak")) return true;
+        return clean.contains("tts") || clean.contains("text-to-speech") || clean.contains("text to speech") || clean.contains("speech");
+    }
+
+    public static boolean dedicatedSpeechNotChatAudio(String model, String meta, boolean taggedSpeech) {
+        if (taggedSpeech) return true;
+        return looksLikeTts(model, "", meta == null ? "" : meta);
+    }
+
+    public static boolean hasAudioInput(JSONObject model, String id, String name, String description) {
+        if (architectureHasModality(model, "input", "audio")) return true;
+        if (architectureHasModality(model, "output", "transcription")) return true;
+        return looksLikeStt(id, name, description);
+    }
+
+    public static boolean hasAudioOutput(JSONObject model, String id, String name, String description) {
+        if (architectureHasModality(model, "output", "audio")) return true;
+        if (architectureHasModality(model, "output", "speech")) return true;
+        return looksLikeTts(id, name, description);
+    }
+
+    public static boolean hasTranscriptionOutput(JSONObject model) {
+        return architectureHasModality(model, "output", "transcription");
+    }
+
+    public static boolean hasSpeechOutput(JSONObject model) {
+        return architectureHasModality(model, "output", "speech");
+    }
+
+    private static boolean containsWord(String haystack, String word) {
+        if (haystack == null || word == null || word.length() == 0) return false;
+        int from = 0;
+        String w = word.toLowerCase(Locale.US);
+        String h = haystack.toLowerCase(Locale.US);
+        while (true) {
+            int at = h.indexOf(w, from);
+            if (at < 0) return false;
+            boolean startOk = at == 0 || !isIdentChar(h.charAt(at - 1));
+            int end = at + w.length();
+            boolean endOk = end >= h.length() || !isIdentChar(h.charAt(end));
+            if (startOk && endOk) return true;
+            from = at + 1;
+        }
+    }
+
+    private static boolean isIdentChar(char c) {
+        return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+    }
+
     public static boolean isKnownEndpoint(String endpoint, ArrayList<String> known) {
         String n = normalizeEndpoint(endpoint);
         if (n.length() == 0 || known == null) return false;
