@@ -118,7 +118,7 @@ public class MainActivity extends Activity {
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
     private static final String SEARCHING = "__searching__";
-    private static final String APP_VERSION = "1.0.47";
+    private static final String APP_VERSION = "1.0.48";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 48;
@@ -1820,6 +1820,13 @@ public class MainActivity extends Activity {
 
     private void addVoice(ArrayList<String> out, String voice) { String v = voice == null ? "" : voice.trim(); if (v.length() > 0 && !out.contains(v)) out.add(v); }
 
+    private void rememberCatalogVoices(String catalogId, String apiId, JSONObject model) {
+        ArrayList<String> voices = ToolText.parseSupportedVoices(model);
+        if (voices.size() == 0) return;
+        if (catalogId != null && catalogId.length() > 0) discoveredVoices.put("model:" + catalogId, new ArrayList<String>(voices));
+        if (apiId != null && apiId.length() > 0 && !apiId.equals(catalogId)) discoveredVoices.put("model:" + apiId, new ArrayList<String>(voices));
+    }
+
     private String endpointLabel(String endpoint) {
         String clean = normalizeEndpoint(endpoint);
         if (clean.length() == 0) return customEndpointBase().length() == 0 ? "none" : "default: " + shortEndpoint(customEndpointBase());
@@ -2086,7 +2093,7 @@ public class MainActivity extends Activity {
                     speechTtsModels.addAll(foundSpeech);
                     reasoningModels.addAll(reasoning);
                     speedModels.addAll(speed);
-                    saveModels(); saveModelContexts(); saveModelSources(); saveAudioOutputModels(); saveAudioInputModels(); saveSttModels(); saveSpeechTtsModels(); saveReasoningModels(); saveSpeedModels();
+                    saveModels(); saveModelContexts(); saveModelSources(); saveAudioOutputModels(); saveAudioInputModels(); saveSttModels(); saveSpeechTtsModels(); saveReasoningModels(); saveSpeedModels(); saveDiscoveredVoices();
                     status.setText("loaded " + found.size() + " openrouter " + (modality.length() > 0 ? modality : label) + " models");
                     render.run();
                 } });
@@ -2107,6 +2114,7 @@ public class MainActivity extends Activity {
         addKnownTtsModel(list, d, shown, q, "openai/gpt-4o-mini-tts", "openai: gpt-4o mini tts", "text-to-speech voice tts");
         addKnownTtsModel(list, d, shown, q, "mistralai/voxtral-mini-tts-2603", "mistral: voxtral mini tts", "mistral endpoint text-to-speech voice_id tts");
         addKnownTtsModel(list, d, shown, q, "google/gemini-3.1-flash-tts-preview", "google: gemini 3.1 flash tts preview", "text-to-speech voice tts");
+        addKnownTtsModel(list, d, shown, q, "x-ai/grok-voice-tts-1.0", "x-ai: grok voice tts 1.0", "fast text-to-speech tts eve ara rex sal leo");
         addKnownTtsModel(list, d, shown, q, "hexgrad/kokoro-82m", "hexgrad: kokoro 82m", "fast text-to-speech tts");
         addKnownTtsModel(list, d, shown, q, "deepgram/flux-tts:free", "deepgram: flux tts", "fast free text-to-speech tts");
         addKnownTtsModel(list, d, shown, q, "minimax/speech-2.8-turbo", "minimax: speech 2.8 turbo", "fast text-to-speech tts");
@@ -2193,14 +2201,23 @@ public class MainActivity extends Activity {
     private void promptVoiceCustom(final String pref, String hint) {
         final Dialog d = panel("custom");
         LinearLayout box = panelBox();
-        box.addView(panelTitle("custom model"));
+        boolean voice = "voiceTtsVoice".equals(pref);
+        box.addView(panelTitle(voice ? "custom voice" : "custom model"));
         final EditText e = panelEdit(hint);
         box.addView(e, new LinearLayout.LayoutParams(-1, dp(52)));
         LinearLayout actions = row();
         TextView cancel = panelAction("cancel");
         TextView save = panelAction("save");
         cancel.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); } });
-        save.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { String value = e.getText().toString().trim(); if (value.length() > 0) prefs.edit().putString(pref, value).apply(); d.dismiss(); showSettingsPane(); } });
+        save.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) {
+            String value = e.getText().toString().trim();
+            if (value.length() > 0) {
+                if (voice) rememberTypedVoice(value);
+                prefs.edit().putString(pref, value).apply();
+            }
+            d.dismiss();
+            showSettingsPane();
+        } });
         actions.addView(cancel, new LinearLayout.LayoutParams(0, dp(52), 1));
         actions.addView(save, new LinearLayout.LayoutParams(0, dp(52), 1));
         box.addView(actions);
@@ -2211,39 +2228,89 @@ public class MainActivity extends Activity {
         final Dialog d = panel("voice");
         LinearLayout box = panelBox();
         box.addView(panelTitle("voice"));
-        LinearLayout list = new LinearLayout(this);
+        final String model = currentVoiceOutputModel();
+        TextView which = text(shortModel(model).length() == 0 ? "no tts model selected" : shortModel(model), 11, Color.rgb(130,130,130));
+        which.setGravity(Gravity.CENTER_VERTICAL);
+        box.addView(which, new LinearLayout.LayoutParams(-1, dp(22)));
+        final EditText search = panelEdit("search or type");
+        search.setSingleLine(true);
+        search.setImeOptions(EditorInfo.IME_ACTION_DONE);
+        box.addView(search, new LinearLayout.LayoutParams(-1, dp(52)));
+        final TextView status = text("voices for this model", 11, Color.rgb(130,130,130));
+        status.setGravity(Gravity.CENTER_VERTICAL);
+        box.addView(status, new LinearLayout.LayoutParams(-1, dp(28)));
+        final LinearLayout list = new LinearLayout(this);
         list.setOrientation(LinearLayout.VERTICAL);
         ScrollView scroll = new ScrollView(this);
         scroll.setVerticalScrollBarEnabled(false);
         scroll.addView(list);
-        String[] voices = voiceNamesForModel(currentVoiceOutputModel());
-        for (int i = 0; i < voices.length; i++) {
-            final String voice = voices[i];
-            TextView item = panelItem(voice, "");
-            item.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { prefs.edit().putString("voiceTtsVoice", voice).apply(); d.dismiss(); showSettingsPane(); } });
-            list.addView(item);
-        }
-        TextView custom = panelItem("custom", "type voice name");
-        custom.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); promptVoiceCustom("voiceTtsVoice", "alloy"); } });
-        list.addView(custom);
         box.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        final Runnable[] render = new Runnable[1];
+        render[0] = new Runnable() { @Override public void run() {
+            list.removeAllViews();
+            final String typed = search.getText().toString().trim();
+            String q = typed.toLowerCase(Locale.US);
+            ArrayList<String> voices = voiceNameList(model);
+            String current = prefs.getString("voiceTtsVoice", "");
+            int shown = 0;
+            for (int i = 0; i < voices.size(); i++) {
+                final String voice = voices.get(i);
+                if (q.length() > 0 && voice.toLowerCase(Locale.US).indexOf(q) < 0) continue;
+                TextView item = panelItem(voice, voice.equalsIgnoreCase(current) ? "selected" : "");
+                item.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { setTtsVoice(voice); d.dismiss(); showSettingsPane(); } });
+                list.addView(item);
+                shown++;
+            }
+            boolean typedKnown = false;
+            for (int i = 0; i < voices.size(); i++) if (voices.get(i).equalsIgnoreCase(typed)) typedKnown = true;
+            if (typed.length() > 0 && !typedKnown) {
+                TextView use = panelItem("use " + typed, "custom voice for " + shortModel(model));
+                use.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { rememberTypedVoice(typed); setTtsVoice(typed); d.dismiss(); showSettingsPane(); } });
+                list.addView(use);
+                shown++;
+            }
+            TextView custom = panelItem("custom", "type any voice id");
+            custom.setOnClickListener(new View.OnClickListener() { @Override public void onClick(View v) { d.dismiss(); promptVoiceCustom("voiceTtsVoice", voices.size() > 0 ? voices.get(0) : "eve"); } });
+            list.addView(custom);
+            status.setText(shown + " shown · " + (voices.size() == 0 ? "type a voice id" : voices.size() + " for this model"));
+        } };
+        search.addTextChangedListener(new TextWatcher() { @Override public void beforeTextChanged(CharSequence s, int st, int c, int a) { } @Override public void onTextChanged(CharSequence s, int st, int b, int c) { render[0].run(); } @Override public void afterTextChanged(Editable e) { } });
+        render[0].run();
         showFullPanel(d, box);
+        if ("openrouter".equals(voiceOutputProvider())) loadOpenRouterVoiceModels(render[0], status, "tts");
+        search.requestFocus();
+        search.postDelayed(new Runnable() { @Override public void run() { ((InputMethodManager) getSystemService(INPUT_METHOD_SERVICE)).showSoftInput(search, InputMethodManager.SHOW_IMPLICIT); } }, 200);
+    }
+
+    private void setTtsVoice(String voice) {
+        String v = voice == null ? "" : voice.trim();
+        if (v.length() == 0) return;
+        prefs.edit().putString("voiceTtsVoice", v).apply();
+    }
+
+    private void rememberTypedVoice(String voice) {
+        String v = voice == null ? "" : voice.trim();
+        if (v.length() == 0) return;
+        String key = currentVoiceDiscoveryKey(currentVoiceOutputModel());
+        ArrayList<String> list = discoveredVoiceList(key);
+        addVoice(list, v);
+        discoveredVoices.put(key, list);
+        saveDiscoveredVoices();
+    }
+
+    private ArrayList<String> voiceNameList(String model) {
+        return ToolText.voiceNamesForModel(openRouterTtsModel(model), discoveredVoiceList(currentVoiceDiscoveryKey(model)), prefs.getString("voiceTtsVoice", ""));
     }
 
     private String[] voiceNamesForModel(String model) {
-        String lower = openRouterTtsModel(model).toLowerCase(Locale.US);
-        ArrayList<String> discovered = discoveredVoiceList(currentVoiceDiscoveryKey(model));
-        if (discovered.size() > 0) return discovered.toArray(new String[0]);
-        if (lower.contains("kokoro")) return new String[]{"af_heart", "af_alloy", "af_aoede", "af_bella", "af_jessica", "af_kore", "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky", "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam", "am_michael", "am_onyx", "am_puck", "am_santa", "bf_alice", "bf_emma", "bf_isabella", "bf_lily", "bm_daniel", "bm_fable", "bm_george", "bm_lewis"};
-        if (lower.contains("orpheus")) return new String[]{"tara", "leah", "jess", "leo", "dan", "mia", "zac", "zoe"};
-        if (lower.contains("voxtral")) { String saved = prefs.getString("voiceTtsVoice", "voice_id"); return (saved.length() > 0 && !"alloy".equals(saved)) ? new String[]{saved, "voice_id"} : new String[]{"voice_id"}; }
-        if (lower.contains("gemini")) return new String[]{"Zephyr", "Puck", "Charon", "Kore", "Fenrir", "Leda", "Orus", "Aoede", "Callirrhoe", "Autonoe", "Enceladus", "Iapetus", "Umbriel", "Algieba", "Despina", "Erinome", "Algenib", "Rasalgethi", "Laomedeia", "Achernar", "Alnilam", "Schedar", "Gacrux", "Pulcherrima", "Achird", "Zubenelgenubi", "Vindemiatrix", "Sadachbia", "Sadaltager", "Sulafat"};
-        if (lower.contains("openai") || lower.contains("gpt-4o") || lower.contains("tts-1")) return new String[]{"alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse"};
-        return new String[]{"alloy", "tara", "leah", "jess", "leo", "dan", "mia", "zac", "zoe", "aria", "breeze", "cove", "ember", "juniper", "maple", "sol", "spruce", "vale"};
+        ArrayList<String> voices = voiceNameList(model);
+        return voices.toArray(new String[0]);
     }
 
     private String currentVoiceOutputModel() { return "endpoint".equals(voiceOutputProvider()) ? prefs.getString("voiceEndpointTtsModel", "") : prefs.getString("voiceTtsModel", ""); }
-    private String currentVoiceDiscoveryKey(String model) { return "endpoint".equals(voiceOutputProvider()) ? "endpoint:" + voiceTtsEndpoint() : "model:" + openRouterTtsModel(model); }
+    private String currentVoiceDiscoveryKey(String model) {
+        return ToolText.voiceDiscoveryKey("endpoint".equals(voiceOutputProvider()), voiceTtsEndpoint(), openRouterTtsModel(model));
+    }
     private ArrayList<String> discoveredVoiceList(String key) { ArrayList<String> voices = discoveredVoices.get(key); return voices == null ? new ArrayList<String>() : new ArrayList<String>(voices); }
 
     private void addVoiceSpeedSetting(LinearLayout settings) {
@@ -2276,8 +2343,8 @@ public class MainActivity extends Activity {
     }
 
     private String defaultVoiceForModel(String model) {
-        String[] voices = voiceNamesForModel(model);
-        return voices.length == 0 ? "alloy" : voices[0];
+        ArrayList<String> voices = ToolText.voiceNamesForModel(openRouterTtsModel(model), discoveredVoiceList(currentVoiceDiscoveryKey(model)), "");
+        return voices.size() == 0 ? "" : voices.get(0);
     }
 
     private void addDisplaySettings(LinearLayout settings) {
@@ -6061,7 +6128,7 @@ public class MainActivity extends Activity {
                     reasoningModels.clear(); reasoningModels.addAll(foundReasoning); speedModels.clear(); speedModels.addAll(foundSpeed);
                     applyCatalogToMyModels(listedEndpoints);
                     retargetSelectedModelIfNeeded();
-                    saveCustomEndpoints(); saveEndpointKeys(); saveModels(); saveModelContexts(); saveModelSources(); saveModelEndpoints(); saveAudioOutputModels(); saveAudioInputModels(); saveSttModels(); saveSpeechTtsModels(); saveReasoningModels(); saveSpeedModels(); saveMyModels(); savePinnedModels();
+                    saveCustomEndpoints(); saveEndpointKeys(); saveModels(); saveModelContexts(); saveModelSources(); saveModelEndpoints(); saveAudioOutputModels(); saveAudioInputModels(); saveSttModels(); saveSpeechTtsModels(); saveReasoningModels(); saveSpeedModels(); saveMyModels(); savePinnedModels(); saveDiscoveredVoices();
                     prefs.edit().putLong("modelsRefreshedAt", System.currentTimeMillis()).apply();
                     if (manual) toast("models updated");
                     if (manual || pane == 2) renderPane();
@@ -6119,6 +6186,7 @@ public class MainActivity extends Activity {
             if (foundSpeech != null && (ToolText.hasSpeechOutput(model) || "speech".equals(outputModality) || ToolText.looksLikeTts(id, name, description))) foundSpeech.add(catalogId);
             if (foundReasoning != null && hasReasoningCapability(model, id, name, description)) foundReasoning.add(catalogId);
             if (foundSpeed != null && hasSpeedParameter(model, id, name, description)) foundSpeed.add(catalogId);
+            rememberCatalogVoices(catalogId, id, model);
             int context = model.optInt("context_length", 0);
             JSONObject top = model.optJSONObject("top_provider");
             if (context <= 0 && top != null) context = top.optInt("context_length", 0);
@@ -7992,10 +8060,8 @@ public class MainActivity extends Activity {
     }
 
     private String ttsVoiceForModel(String model) {
-        String voice = prefs.getString("voiceTtsVoice", "alloy");
-        String[] valid = voiceNamesForModel(model);
-        for (String v : valid) if (v.equals(voice)) return voice;
-        return valid.length == 0 ? voice : valid[0];
+        ArrayList<String> names = voiceNameList(model);
+        return ToolText.resolveSelectedVoice(prefs.getString("voiceTtsVoice", ""), names);
     }
 
     private String extractAudioBase64(JSONObject resp) throws Exception {
@@ -8914,6 +8980,9 @@ public class MainActivity extends Activity {
         }
         if (!prefs.getBoolean("voiceCatalogV1", false)) {
             prefs.edit().putBoolean("voiceCatalogV1", true).remove("modelsRefreshedAt").apply();
+        }
+        if (!prefs.getBoolean("ttsVoicesV1", false)) {
+            prefs.edit().putBoolean("ttsVoicesV1", true).remove("modelsRefreshedAt").apply();
         }
         saveModels();
         saveMyModels();
