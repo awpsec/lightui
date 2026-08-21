@@ -62,6 +62,7 @@ import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.TouchDelegate;
+import android.view.ViewConfiguration;
 import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
 import android.animation.ValueAnimator;
@@ -118,7 +119,7 @@ public class MainActivity extends Activity {
     private static final float BASE_WIDTH_DP = 360f;
     private static final String LOADING = "__loading__";
     private static final String SEARCHING = "__searching__";
-    private static final String APP_VERSION = "1.0.52";
+    private static final String APP_VERSION = "1.0.53";
     private static final String CHATS_STORE = "chats-store.json";
     private static final long PERSIST_DEBOUNCE_MS = 900;
     private static final long STREAM_RENDER_MIN_MS = 48;
@@ -188,13 +189,18 @@ public class MainActivity extends Activity {
     private File voiceFile;
     private FrameLayout voiceOverlay, voiceChrome;
     private ScrollView voiceTextScroll;
+    private LinearLayout voiceLog;
+    private TextView voiceLiveAssistant;
+    private Msg voiceLiveAssistantMsg;
+    private SkipRingView voiceSkipRing;
     private WaveView voiceWaves;
     private JumpTextView voiceThinkJump;
     private BorderWaveView voiceBorder;
-    private ValueAnimator voiceChromeHeightAnim;
+    private ValueAnimator voiceChromeHeightAnim, voiceSkipAnim;
     private int voiceChromeMode = 0, voiceRevealRun = 0, voiceRevealAt = 0, voiceSpeechFollowRun = 0, voiceWaitPulseRun = 0, voiceWaitPulseStep = 0;
-    private String voiceRevealTarget = "", voicePlain = "";
-    private boolean voiceWaitPulseOn = false;
+    private String voiceRevealTarget = "", voicePlain = "", voicePartialPending = "", voicePendingUser = "", voiceNotice = "", voiceLogBindKey = "";
+    private boolean voiceWaitPulseOn = false, voiceSkipHolding = false;
+    private float voiceSkipProgress = 0f, voiceSkipDownX = 0f, voiceSkipDownY = 0f;
     private final ArrayList<String> models = new ArrayList<String>();
     private final ArrayList<String> myModels = new ArrayList<String>();
     private final ArrayList<String> pinnedModels = new ArrayList<String>();
@@ -4663,6 +4669,7 @@ public class MainActivity extends Activity {
 
     private void maybeSpeakStreamingChunk(Msg assistant, String fullText, boolean finish) {
         if (!assistant.slowVoice || !voiceMode || !voiceFullMode || !prefs.getBoolean("voiceSpeak", true)) return;
+        if (assistant.ttsSkipped) return;
         if (assistant.voiceSessionId != 0 && assistant.voiceSessionId != voiceSession) return;
         if (isModelRefusal(fullText)) { assistant.ttsQueue.clear(); pauseVoiceAfterProviderFailure("model refused", "model refused\n" + fullText); return; }
         if (fullText == null) return;
@@ -4688,6 +4695,7 @@ public class MainActivity extends Activity {
 
     private void playNextQueuedSpeech(final Msg owner) {
         if (!voiceMode || !voiceFullMode) return;
+        if (owner.ttsSkipped) return;
         if (owner.voiceSessionId != 0 && owner.voiceSessionId != voiceSession) return;
         if (owner.ttsRequested || owner.ttsPlaying || owner.ttsQueue.size() == 0) return;
         if (owner.ttsPrefetching) {
@@ -4738,6 +4746,7 @@ public class MainActivity extends Activity {
 
     private void prefetchNextQueuedSpeech(final Msg owner) {
         if (!voiceMode || !voiceFullMode) return;
+        if (owner.ttsSkipped) return;
         if (owner.voiceSessionId != 0 && owner.voiceSessionId != voiceSession) return;
         if (owner.ttsRequested || owner.ttsPrefetching || owner.ttsQueue.size() == 0) return;
         final String text = owner.ttsQueue.get(0);
@@ -4776,13 +4785,13 @@ public class MainActivity extends Activity {
         }
         if (owner.ttsQueue.size() > 0) {
             updateVoiceStatus("continuing");
-            if (voiceText != null) setVoiceText(voiceText.getText().toString() + "\n\ntts skip: " + msg);
+            appendVoiceNotice("tts skip: " + msg);
             playNextQueuedSpeech(owner);
             prefetchNextQueuedSpeech(owner);
             return;
         }
         updateVoiceStatus(isModelRefusal(msg) ? "model refused" : "tts failed");
-        if (voiceText != null) setVoiceText(voiceText.getText().toString() + "\n\n" + (isModelRefusal(msg) ? "model refused: " : "tts: ") + msg);
+        appendVoiceNotice((isModelRefusal(msg) ? "model refused: " : "tts: ") + msg);
         owner.streamDone = true;
         ui.postDelayed(new Runnable() { @Override public void run() { finishVoiceResponse(); } }, 1200);
     }
@@ -4790,7 +4799,7 @@ public class MainActivity extends Activity {
     private void maybeFinishVoiceAfterTts(Msg owner) {
         if (!voiceMode || !voiceFullMode) return;
         if (owner.voiceSessionId != 0 && owner.voiceSessionId != voiceSession) return;
-        if (!owner.slowVoice) return;
+        if (!owner.slowVoice || owner.ttsSkipped) return;
         if (!prefs.getBoolean("voiceSpeak", true)) { finishVoiceResponse(); return; }
         if (owner.streamDone && !owner.ttsRequested && !owner.ttsPrefetching && !owner.ttsPlaying && owner.ttsQueue.size() == 0) finishVoiceResponse();
         else if (owner.streamDone && !owner.ttsRequested && !owner.ttsPlaying && owner.ttsQueue.size() > 0) playNextQueuedSpeech(owner);
@@ -6518,6 +6527,8 @@ public class MainActivity extends Activity {
         recorderSpeechFrames = 0;
         recordingStartedAt = System.currentTimeMillis();
         quietSince = 0;
+        voicePartialPending = "";
+        voiceNotice = "";
         setVoiceListenChrome(true, true);
         setVoiceLevel(0.03f);
         voiceAwaitingSpeechResult = true;
@@ -6592,9 +6603,8 @@ public class MainActivity extends Activity {
             String partial = r.get(0) == null ? "" : r.get(0).trim();
             if (partial.length() >= 3) recorderSpeechFrames = Math.max(recorderSpeechFrames, 3);
             if (voiceFullMode) {
-                String hist = voiceHistoryText();
-                setVoiceText((hist.length() > 0 ? hist + "\n\n" : "") + "you\n" + partial);
-                if (voiceText != null) voiceText.setAlpha(0.82f);
+                voicePartialPending = partial;
+                renderVoiceConversation();
             } else setVoiceText(r.get(0));
         }
     }
@@ -6673,8 +6683,11 @@ public class MainActivity extends Activity {
         if (clean.length() == 0) { idleVoiceAfterMiss(); return; }
         if (isModelRefusal(clean)) { pauseVoiceAfterProviderFailure("model refused", "model refused\n" + clean); return; }
         if (voiceFullMode && isBogusVoiceTranscript(clean)) { idleVoiceAfterMiss(); return; }
-        if (voiceFullMode) revealVoiceTranscript(clean);
-        else setVoiceText(clean);
+        if (voiceFullMode) {
+            voicePendingUser = clean;
+            voicePartialPending = "";
+            renderVoiceConversation();
+        } else setVoiceText(clean);
         if (voicePhoneCommandsEnabled()) {
             PhoneCommand phone = parseVoicePhoneCommand(clean);
             if (phone != null) {
@@ -7614,11 +7627,24 @@ public class MainActivity extends Activity {
         if (full) voiceStatus.setPadding(0, 0, 0, 0);
         if (full) voiceStatus.setBackgroundColor(Color.TRANSPARENT);
         if (full) voiceStatus.setVisibility(View.GONE);
-        voiceText = text("", full ? 16 : 12, Color.LTGRAY);
-        voiceText.setGravity(full ? (Gravity.TOP | Gravity.LEFT) : Gravity.CENTER);
-        if (full) voiceText.setPadding(0, dp(2), 0, dp(12));
-        voiceText.setLineSpacing(dp(4), 1.06f);
-        if (full) voiceText.setBackgroundColor(Color.TRANSPARENT);
+        voiceLog = null;
+        voiceLiveAssistant = null;
+        voiceLiveAssistantMsg = null;
+        voiceLogBindKey = "";
+        voicePartialPending = "";
+        voicePendingUser = "";
+        voiceNotice = "";
+        if (full) {
+            voiceText = null;
+            voiceLog = new LinearLayout(this);
+            voiceLog.setOrientation(LinearLayout.VERTICAL);
+            voiceLog.setBackgroundColor(Color.TRANSPARENT);
+            voiceLog.setPadding(dp(2), 0, dp(2), dp(8));
+        } else {
+            voiceText = text("", 12, Color.LTGRAY);
+            voiceText.setGravity(Gravity.CENTER);
+            voiceText.setLineSpacing(dp(4), 1.06f);
+        }
         TextView close = text("close", 13, Color.LTGRAY);
         close.setGravity(Gravity.CENTER);
         if (full) close.setBackgroundColor(Color.TRANSPARENT);
@@ -7635,7 +7661,7 @@ public class MainActivity extends Activity {
             voiceTextScroll = new ScrollView(this);
             voiceTextScroll.setVerticalScrollBarEnabled(false);
             voiceTextScroll.setBackgroundColor(Color.TRANSPARENT);
-            voiceTextScroll.addView(voiceText, new ScrollView.LayoutParams(-1, -2));
+            voiceTextScroll.addView(voiceLog, new ScrollView.LayoutParams(-1, -2));
             box.addView(voiceTextScroll, new LinearLayout.LayoutParams(-1, 0, 1));
         } else box.addView(voiceText, new LinearLayout.LayoutParams(-1, dp(44)));
         if (full) box.addView(voiceReply, new LinearLayout.LayoutParams(-1, dp(36)));
@@ -7643,6 +7669,13 @@ public class MainActivity extends Activity {
         FrameLayout.LayoutParams boxLp = full ? new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER) : new FrameLayout.LayoutParams(-1, dp(178), Gravity.BOTTOM);
         if (!full) boxLp.setMargins(dp(26), 0, dp(26), dp(76));
         voiceOverlay.addView(box, boxLp);
+        voiceSkipRing = null;
+        if (full) {
+            voiceSkipRing = new SkipRingView(this);
+            voiceOverlay.addView(voiceSkipRing, new FrameLayout.LayoutParams(-1, -1));
+            bindVoiceSkipTouch(box);
+            bindVoiceSkipTouch(voiceTextScroll);
+        }
         screen.addView(voiceOverlay, new FrameLayout.LayoutParams(-1, -1));
         voiceChromeMode = 0;
         voicePlain = "";
@@ -7666,8 +7699,13 @@ public class MainActivity extends Activity {
         stopRecorder(false);
         stopAllVoiceAudio();
         cancelVoiceChromeAnims();
+        haltVoiceSkipHold(true);
         if (voiceOverlay != null) { screen.removeView(voiceOverlay); voiceOverlay = null; }
         voiceTextScroll = null;
+        voiceLog = null;
+        voiceLiveAssistant = null;
+        voiceLiveAssistantMsg = null;
+        voiceSkipRing = null;
         voiceBorder = null;
         voiceChrome = null;
         voiceThinkJump = null;
@@ -7676,6 +7714,10 @@ public class MainActivity extends Activity {
         voiceChromeMode = 0;
         voicePlain = "";
         voiceRevealTarget = "";
+        voicePartialPending = "";
+        voicePendingUser = "";
+        voiceNotice = "";
+        voiceLogBindKey = "";
         voiceSpeechFollowRun++;
         if (hookVoiceMode && !isFinishing()) finish();
     }
@@ -7748,6 +7790,10 @@ public class MainActivity extends Activity {
         if (speechRecognizer != null) { speechRecognizer.destroy(); speechRecognizer = null; }
         if (voiceOverlay != null) { screen.removeView(voiceOverlay); voiceOverlay = null; }
         voiceTextScroll = null;
+        voiceLog = null;
+        voiceLiveAssistant = null;
+        voiceLiveAssistantMsg = null;
+        voiceSkipRing = null;
         voiceBorder = null;
         voiceChrome = null;
         voiceThinkJump = null;
@@ -7899,10 +7945,27 @@ public class MainActivity extends Activity {
     }
 
     private void setVoiceText(String s) {
+        if (voiceFullMode && voiceLog != null) {
+            voiceNotice = s == null ? "" : s;
+            renderVoiceConversation();
+            return;
+        }
         if (voiceText == null) return;
         voicePlain = s == null ? "" : s;
         voiceText.setText(markdownText(voicePlain));
         if (voiceTextScroll != null && !voiceChunkFollowActive()) voiceTextScroll.post(new Runnable() { @Override public void run() { voiceTextScroll.fullScroll(View.FOCUS_DOWN); } });
+    }
+
+    private void appendVoiceNotice(String s) {
+        if (s == null || s.length() == 0) return;
+        if (voiceFullMode && voiceLog != null) {
+            voiceNotice = s;
+            renderVoiceConversation();
+            return;
+        }
+        if (voiceText == null) return;
+        String cur = voiceText.getText() == null ? "" : voiceText.getText().toString();
+        setVoiceText((cur.length() == 0 ? "" : cur + "\n\n") + s);
     }
 
     private boolean voiceChunkFollowActive() {
@@ -7911,25 +7974,18 @@ public class MainActivity extends Activity {
 
     private boolean voiceHoldThinkUntilSpeech(Msg assistant) {
         return assistant != null && assistant.slowVoice && voiceMode && voiceFullMode
-                && prefs != null && prefs.getBoolean("voiceSpeak", true) && !assistant.ttsStarted;
+                && prefs != null && prefs.getBoolean("voiceSpeak", true) && !assistant.ttsStarted && !assistant.ttsSkipped;
     }
 
     private void followVoiceChunk(final Msg owner, final String chunk) {
-        if (!voiceMode || !voiceFullMode || voiceTextScroll == null || voiceText == null || owner == null || chunk == null || chunk.trim().length() == 0) return;
+        if (!voiceMode || !voiceFullMode || voiceTextScroll == null || owner == null) return;
         if (owner.voiceSessionId != 0 && owner.voiceSessionId != voiceSession) return;
         final int session = voiceSession;
         voiceTextScroll.post(new Runnable() { @Override public void run() {
-            if (voiceTextScroll == null || voiceText == null || !voiceSessionActive(session)) return;
-            String all = voiceText.getText().toString();
-            int at = voiceChunkIndex(all, chunk);
-            if (at < 0) return;
-            android.text.Layout layout = voiceText.getLayout();
-            if (layout == null) { voiceText.post(new Runnable() { @Override public void run() { followVoiceChunk(owner, chunk); } }); return; }
-            int line = layout.getLineForOffset(Math.max(0, Math.min(at, all.length())));
+            if (voiceTextScroll == null || !voiceSessionActive(session)) return;
             View child = voiceTextScroll.getChildAt(0);
             int max = child == null ? 0 : Math.max(0, child.getHeight() - voiceTextScroll.getHeight());
-            int y = Math.max(0, layout.getLineTop(line) - voiceTextScroll.getHeight() / 3);
-            voiceTextScroll.smoothScrollTo(0, Math.min(max, y));
+            voiceTextScroll.smoothScrollTo(0, max);
         } });
     }
 
@@ -7944,11 +8000,279 @@ public class MainActivity extends Activity {
     }
 
     private void renderVoiceConversation() {
+        if (voiceFullMode && voiceLog != null) {
+            renderVoiceLog();
+            if (voiceWaitingForReply()) kickVoiceWaitPulse();
+            return;
+        }
         if (voiceText == null) return;
         if (voiceRevealTarget.length() > 0 && voiceRevealAt < voiceRevealTarget.length()) return;
         setVoiceText(voiceConversationText(true));
         if (voiceText != null) voiceText.setAlpha(1f);
         if (voiceWaitingForReply()) kickVoiceWaitPulse();
+    }
+
+    private String voiceLogBindKey() {
+        String lastUser = "";
+        int lastAsst = 0;
+        int n = 0;
+        int start = Math.max(0, messages.size() - 12);
+        for (int i = start; i < messages.size(); i++) {
+            Msg m = messages.get(i);
+            if ("user".equals(m.role)) lastUser = m.text == null ? "" : m.text;
+            if ("assistant".equals(m.role)) lastAsst = System.identityHashCode(m);
+            n++;
+        }
+        return n + "|" + lastUser + "|" + lastAsst + "|" + voicePendingUser + "|" + voicePartialPending + "|" + voiceNotice + "|" + voiceWaitingForReply();
+    }
+
+    private void renderVoiceLog() {
+        if (voiceLog == null) return;
+        String key = voiceLogBindKey();
+        Msg lastAsst = lastVoiceAssistant();
+        String live = lastAsst == null ? "" : voiceAssistantVisible(lastAsst);
+        if (live.length() == 0 && voiceWaitingForReply()) live = ToolText.voiceWaitPulse(voiceWaitPulseStep);
+        if (key.equals(voiceLogBindKeyStored()) && voiceLiveAssistant != null && voiceLiveAssistantMsg == lastAsst) {
+            voiceLiveAssistant.setText(markdownText(live));
+            scrollVoiceLogDown();
+            return;
+        }
+        voiceLogBindKey = key;
+        voiceLog.removeAllViews();
+        voiceLiveAssistant = null;
+        voiceLiveAssistantMsg = null;
+        boolean pendingShown = false;
+        int start = Math.max(0, messages.size() - 12);
+        for (int i = start; i < messages.size(); i++) {
+            Msg m = messages.get(i);
+            if ("user".equals(m.role)) {
+                String body = m.text == null ? "" : m.text;
+                if (body.length() == 0) continue;
+                if (body.equals(voicePendingUser)) pendingShown = true;
+                voiceLog.addView(voiceUserBlock(body, false), userMessageBlockParams());
+                continue;
+            }
+            String body = voiceAssistantVisible(m);
+            boolean waitHere = false;
+            if (body.length() == 0 || isBusyStats(m.stats) && ".".equals(body)) {
+                if (m == lastAsst && voiceWaitingForReply()) {
+                    body = ToolText.voiceWaitPulse(voiceWaitPulseStep);
+                    waitHere = true;
+                } else continue;
+            }
+            View row = voiceAssistantBlock(m, body, waitHere || m == lastAsst);
+            voiceLog.addView(row, assistantVoiceBlockParams());
+        }
+        if (voicePendingUser.length() > 0 && !pendingShown) {
+            voiceLog.addView(voiceUserBlock(voicePendingUser, false), userMessageBlockParams());
+            pendingShown = true;
+        }
+        if (voicePartialPending.length() > 0 && voiceAwaitingSpeechResult) {
+            voiceLog.addView(voiceUserBlock(voicePartialPending, true), userMessageBlockParams());
+        }
+        if (lastAsst == null && voiceWaitingForReply()) {
+            View wait = voiceAssistantBlock(null, ToolText.voiceWaitPulse(voiceWaitPulseStep), true);
+            voiceLog.addView(wait, assistantVoiceBlockParams());
+        }
+        if (voiceNotice.length() > 0) {
+            TextView note = cardText(voiceNotice, 13, Color.rgb(150, 150, 150));
+            note.setPadding(dp(2), dp(8), dp(2), dp(4));
+            voiceLog.addView(note, new LinearLayout.LayoutParams(-1, -2));
+        }
+        scrollVoiceLogDown();
+    }
+
+    private String voiceLogBindKeyStored() { return voiceLogBindKey == null ? "" : voiceLogBindKey; }
+
+    private Msg lastVoiceAssistant() {
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            Msg m = messages.get(i);
+            if ("assistant".equals(m.role)) return m;
+        }
+        return null;
+    }
+
+    private View voiceUserBlock(String bodyText, boolean pending) {
+        TextView body = cardText(bodyText == null ? "" : bodyText, 16, Color.WHITE);
+        body.setLineSpacing(dp(2), 1.0f);
+        View wrap = userMessageBlock(body, null);
+        if (pending) wrap.setAlpha(0.82f);
+        return wrap;
+    }
+
+    private LinearLayout.LayoutParams assistantVoiceBlockParams() {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.setMargins(dp(2), dp(8), dp(2), dp(6));
+        return lp;
+    }
+
+    private View voiceAssistantBlock(Msg m, String bodyText, boolean live) {
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        col.setBackgroundColor(Color.TRANSPARENT);
+        TextView role = cardText(m == null ? "assistant" : messageModelLabel(m), 11, Color.rgb(125, 125, 125));
+        role.setPadding(0, 0, 0, dp(3));
+        col.addView(role, new LinearLayout.LayoutParams(-1, -2));
+        if (m != null && m.streamDone && m.memorySaved) {
+            TextView mem = cardText("memory saved", 11, Color.rgb(125, 125, 125));
+            mem.setPadding(0, 0, 0, dp(2));
+            col.addView(mem, new LinearLayout.LayoutParams(-1, -2));
+        }
+        TextView body = cardText(bodyText == null ? "" : bodyText, 16, Color.rgb(186, 186, 186));
+        body.setLineSpacing(dp(3), 1.04f);
+        col.addView(body, new LinearLayout.LayoutParams(-1, -2));
+        if (live) {
+            voiceLiveAssistant = body;
+            voiceLiveAssistantMsg = m;
+        }
+        return col;
+    }
+
+    private void scrollVoiceLogDown() {
+        if (voiceTextScroll == null) return;
+        voiceTextScroll.post(new Runnable() { @Override public void run() {
+            if (voiceTextScroll == null) return;
+            voiceTextScroll.fullScroll(View.FOCUS_DOWN);
+        } });
+    }
+
+    private void bindVoiceSkipTouch(View view) {
+        if (view == null) return;
+        view.setOnTouchListener(new View.OnTouchListener() {
+            @Override public boolean onTouch(View v, MotionEvent e) {
+                handleVoiceSkipTouch(v, e);
+                return false;
+            }
+        });
+    }
+
+    private boolean voiceSpeechSkippable() {
+        if (!voiceMode || !voiceFullMode) return false;
+        if (voiceAwaitingSpeechResult) return false;
+        Msg owner = activeTtsOwner != null ? activeTtsOwner : lastVoiceAssistant();
+        if (owner == null || owner.ttsSkipped) return false;
+        if (owner.ttsPlaying || owner.ttsRequested || owner.ttsPrefetching || owner.ttsQueue.size() > 0) return true;
+        return owner.ttsStarted && owner.text != null && owner.ttsHeardChars < owner.text.length();
+    }
+
+    private void handleVoiceSkipTouch(View source, MotionEvent e) {
+        int action = e.getActionMasked();
+        if (action == MotionEvent.ACTION_DOWN) {
+            if (!voiceSpeechSkippable()) return;
+            voiceSkipDownX = e.getRawX();
+            voiceSkipDownY = e.getRawY();
+            placeVoiceSkipRing(source, e);
+            runVoiceSkipHold(true);
+            return;
+        }
+        if (!voiceSkipHolding && voiceSkipProgress <= 0.01f) return;
+        if (action == MotionEvent.ACTION_MOVE) {
+            placeVoiceSkipRing(source, e);
+            float slop = ViewConfiguration.get(this).getScaledTouchSlop();
+            float dx = e.getRawX() - voiceSkipDownX, dy = e.getRawY() - voiceSkipDownY;
+            if (dx * dx + dy * dy > slop * slop) runVoiceSkipHold(false);
+            return;
+        }
+        if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) runVoiceSkipHold(false);
+    }
+
+    private void placeVoiceSkipRing(View source, MotionEvent e) {
+        if (voiceSkipRing == null || source == null) return;
+        int[] src = new int[2], dst = new int[2];
+        source.getLocationOnScreen(src);
+        voiceSkipRing.getLocationOnScreen(dst);
+        voiceSkipRing.cx = e.getX() + src[0] - dst[0];
+        voiceSkipRing.cy = e.getY() + src[1] - dst[1];
+        voiceSkipRing.invalidate();
+    }
+
+    private void runVoiceSkipHold(boolean filling) {
+        if (voiceSkipAnim != null) {
+            voiceSkipAnim.cancel();
+            voiceSkipAnim = null;
+        }
+        voiceSkipHolding = filling;
+        if (!filling && voiceSkipProgress <= 0.01f) {
+            voiceSkipProgress = 0f;
+            if (voiceSkipRing != null) { voiceSkipRing.progress = 0f; voiceSkipRing.invalidate(); }
+            return;
+        }
+        if (filling && !voiceSpeechSkippable()) {
+            haltVoiceSkipHold(true);
+            return;
+        }
+        final boolean fill = filling;
+        float from = voiceSkipProgress;
+        float to = fill ? 1f : 0f;
+        long span = fill ? ToolText.VOICE_SKIP_FILL_MS : ToolText.VOICE_SKIP_DRAIN_MS;
+        long dur = Math.max(16L, Math.round(Math.abs(to - from) * span));
+        ValueAnimator a = ValueAnimator.ofFloat(from, to);
+        a.setDuration(dur);
+        a.setInterpolator(new DecelerateInterpolator(fill ? 1.2f : 1.7f));
+        a.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
+            @Override public void onAnimationUpdate(ValueAnimator animation) {
+                voiceSkipProgress = (Float) animation.getAnimatedValue();
+                if (voiceSkipRing != null) {
+                    voiceSkipRing.progress = voiceSkipProgress;
+                    voiceSkipRing.invalidate();
+                }
+            }
+        });
+        a.addListener(new AnimatorListenerAdapter() {
+            boolean canceled;
+            @Override public void onAnimationEnd(Animator animation) {
+                if (voiceSkipAnim == animation) voiceSkipAnim = null;
+                if (canceled) return;
+                if (fill && ToolText.voiceSkipHoldComplete(voiceSkipProgress)) {
+                    ui.post(new Runnable() { @Override public void run() { skipVoiceSpeech(); } });
+                }
+                if (!fill) voiceSkipHolding = false;
+            }
+            @Override public void onAnimationCancel(Animator animation) {
+                canceled = true;
+                if (voiceSkipAnim == animation) voiceSkipAnim = null;
+            }
+        });
+        voiceSkipAnim = a;
+        a.start();
+    }
+
+    private void skipVoiceSpeech() {
+        Msg owner = activeTtsOwner != null ? activeTtsOwner : lastVoiceAssistant();
+        if (owner == null || owner.ttsSkipped) {
+            haltVoiceSkipHold(true);
+            return;
+        }
+        owner.ttsSkipped = true;
+        haltVoiceSkipHold(true);
+        vibrateShort(18);
+        String full = owner.text == null ? "" : owner.text;
+        stopAllVoiceAudio();
+        owner.ttsStarted = true;
+        owner.ttsHeardChars = full.length();
+        owner.ttsPlaying = false;
+        owner.ttsRequested = false;
+        owner.ttsPrefetching = false;
+        owner.ttsQueue.clear();
+        stopVoiceThinking();
+        renderVoiceConversation();
+        if (prefs != null && prefs.getBoolean("voiceLoop", true)) beginListening();
+        else if (voiceReply != null) voiceReply.setVisibility(View.VISIBLE);
+    }
+
+    private void haltVoiceSkipHold(boolean instant) {
+        voiceSkipHolding = false;
+        if (voiceSkipAnim != null) {
+            voiceSkipAnim.cancel();
+            voiceSkipAnim = null;
+        }
+        if (instant) {
+            voiceSkipProgress = 0f;
+            if (voiceSkipRing != null) {
+                voiceSkipRing.progress = 0f;
+                voiceSkipRing.invalidate();
+            }
+        }
     }
 
     private String voiceConversationText(boolean includeWait) {
@@ -8019,6 +8343,7 @@ public class MainActivity extends Activity {
         if (m == null) return "";
         String full = m.text == null ? "" : m.text;
         if (full.length() == 0) return "";
+        if (m.ttsSkipped) return full;
         if (!m.slowVoice || !voiceMode || !voiceFullMode || !prefs.getBoolean("voiceSpeak", true)) return full;
         int n = Math.min(full.length(), Math.max(0, m.ttsHeardChars));
         return n <= 0 ? "" : full.substring(0, n);
@@ -8181,6 +8506,7 @@ public class MainActivity extends Activity {
 
     private void speakResponse(String text, final Msg owner) {
         if (!voiceMode) return;
+        if (owner != null && owner.ttsSkipped) return;
         fadeVoiceWaves();
         if (!voiceFullMode) { setVoiceText(text); updateVoiceStatus("done"); return; }
         if (!prefs.getBoolean("voiceSpeak", true)) {
@@ -8218,7 +8544,13 @@ public class MainActivity extends Activity {
                 } });
             } catch (Exception e) {
                 final String msg = friendlyError(e);
-                runOnUiThread(new Runnable() { @Override public void run() { if (!voiceSessionActive(session)) return; if (owner != null) owner.ttsRequested = false; updateVoiceStatus(isModelRefusal(msg) ? "model refused" : "tts: " + msg); if (voiceText != null) setVoiceText(voiceText.getText().toString() + "\n\n" + (isModelRefusal(msg) ? "model refused: " : "tts: ") + msg); ui.postDelayed(new Runnable() { @Override public void run() { finishVoiceResponse(); } }, 1200); } });
+                runOnUiThread(new Runnable() { @Override public void run() {
+                    if (!voiceSessionActive(session)) return;
+                    if (owner != null) owner.ttsRequested = false;
+                    updateVoiceStatus(isModelRefusal(msg) ? "model refused" : "tts: " + msg);
+                    appendVoiceNotice((isModelRefusal(msg) ? "model refused: " : "tts: ") + msg);
+                    ui.postDelayed(new Runnable() { @Override public void run() { finishVoiceResponse(); } }, 1200);
+                } });
             }
         } }).start();
     }
@@ -8618,7 +8950,7 @@ public class MainActivity extends Activity {
 
     private void showTtsPlaybackError(String detail, boolean finish) {
         updateVoiceStatus("tts playback failed");
-        if (voiceText != null) setVoiceText(voiceText.getText().toString() + "\n\ntts playback failed: " + detail);
+        appendVoiceNotice("tts playback failed: " + detail);
         if (finish) ui.postDelayed(new Runnable() { @Override public void run() { finishVoiceResponse(); } }, 1800);
     }
 
@@ -10495,7 +10827,38 @@ public class MainActivity extends Activity {
             fill.setStrokeWidth(stroke);
             c.drawCircle(cx, cy, r, track);
             float sweep = Math.max(0f, Math.min(360f, percent * 3.6f));
-            if (sweep > 0.5f) c.drawArc(cx - r, cy - r, cx + r, cy + r, -90, sweep, false, fill);
+            if (sweep > 0.5f)             c.drawArc(cx - r, cy - r, cx + r, cy + r, -90, sweep, false, fill);
+        }
+    }
+    public class SkipRingView extends View {
+        Paint track = new Paint(Paint.ANTI_ALIAS_FLAG);
+        Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
+        float progress = 0f, cx = 0f, cy = 0f;
+        public SkipRingView(Context c) {
+            super(c);
+            setClickable(false);
+            setFocusable(false);
+            setWillNotDraw(false);
+            setBackgroundColor(Color.TRANSPARENT);
+            track.setStyle(Paint.Style.STROKE);
+            track.setStrokeWidth(1);
+            track.setColor(Color.rgb(72, 72, 72));
+            fill.setStyle(Paint.Style.STROKE);
+            fill.setStrokeWidth(1);
+            fill.setStrokeCap(Paint.Cap.BUTT);
+            fill.setColor(Color.WHITE);
+        }
+        @Override public boolean onTouchEvent(MotionEvent e) { return false; }
+        @Override protected void onDraw(Canvas c) {
+            if (progress <= 0.01f) return;
+            int w = getWidth(), h = getHeight();
+            float x = cx, y = cy;
+            if (x <= 1f || y <= 1f) { x = w / 2f; y = h / 2f; }
+            float r = dp(18);
+            track.setAlpha(Math.round(90 + progress * 90));
+            c.drawCircle(x, y, r, track);
+            float sweep = Math.max(0f, Math.min(360f, progress * 360f));
+            if (sweep > 1f) c.drawArc(x - r, y - r, x + r, y + r, -90, sweep, false, fill);
         }
     }
     public static class AttachedImage {
@@ -10530,7 +10893,7 @@ public class MainActivity extends Activity {
     }
     public static class Msg {
         String role, text, imageBase64 = "", imageMime = "", stats, model, replyQuote, reasoning = "", memorySavedText = "";
-        boolean slowVoice = false, reasoningCapable = false, thinkingExpanded = false, searchExpanded = false, memorySaved = false, memoryExpanded = false, ttsRequested = false, ttsPrefetching = false, ttsStarted = false, ttsPlaying = false, ttsStartDelayDone = false, streamDone = false, skipImagesInRequest = false;
+        boolean slowVoice = false, reasoningCapable = false, thinkingExpanded = false, searchExpanded = false, memorySaved = false, memoryExpanded = false, ttsRequested = false, ttsPrefetching = false, ttsStarted = false, ttsPlaying = false, ttsStartDelayDone = false, ttsSkipped = false, streamDone = false, skipImagesInRequest = false;
         int spokenChars = 0, ttsHeardChars = 0, ttsPlaybackFailures = 0, voiceSessionId = 0, thinkingAnimStep = 0, promptTokens = 0, toolTokens = 0;
         long startedAt = 0, thoughtMs = 0, jumpAnimStartMs = 0;
         String jumpAnimWord = "";
